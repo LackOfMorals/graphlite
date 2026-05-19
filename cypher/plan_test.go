@@ -258,6 +258,9 @@ func TestDeleteNodePlan_DetachFlag(t *testing.T) {
 	if normal.Detach {
 		t.Error("expected Detach=false for DELETE")
 	}
+	if detach.Variable != "n" {
+		t.Errorf("unexpected Variable on detach plan: %q", detach.Variable)
+	}
 	if !detach.Detach {
 		t.Error("expected Detach=true for DETACH DELETE")
 	}
