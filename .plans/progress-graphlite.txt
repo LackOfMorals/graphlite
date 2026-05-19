@@ -59,3 +59,33 @@ Key Decisions:
   for journal_mode — test accounts for this.
 
 Next Task: task-004 (SQLite storage implementation: node/edge CRUD and transactions)
+
+================================================================================
+TASK-004: SQLite storage implementation: node/edge CRUD and transactions
+Date: 2026-05-19T12:00:00Z
+================================================================================
+
+Summary:
+Added comprehensive unit tests for the store package CRUD operations and
+transactions in store/crud_test.go. The implementation in store/sqlite.go was
+already complete from task-003; this task formalised the full test coverage
+required by the acceptance criteria: stable ElementId contracts, index hint
+verification via EXPLAIN QUERY PLAN, all CRUD operations for nodes and edges,
+and multi-mutation transaction rollback semantics.
+
+Files Changed:
+- store/crud_test.go (created — 27 tests covering all node/edge CRUD operations
+  and transaction scenarios; includes EXPLAIN QUERY PLAN index verification)
+
+Key Decisions:
+- Kept all new tests in a separate file (crud_test.go) rather than expanding the
+  existing store_test.go to avoid a single oversized test file.
+- openMemory() and insertTestNodes() helpers avoid boilerplate across all tests.
+- TestListNodesByLabelIndexHint uses EXPLAIN QUERY PLAN directly against DB() to
+  assert idx_nodes_labels is in the query plan — avoids relying on row counts alone.
+- TestTxMultipleMutationsRollback covers both insert-rollback and delete-rollback
+  in a single transaction, the most complex scenario.
+- ids map in TestListNodesByLabel is populated but its values are not read back;
+  this is intentional (the assertion is on result count, not specific IDs).
+
+Next Task: task-005 (Integrate cloudprivacylabs/opencypher parser and audit coverage)

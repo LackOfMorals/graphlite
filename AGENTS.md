@@ -103,3 +103,6 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - In-memory SQLite DBs report `journal_mode = "memory"` even after `PRAGMA journal_mode=WAL` — WAL requires a file. File-based DBs correctly report `"wal"`.
 - The `store` package uses a `querier` interface (ExecContext/QueryContext/QueryRowContext) to share CRUD helpers between `*sql.DB` and `*sql.Tx` — avoids duplicating all methods on `sqliteTx`.
 - `modernc.org/sqlite` is a direct import in `store/sqlite.go`; declare it as a direct (non-indirect) dependency in `go.mod`.
+- Use `EXPLAIN QUERY PLAN SELECT ... WHERE labels = ?` to assert that `idx_nodes_labels` is used; scan the `detail` column (4th column) for the index name.
+- Assigning to a map inside a `range` loop (e.g. `m[k] = v`) is considered a "use" by Go; the compiler will not flag the variable as unused even if values are never read back.
+- `store_test.go` covers schema/WAL/lifecycle; `crud_test.go` covers all CRUD and transaction tests — split for readability.
