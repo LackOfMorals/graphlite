@@ -310,22 +310,6 @@ func mapColumnValue(v any) any {
 	}
 }
 
-// nodeJSON is the JSON layout emitted by the translator for a whole-node projection.
-type nodeJSON struct {
-	ID     any    `json:"id"`
-	Labels string `json:"labels"`
-	Props  string `json:"props"` // nested JSON object
-}
-
-// relJSON is the JSON layout emitted by the translator for a whole-rel projection.
-type relJSON struct {
-	ID      any    `json:"id"`
-	Type    string `json:"type"`
-	StartID any    `json:"start_id"`
-	EndID   any    `json:"end_id"`
-	Props   string `json:"props"` // nested JSON object
-}
-
 // tryParseNode attempts to decode a JSON string as a node object.
 // Returns nil if the JSON does not match the node shape.
 func tryParseNode(s string) *Node {
