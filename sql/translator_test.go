@@ -32,16 +32,6 @@ func translateCypher(t *testing.T, query string) sqldialect.Result {
 	return result
 }
 
-// assertSQL fails if result.SQL does not equal want (case-insensitive trim).
-func assertSQL(t *testing.T, result sqldialect.Result, want string) {
-	t.Helper()
-	got := strings.TrimSpace(result.SQL)
-	want = strings.TrimSpace(want)
-	if got != want {
-		t.Errorf("SQL mismatch:\n got:  %s\nwant: %s", got, want)
-	}
-}
-
 // containsAll fails if result.SQL does not contain all of the given substrings.
 func containsAll(t *testing.T, result sqldialect.Result, substrings ...string) {
 	t.Helper()
