@@ -1472,36 +1472,6 @@ func TestPlanner_CreateRelWithParamProps(t *testing.T) {
 
 // ─── task-011: Planner SET property, DELETE, and DETACH DELETE ───────────────
 
-// asSetProp unwraps a plan as *SetPropPlan; fails otherwise.
-func asSetProp(t *testing.T, plan cypher.LogicalPlan) *cypher.SetPropPlan {
-	t.Helper()
-	sp, ok := plan.(*cypher.SetPropPlan)
-	if !ok {
-		t.Fatalf("expected *SetPropPlan, got %T", plan)
-	}
-	return sp
-}
-
-// asDeleteNode unwraps a plan as *DeleteNodePlan; fails otherwise.
-func asDeleteNode(t *testing.T, plan cypher.LogicalPlan) *cypher.DeleteNodePlan {
-	t.Helper()
-	dn, ok := plan.(*cypher.DeleteNodePlan)
-	if !ok {
-		t.Fatalf("expected *DeleteNodePlan, got %T", plan)
-	}
-	return dn
-}
-
-// asDeleteRel unwraps a plan as *DeleteRelPlan; fails otherwise.
-func asDeleteRel(t *testing.T, plan cypher.LogicalPlan) *cypher.DeleteRelPlan {
-	t.Helper()
-	dr, ok := plan.(*cypher.DeleteRelPlan)
-	if !ok {
-		t.Fatalf("expected *DeleteRelPlan, got %T", plan)
-	}
-	return dr
-}
-
 // ─── test 54: SET n.prop = literal value ─────────────────────────────────────
 
 func TestPlanner_SetPropertyLiteral(t *testing.T) {
