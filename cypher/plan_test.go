@@ -52,6 +52,9 @@ func TestMatchNodePlan_Fields(t *testing.T) {
 	if plan.SQLAlias != "n0" {
 		t.Errorf("unexpected SQLAlias: %q", plan.SQLAlias)
 	}
+	if plan.Optional {
+		t.Error("expected Optional=false")
+	}
 
 	nameProp, ok := plan.Props["name"]
 	if !ok {
@@ -90,6 +93,18 @@ func TestMatchRelPlan_Fields(t *testing.T) {
 				ToRight:     tc.toRight,
 				ToLeft:      tc.toLeft,
 				Undirected:  tc.undirected,
+			}
+			if plan.RelVariable != "r" {
+				t.Errorf("RelVariable: want %q got %q", "r", plan.RelVariable)
+			}
+			if len(plan.Types) != 1 || plan.Types[0] != "KNOWS" {
+				t.Errorf("Types: want [KNOWS] got %v", plan.Types)
+			}
+			if plan.RelSQLAlias != "r0" {
+				t.Errorf("RelSQLAlias: want %q got %q", "r0", plan.RelSQLAlias)
+			}
+			if plan.StartVar != "a" || plan.EndVar != "b" {
+				t.Errorf("StartVar/EndVar: want a/b got %q/%q", plan.StartVar, plan.EndVar)
 			}
 			if plan.ToRight != tc.toRight {
 				t.Errorf("ToRight: want %v got %v", tc.toRight, plan.ToRight)
@@ -173,6 +188,9 @@ func TestCreateNodePlan_Fields(t *testing.T) {
 		},
 	}
 
+	if plan.Variable != "n" {
+		t.Errorf("unexpected Variable: %q", plan.Variable)
+	}
 	if len(plan.Labels) != 2 {
 		t.Fatalf("expected 2 labels, got %d", len(plan.Labels))
 	}
@@ -195,11 +213,17 @@ func TestCreateRelPlan_Fields(t *testing.T) {
 		Props:       map[string]Expr{"since": &LiteralExpr{Value: int64(2020)}},
 	}
 
+	if plan.RelVariable != "r" {
+		t.Errorf("unexpected RelVariable: %q", plan.RelVariable)
+	}
 	if plan.Type != "KNOWS" {
 		t.Errorf("unexpected Type: %q", plan.Type)
 	}
 	if plan.StartVar != "a" || plan.EndVar != "b" {
 		t.Errorf("unexpected start/end: %q %q", plan.StartVar, plan.EndVar)
+	}
+	if _, ok := plan.Props["since"]; !ok {
+		t.Error("missing 'since' prop")
 	}
 }
 
@@ -228,6 +252,9 @@ func TestDeleteNodePlan_DetachFlag(t *testing.T) {
 	normal := &DeleteNodePlan{Variable: "n", Detach: false}
 	detach := &DeleteNodePlan{Variable: "n", Detach: true}
 
+	if normal.Variable != "n" {
+		t.Errorf("unexpected Variable: %q", normal.Variable)
+	}
 	if normal.Detach {
 		t.Error("expected Detach=false for DELETE")
 	}
