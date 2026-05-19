@@ -27,6 +27,11 @@ func Open(uri string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("store: open %q: %w", uri, err)
 	}
 
+	// SQLite supports only one writer at a time and ":memory:" databases are
+	// per-connection. A pool size of 1 ensures all operations share a single
+	// connection, which is correct for both file-based and in-memory databases.
+	db.SetMaxOpenConns(1)
+
 	// Enable WAL mode for better concurrent-reader performance.
 	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
 		_ = db.Close()

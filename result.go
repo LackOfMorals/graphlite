@@ -94,8 +94,9 @@ func (r *QueryResult) Err() error {
 
 // Consume drains any remaining records, closes the underlying *sql.Rows, and
 // returns the ResultSummary. After Consume returns the cursor is closed.
+// Consume is safe to call on a write result (where rows is nil).
 func (r *QueryResult) Consume(_ context.Context) (ResultSummary, error) {
-	if !r.consumed {
+	if !r.consumed && r.rows != nil {
 		// Drain remaining rows so we can release the cursor cleanly.
 		for r.rows.Next() {
 		}
@@ -104,13 +105,16 @@ func (r *QueryResult) Consume(_ context.Context) (ResultSummary, error) {
 		}
 		r.consumed = true
 	}
-	if err := r.rows.Close(); err != nil && r.err == nil {
-		r.err = err
+	if r.rows != nil {
+		if err := r.rows.Close(); err != nil && r.err == nil {
+			r.err = err
+		}
 	}
 	return &resultSummary{counters: r.counters}, r.err
 }
 
 // Collect drains all remaining records into a slice and closes the cursor.
+// Collect is safe to call on a write result (where rows is nil).
 func (r *QueryResult) Collect(ctx context.Context) ([]*Record, error) {
 	var recs []*Record
 	for r.Next(ctx) {
@@ -120,8 +124,10 @@ func (r *QueryResult) Collect(ctx context.Context) ([]*Record, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
-	if err := r.rows.Close(); err != nil {
-		return nil, err
+	if r.rows != nil {
+		if err := r.rows.Close(); err != nil {
+			return nil, err
+		}
 	}
 	r.consumed = true
 	return recs, nil

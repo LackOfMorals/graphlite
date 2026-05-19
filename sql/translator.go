@@ -17,6 +17,37 @@ import (
 	"github.com/LackOfMorals/graphlite/cypher"
 )
 
+// StatementKind classifies a Statement so the execution layer can dispatch it
+// correctly without parsing the SQL string.
+type StatementKind int
+
+const (
+	// KindSelect is a read-only SELECT query. The execution layer calls
+	// QueryContext and wraps the rows in a QueryResult.
+	KindSelect StatementKind = iota
+	// KindMatchForWrite is a SELECT emitted as the first step in a MATCH+write
+	// sequence. It returns one column per matched variable, named by the Cypher
+	// variable name, containing the row's integer id. The execution layer runs
+	// this first to populate the idMap before executing write statements.
+	KindMatchForWrite
+	// KindInsertNode is INSERT INTO nodes. After execution, LastInsertId() is
+	// bound to CreatedVar in the execution layer's idMap.
+	KindInsertNode
+	// KindInsertEdge is INSERT INTO edges.
+	KindInsertEdge
+	// KindUpdate is UPDATE nodes/edges SET …
+	KindUpdate
+	// KindDeleteGuard is SELECT COUNT(*) used as a guard before a non-detach node
+	// delete. The execution layer aborts if the count is > 0.
+	KindDeleteGuard
+	// KindDeleteEdges is DELETE FROM edges …
+	KindDeleteEdges
+	// KindDeleteNodes is DELETE FROM nodes …
+	KindDeleteNodes
+	// KindExec is any other DML statement.
+	KindExec
+)
+
 // Statement is a single parameterised SQL statement together with its bind
 // arguments. Write operations that require multiple statements (e.g.
 // DETACH DELETE, or a compound CREATE) return multiple Statements.
@@ -25,6 +56,19 @@ type Statement struct {
 	SQL string
 	// Args is the ordered slice of values to bind to the placeholders.
 	Args []any
+	// Kind classifies the statement so the execution layer can dispatch without
+	// string-matching on SQL prefixes.
+	Kind StatementKind
+	// CreatedVar is the Cypher variable name whose ID is produced by an INSERT
+	// statement (e.g. "n" for CREATE (n:Label)). Empty for non-INSERT statements.
+	// The execution layer uses this to map last-insert rowids back to variables
+	// so subsequent idSentinel references can be resolved.
+	CreatedVar string
+	// MatchedVars is populated on KindMatchForWrite statements. Each entry maps
+	// a Cypher variable name to the column alias in the SELECT result that
+	// contains its integer id. The execution layer scans each row and populates
+	// idMap[varName] = id for every row returned.
+	MatchedVars map[string]string
 }
 
 // Result carries the output of a single translation pass.
@@ -90,7 +134,7 @@ func (t *Translator) Translate(plan cypher.LogicalPlan, scope *cypher.BindingSco
 	if err != nil {
 		return Result{}, err
 	}
-	stmt := Statement{SQL: sqlStr, Args: t.args}
+	stmt := Statement{SQL: sqlStr, Args: t.args, Kind: KindSelect}
 	return Result{SQL: sqlStr, Args: t.args, Statements: []Statement{stmt}}, nil
 }
 
@@ -491,8 +535,21 @@ func (t *Translator) buildSelectList(projections []cypher.ProjectionItem, scope 
 		if err != nil {
 			return "", fmt.Errorf("sql: SELECT projection: %w", err)
 		}
-		if proj.Alias != "" {
-			colSQL += " AS " + proj.Alias
+		alias := proj.Alias
+		// When no explicit alias is given, use the variable name for VarExpr and
+		// PropExpr projections so the result column is named predictably.
+		if alias == "" {
+			switch e := proj.Expr.(type) {
+			case *cypher.VarExpr:
+				alias = e.Name
+			case *cypher.PropExpr:
+				// Use underscore separator to produce a valid SQL identifier
+				// (dot is not valid in unquoted column aliases).
+				alias = e.Variable + "_" + e.Property
+			}
+		}
+		if alias != "" {
+			colSQL += " AS " + alias
 		}
 		parts = append(parts, colSQL)
 	}
@@ -657,7 +714,13 @@ func BindParams(result Result, params map[string]any) (Result, error) {
 		if err != nil {
 			return result, err
 		}
-		newStmts[i] = Statement{SQL: stmt.SQL, Args: resolvedArgs}
+		newStmts[i] = Statement{
+			SQL:         stmt.SQL,
+			Args:        resolvedArgs,
+			Kind:        stmt.Kind,
+			CreatedVar:  stmt.CreatedVar,
+			MatchedVars: stmt.MatchedVars,
+		}
 	}
 	out := Result{
 		Statements: newStmts,
@@ -773,7 +836,7 @@ func (t *Translator) translateCreateNode(p *cypher.CreateNodePlan, scope *cypher
 	args = append(args, propsArgs...)
 
 	sql := fmt.Sprintf("INSERT INTO nodes (labels, props) VALUES (?, json(%s))", propsJSON)
-	return Statement{SQL: sql, Args: args}, nil
+	return Statement{SQL: sql, Args: args, Kind: KindInsertNode, CreatedVar: p.Variable}, nil
 }
 
 // translateCreateRel emits:
@@ -820,7 +883,7 @@ func (t *Translator) translateCreateRel(p *cypher.CreateRelPlan, scope *cypher.B
 	args = append(args, propsArgs...)
 
 	sql := fmt.Sprintf("INSERT INTO edges (type, start_id, end_id, props) VALUES (?, ?, ?, json(%s))", propsJSON)
-	return Statement{SQL: sql, Args: args}, nil
+	return Statement{SQL: sql, Args: args, Kind: KindInsertEdge}, nil
 }
 
 // translateSetProp emits:
@@ -857,7 +920,7 @@ func (t *Translator) translateSetProp(p *cypher.SetPropPlan, scope *cypher.Bindi
 	args = append(args, idSentinel{VarName: p.Variable, Alias: binding.Alias}) // WHERE id = ?
 
 	sql := fmt.Sprintf("UPDATE %s SET props = %s WHERE id = ?", table, jsonSetExpr)
-	return Statement{SQL: sql, Args: args}, nil
+	return Statement{SQL: sql, Args: args, Kind: KindUpdate}, nil
 }
 
 // translateDeleteNode emits the SQL for DELETE / DETACH DELETE of a node.
@@ -888,10 +951,12 @@ func (t *Translator) translateDeleteNode(p *cypher.DeleteNodePlan, scope *cypher
 		edgesStmt := Statement{
 			SQL:  "DELETE FROM edges WHERE start_id = ? OR end_id = ?",
 			Args: []any{sentinel, sentinel},
+			Kind: KindDeleteEdges,
 		}
 		nodeStmt := Statement{
 			SQL:  "DELETE FROM nodes WHERE id = ?",
 			Args: []any{sentinel},
+			Kind: KindDeleteNodes,
 		}
 		return []Statement{edgesStmt, nodeStmt}, nil
 	}
@@ -900,10 +965,12 @@ func (t *Translator) translateDeleteNode(p *cypher.DeleteNodePlan, scope *cypher
 	guardStmt := Statement{
 		SQL:  "SELECT COUNT(*) FROM edges WHERE start_id = ? OR end_id = ?",
 		Args: []any{sentinel, sentinel},
+		Kind: KindDeleteGuard,
 	}
 	nodeStmt := Statement{
 		SQL:  "DELETE FROM nodes WHERE id = ?",
 		Args: []any{sentinel},
+		Kind: KindDeleteNodes,
 	}
 	return []Statement{guardStmt, nodeStmt}, nil
 }
@@ -921,15 +988,22 @@ func (t *Translator) translateDeleteRel(p *cypher.DeleteRelPlan, scope *cypher.B
 	return Statement{
 		SQL:  "DELETE FROM edges WHERE id = ?",
 		Args: []any{sentinel},
+		Kind: KindDeleteEdges,
 	}, nil
 }
 
 // translateSequenceWrite handles a SequencePlan that contains write operations.
-// If all steps are write plans, it accumulates their Statements in order and
-// returns handled=true. If the sequence contains only read plans, it returns
-// handled=false so the caller uses the read path.
+//
+// If all steps are read plans it returns handled=false so the caller falls back
+// to the read path.
+//
+// When there are both read steps (MATCH/FILTER) and write steps, it first emits
+// a KindMatchForWrite SELECT that returns the id of every named variable in
+// scope (so the execution layer can populate idMap before running the write
+// statements), then appends the write Statements.
 func (t *Translator) translateSequenceWrite(sp *cypher.SequencePlan, scope *cypher.BindingScope) ([]Statement, bool, error) {
-	var allStmts []Statement
+	var writeStmts []Statement
+	var readSteps []cypher.LogicalPlan
 	anyWrite := false
 
 	for _, step := range sp.Steps {
@@ -938,20 +1012,107 @@ func (t *Translator) translateSequenceWrite(sp *cypher.SequencePlan, scope *cyph
 			return nil, true, err
 		}
 		if !handled {
-			// Read step (MATCH, FILTER) inside a sequence: these are source-context
-			// steps, not write steps. They don't produce SQL statements here; the
-			// execution layer resolves their variable IDs via prior query results.
+			// Read step (MATCH, FILTER) preceding write steps.
+			readSteps = append(readSteps, step)
 			continue
 		}
 		anyWrite = true
-		allStmts = append(allStmts, stmts...)
+		writeStmts = append(writeStmts, stmts...)
 	}
 
 	if !anyWrite {
 		// All steps were read plans — this is a read sequence, not a write sequence.
 		return nil, false, nil
 	}
+
+	var allStmts []Statement
+
+	// If there are read steps, emit a KindMatchForWrite SELECT first so the
+	// execution layer can map variable names to integer ids.
+	if len(readSteps) > 0 {
+		matchStmt, err := t.buildMatchForWriteSelect(readSteps, scope)
+		if err != nil {
+			return nil, true, err
+		}
+		allStmts = append(allStmts, matchStmt)
+	}
+
+	allStmts = append(allStmts, writeStmts...)
 	return allStmts, true, nil
+}
+
+// buildMatchForWriteSelect generates a SELECT that returns the integer id of
+// every named variable visible in scope after running the given read steps.
+// The result columns are named by the Cypher variable name (e.g. "n", "r").
+// The execution layer scans this SELECT row-by-row and, for each row, runs the
+// subsequent write statements with the resolved IDs.
+func (t *Translator) buildMatchForWriteSelect(readSteps []cypher.LogicalPlan, scope *cypher.BindingScope) (Statement, error) {
+	// Build a SequencePlan of the read steps and use buildFromClause to get
+	// the FROM/JOIN/WHERE fragments.
+	var src cypher.LogicalPlan
+	if len(readSteps) == 1 {
+		src = readSteps[0]
+	} else {
+		src = &cypher.SequencePlan{Steps: readSteps}
+	}
+
+	// Use a fresh Translator so we don't pollute t.args (the match SELECT has
+	// its own parameter bindings that have already been applied by BindParams).
+	matchT := &Translator{dialect: t.dialect}
+	fc, err := matchT.buildFromClause(src, scope)
+	if err != nil {
+		return Statement{}, fmt.Errorf("sql: match-for-write FROM clause: %w", err)
+	}
+
+	// Build the SELECT list: one "<alias>.id AS <varName>" per named variable.
+	// Sort variable names for deterministic column ordering.
+	varNames := scope.Names()
+	for i := 1; i < len(varNames); i++ {
+		for j := i; j > 0 && varNames[j] < varNames[j-1]; j-- {
+			varNames[j], varNames[j-1] = varNames[j-1], varNames[j]
+		}
+	}
+	var cols []string
+	matchedVars := make(map[string]string) // varName → colAlias (same as varName here)
+	for _, varName := range varNames {
+		b, ok := scope.Resolve(varName)
+		if !ok {
+			continue
+		}
+		col := fmt.Sprintf("%s.id AS %s", b.Alias, varName)
+		cols = append(cols, col)
+		matchedVars[varName] = varName
+	}
+	if len(cols) == 0 {
+		cols = []string{"1"} // fallback (should not happen)
+	}
+
+	var b strings.Builder
+	b.WriteString("SELECT ")
+	b.WriteString(strings.Join(cols, ", "))
+	if fc.from != "" {
+		b.WriteString(" FROM ")
+		b.WriteString(fc.from)
+	}
+	if fc.joins != "" {
+		b.WriteByte(' ')
+		b.WriteString(fc.joins)
+	}
+	all := fc.whereFragments
+	if fc.extraWhere != "" {
+		all = append(all, fc.extraWhere)
+	}
+	if len(all) > 0 {
+		b.WriteString(" WHERE ")
+		b.WriteString(strings.Join(all, " AND "))
+	}
+
+	return Statement{
+		SQL:         b.String(),
+		Args:        matchT.args,
+		Kind:        KindMatchForWrite,
+		MatchedVars: matchedVars,
+	}, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1002,7 +1163,7 @@ func (t *Translator) buildPropsJSON(props map[string]cypher.Expr, scope *cypher.
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ID sentinel type
+// ID sentinel type and resolution
 // ─────────────────────────────────────────────────────────────────────────────
 
 // idSentinel is stored in the Args slice of write Statements in positions where
@@ -1013,4 +1174,51 @@ type idSentinel struct {
 	VarName string
 	// Alias is the SQL table alias assigned by the planner (e.g. "n0", "r0").
 	Alias string
+}
+
+// ResolveIDs replaces every idSentinel in result's Statements with the
+// corresponding int64 value from idMap (keyed by Cypher variable name).
+// If any sentinel variable is absent from idMap, ResolveIDs returns an error.
+// The original Result is never mutated — fresh slices are always allocated.
+func ResolveIDs(result Result, idMap map[string]int64) (Result, error) {
+	newStmts := make([]Statement, len(result.Statements))
+	for i, stmt := range result.Statements {
+		resolved, err := resolveIDArgs(stmt.Args, idMap)
+		if err != nil {
+			return result, err
+		}
+		newStmts[i] = Statement{
+			SQL:         stmt.SQL,
+			Args:        resolved,
+			Kind:        stmt.Kind,
+			CreatedVar:  stmt.CreatedVar,
+			MatchedVars: stmt.MatchedVars,
+		}
+	}
+	out := Result{Statements: newStmts}
+	if len(newStmts) > 0 {
+		out.SQL = newStmts[0].SQL
+		out.Args = newStmts[0].Args
+	}
+	return out, nil
+}
+
+// resolveIDArgs replaces idSentinel values in an args slice with int64 IDs.
+func resolveIDArgs(args []any, idMap map[string]int64) ([]any, error) {
+	if len(args) == 0 {
+		return args, nil
+	}
+	out := make([]any, len(args))
+	for i, a := range args {
+		if s, ok := a.(idSentinel); ok {
+			id, found := idMap[s.VarName]
+			if !found {
+				return nil, fmt.Errorf("sql: no resolved ID for variable %q (alias %q)", s.VarName, s.Alias)
+			}
+			out[i] = id
+		} else {
+			out[i] = a
+		}
+	}
+	return out, nil
 }

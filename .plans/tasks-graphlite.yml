@@ -294,7 +294,7 @@ tasks:
       db.RunQuery(ctx, cypher string, params map[string]any) (Result, error) for auto-commit mode,
       db.BeginTx(ctx, readOnly bool) (Tx, error), tx.Run(ctx, cypher, params), tx.Commit(ctx),
       and tx.Rollback(ctx). This layer orchestrates parse → plan → translate → execute → map results.
-    status: pending
+    status: completed
     dependencies:
       - task-015
       - task-004
@@ -305,7 +305,7 @@ tasks:
       - "db.RunQuery executes a full MATCH query and returns populated Record values"
       - "Explicit transactions commit and rollback correctly, with rollback reverting all mutations"
       - "db.Close releases all SQLite resources; subsequent calls on closed DB return errors"
-    completed_at: null
+    completed_at: "2026-05-19T25:00:00Z"
 
   - id: task-017
     title: "Result types: lazy iteration, Record, Node, Relationship, ResultSummary"

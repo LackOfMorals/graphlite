@@ -534,3 +534,54 @@ Key Decisions:
 
 Next Task: task-016 (Native API: graphlite.Open, query execution, transactions) —
 now unblocked since task-017 is complete.
+
+================================================================================
+TASK-016: Native API: graphlite.Open, query execution, and transaction primitives
+Date: 2026-05-19T25:00:00Z
+================================================================================
+
+Summary:
+Implemented the public native API in driver.go and session.go. The execution
+pipeline (parse → plan → translate → bind-params → execute) is shared between
+auto-commit (DB.RunQuery) and transactional (Tx.Run) paths via the execer
+interface. Added StatementKind enum to sql.Statement so the executor dispatches
+on Kind rather than string-matching SQL prefixes. Added KindMatchForWrite:
+a SELECT emitted by translateSequenceWrite when read steps (MATCH/FILTER) precede
+write steps, enabling the executor to collect matched IDs before running writes.
+Fixed BindParams and ResolveIDs to copy all Statement fields (Kind, CreatedVar,
+MatchedVars). Fixed store.Open to call SetMaxOpenConns(1) so in-memory SQLite
+databases are not split across pool connections. Fixed buildSelectList to add
+implicit aliases for VarExpr (variable name) and PropExpr (var_prop) projections.
+
+Files Changed:
+- driver.go (implemented — DB, Open, Close, RunQuery, BeginTx, buildSQLResult,
+  executeStatements, execWriteStatements, collectMatchRows, execWriteBatch)
+- session.go (implemented — Tx, Run, Commit, Rollback)
+- driver_test.go (created — 14 tests covering all acceptance criteria)
+- sql/translator.go (modified — StatementKind enum; Statement.Kind/CreatedVar/MatchedVars
+  fields; KindInsertNode/Edge/Update/Delete*/Guard/MatchForWrite/Select/Exec constants;
+  translateSequenceWrite now emits KindMatchForWrite SELECT for MATCH+write plans;
+  buildMatchForWriteSelect helper; ResolveIDs and BindParams copy all Statement fields;
+  buildSelectList adds implicit VarExpr/PropExpr aliases; IDSentinelVarName removed)
+- result.go (modified — Consume and Collect are nil-rows safe for write results)
+- store/sqlite.go (modified — SetMaxOpenConns(1) for single-connection pool)
+
+Key Decisions:
+- StatementKind enum on Statement (not string-prefix matching) for reliable
+  dispatcher in execWriteBatch — cleaner and avoids brittle SQL prefix checks.
+- KindMatchForWrite SELECT emitted by the translator (not the executor) so the
+  full FROM/JOIN/WHERE is generated once using the existing buildFromClause
+  machinery; the executor just runs it and populates idMap.
+- collectMatchRows eagerly drains the SELECT cursor into memory before running
+  write statements — required because SQLite MaxOpenConns(1) means the read
+  cursor holds the sole connection.
+- SetMaxOpenConns(1) added to store.Open: without it, in-memory SQLite DBs each
+  connection in the pool gets a separate database; subsequent queries see empty tables.
+- Tx wraps *sql.Tx directly (not store.Tx) — BeginTx calls d.st.DB().BeginTx()
+  so we get the *sql.Tx without needing an adapter; session.go is thus minimal.
+- PropExpr implicit alias uses underscore separator (n_name) not dot (n.name)
+  to produce a valid SQL identifier.
+- BindParams and ResolveIDs now copy Kind/CreatedVar/MatchedVars — the original
+  bug where Kind defaulted to 0 (KindSelect) caused CREATEs to return lazy cursors.
+
+Next Task: task-018 (DriverCompat: implement neo4j.Driver interface)
