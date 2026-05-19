@@ -85,7 +85,7 @@ tasks:
       parser against every feature in the v0.1 target list and document any gaps. If a required
       feature is unsupported or produces a wrong AST, file a note in the parser package and plan
       a fork or workaround before proceeding to the planner.
-    status: pending
+    status: completed
     dependencies:
       - task-001
     acceptance_criteria:
@@ -94,7 +94,7 @@ tasks:
       - "Parser audit document (or inline comments) identifies any known gaps vs. the v0.1 feature list"
       - "Unit tests verify AST structure for at least 10 representative Cypher inputs"
       - "Multi-label MATCH (n:Person:Employee) semantics are verified to require both labels"
-    completed_at: null
+    completed_at: "2026-05-19T14:30:00Z"
 
   - id: task-006
     title: "Logical plan types and BindingScope tracker"

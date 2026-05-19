@@ -89,3 +89,43 @@ Key Decisions:
   this is intentional (the assertion is on result count, not specific IDs).
 
 Next Task: task-005 (Integrate cloudprivacylabs/opencypher parser and audit coverage)
+
+================================================================================
+TASK-005: Integrate cloudprivacylabs/opencypher parser and audit coverage
+Date: 2026-05-19T14:30:00Z
+================================================================================
+
+Summary:
+Added cloudprivacylabs/opencypher v1.0.0 as a direct dependency and implemented a
+thin parser package in cypher/ that walks the ANTLR CST to produce our own typed AST.
+The library's higher-level AST types have unexported fields and are opaque externally,
+so we use opencypher.GetParser() to obtain the ANTLR CypherParser and walk the CST
+directly. Defined AST types in cypher/ast.go (Query, MatchClause, CreateClause,
+SetClause, DeleteClause, ReturnClause, PatternPart, NodePattern, RelPattern, etc.).
+A full v0.1 coverage audit table is embedded in the ast.go package doc, with 4 known
+gaps documented (WHERE predicate tree deferred to task-008, $param resolution to
+task-015, variable-length paths flagged via VarLength field, UNION rejected). 25
+unit tests cover all v0.1 Cypher features and edge cases.
+
+Files Changed:
+- cypher/ast.go (created — AST types + v0.1 coverage audit table with GAPs)
+- cypher/parser.go (implemented — Parse() function walking ANTLR CST)
+- cypher/parser_test.go (created — 25 unit tests for all v0.1 features)
+- go.mod (updated — cloudprivacylabs/opencypher v1.0.0 promoted to direct dep)
+- go.sum (updated — new checksums for opencypher and its transitive deps)
+
+Key Decisions:
+- Used ANTLR CST (opencypher.GetParser() + parser.* types) instead of the
+  higher-level opencypher.Parse() Evaluatable — the latter's AST types have
+  unexported fields making them opaque to external callers.
+- WHERE clause stored as raw ExprText string (not a typed predicate tree) — this
+  is a deliberate deferral; task-008 (Planner: WHERE clause) adds the typed tree.
+- "$" sentinel key in NodePattern.Props used to encode a param-as-whole-properties
+  pattern (e.g. MATCH (n $param)); Cypher identifiers can't start with "$" so no
+  collision risk with real property names.
+- SKIP must precede LIMIT in this grammar (cloudprivacylabs quirk vs. standard
+  openCypher); documented as a Grammar Quirk in ast.go.
+- MATCH (a), (b) produces one MatchClause with two PatternParts (not two clauses).
+- REMOVE, MERGE, UNION, WITH-pipeline, standalone CALL all return clear errors.
+
+Next Task: task-006 (Logical plan types and BindingScope tracker)

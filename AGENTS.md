@@ -106,3 +106,8 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - Use `EXPLAIN QUERY PLAN SELECT ... WHERE labels = ?` to assert that `idx_nodes_labels` is used; scan the `detail` column (4th column) for the index name.
 - Assigning to a map inside a `range` loop (e.g. `m[k] = v`) is considered a "use" by Go; the compiler will not flag the variable as unused even if values are never read back.
 - `store_test.go` covers schema/WAL/lifecycle; `crud_test.go` covers all CRUD and transaction tests — split for readability.
+- `cloudprivacylabs/opencypher` is an evaluator library, not a pure AST library — its higher-level types (`singlePartQuery`, `nodePattern`, etc.) have unexported fields and are opaque externally. Walk the ANTLR CST directly via `opencypher.GetParser()` and the `parser.*Context` types instead.
+- In `cloudprivacylabs/opencypher` grammar, SKIP must precede LIMIT in RETURN clauses (`RETURN ... SKIP 5 LIMIT 10`), unlike some other Cypher dialects. Standard openCypher allows LIMIT first — our translator must not assume ordering.
+- `MATCH (a), (b)` is one `MatchClause` with two `PatternPart` entries, not two separate `MatchClause` nodes. The comma-separated patterns are parsed inside a single `OC_Pattern`.
+- `OC_PatternElement` can nest inside itself for parenthesized patterns; loop `for elemCtx.OC_PatternElement() != nil { elemCtx = ... }` to unwrap.
+- The `"$"` sentinel key in `NodePattern.Props` encodes a whole-properties parameter reference (`{$param}`). Cypher identifiers cannot start with `$` so this key never collides with a real property name.
