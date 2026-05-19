@@ -29,7 +29,7 @@ tasks:
       pairs), and the sentinel error types including ErrUnsupportedCypher (with clause/position
       detail, detectable via errors.As). These types are the currency between every layer and must
       be defined before any layer is implemented.
-    status: pending
+    status: completed
     dependencies:
       - task-001
     acceptance_criteria:
@@ -38,7 +38,7 @@ tasks:
       - "Record exposes Get(key string) (any, bool) and AsMap() map[string]any"
       - "ErrUnsupportedCypher is a named error type with Clause and Position fields, detectable via errors.As"
       - "All types are exported and have package-level doc comments"
-    completed_at: null
+    completed_at: "2026-05-19T10:00:00Z"
 
   - id: task-003
     title: "SQLite schema DDL and storage interface definition"

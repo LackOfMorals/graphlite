@@ -97,3 +97,5 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - Labels stored as comma-separated text in the `labels` column; multi-label MATCH requires ALL labels present (AND semantics, not OR).
 - Use `json_extract(props, '$.key')` for property access in SQLite queries.
 - The `BindingScope` in `cypher/scope.go` is the most critical data structure — bugs here cause incorrect SQL for any multi-clause query.
+- `Record` uses unexported fields with defensive copies — callers cannot mutate internal state. `NewRecord` panics on key/value length mismatch (programmer error).
+- All error types use pointer receivers (`*ErrFoo`) so `errors.As` works correctly when errors are wrapped with `fmt.Errorf("...: %w", err)`.

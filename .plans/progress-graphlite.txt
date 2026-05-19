@@ -1,0 +1,27 @@
+================================================================================
+TASK-002: Core domain types: Node, Relationship, Record, error types
+Date: 2026-05-19T10:00:00Z
+================================================================================
+
+Summary:
+Implemented all canonical Go types used throughout the library in types.go.
+Defined Node, Relationship, Record (with defensive copies), ErrUnsupportedCypher
+(with Clause, Position, Detail fields), ErrMissingParameter, ErrImportDepthExceeded,
+and ErrImportTooLarge. All error types use pointer receivers for correct errors.As
+semantics. Added types_test.go with full test coverage of all types.
+
+Files Changed:
+- types.go (modified — fully implemented from stub; all domain types and error types)
+- types_test.go (created — unit tests for Node, Relationship, Record, all error types)
+
+Key Decisions:
+- Record is encapsulated (unexported fields) with defensive copies in NewRecord, Keys(),
+  Values(), and AsMap() to prevent external mutation of internal state.
+- NewRecord panics on keys/values length mismatch (programmer error, not runtime error).
+- ErrUnsupportedCypher has a Detail field beyond the required Clause+Position to give
+  richer error messages; Detail is optional.
+- ErrMissingParameter, ErrImportDepthExceeded, ErrImportTooLarge added proactively since
+  they are referenced in later tasks and belong in the root package alongside other errors.
+- Test helper uses strings.Contains (stdlib) rather than a manual implementation.
+
+Next Task: task-003 (SQLite schema DDL and storage interface definition)
