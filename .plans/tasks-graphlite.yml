@@ -142,7 +142,7 @@ tasks:
       boolean combinators (AND, OR, NOT), and $param references. The planner emits a FilterPlan
       node that carries a predicate expression tree. Parameter references are left as placeholders
       — the translator binds them to SQL ? markers with the correct parameter map.
-    status: pending
+    status: completed
     dependencies:
       - task-007
     acceptance_criteria:
@@ -151,7 +151,7 @@ tasks:
       - "$param references in WHERE are represented as ParamRef nodes in the predicate tree"
       - "Unit tests cover all operator types, nested boolean logic, and parameter references"
       - "Invalid WHERE syntax returns a structured parse error, not a panic"
-    completed_at: null
+    completed_at: "2026-05-19T18:00:00Z"
 
   - id: task-009
     title: "Planner: RETURN projections, ORDER BY, LIMIT, SKIP"

@@ -177,13 +177,8 @@ func planMatchClause(mc *MatchClause, scope *BindingScope, ac *aliasCounter) ([]
 		plans = append(plans, partPlans...)
 	}
 
-	// WHERE clause: store as RawExpr for now (task-008 replaces with typed tree).
-	var whereExpr Expr
-	if mc.WhereExpr != "" {
-		whereExpr = &RawExpr{Text: mc.WhereExpr}
-	}
-
-	return plans, whereExpr, nil
+	// Use the typed WHERE predicate tree built by the parser (task-008).
+	return plans, mc.Where, nil
 }
 
 // planPatternPart translates a single PatternPart into one or more LogicalPlan

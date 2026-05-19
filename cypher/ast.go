@@ -15,9 +15,9 @@
 //	MATCH (a)-[r:TYPE]->(b) directed     ✅ supported         ✅ RelPattern + direction flags
 //	MATCH (a)-[r:TYPE]-(b) undirected    ✅ supported         ✅ RelPattern (ToLeft=false, ToRight=false)
 //	Multi-hop chains (up to 5 hops)      ✅ supported         ✅ PatternChain slice
-//	WHERE comparisons (=,<>,<,>,<=,>=)   ✅ supported         ⚠️  stored as raw ExprText (task-008 adds typed predicate tree)
-//	WHERE AND / OR / NOT                 ✅ supported         ⚠️  stored as raw ExprText (task-008)
-//	WHERE $param references              ✅ supported         ⚠️  stored as raw ExprText (task-008)
+//	WHERE comparisons (=,<>,<,>,<=,>=)   ✅ supported         ✅ ComparisonExpr with correct Op
+//	WHERE AND / OR / NOT                 ✅ supported         ✅ BoolExpr (AND/OR) and NotExpr
+//	WHERE $param references              ✅ supported         ✅ ParamRef nodes in predicate tree
 //	RETURN n.prop AS alias               ✅ supported         ✅ ReturnItem + Alias
 //	RETURN n, r (whole node/rel)         ✅ supported         ✅ ReturnItem with ExprText = variable name
 //	ORDER BY expr ASC/DESC               ✅ supported         ✅ SortItem
@@ -34,9 +34,9 @@
 //
 // # Known Gaps vs. v0.1 Feature List
 //
-//   - GAP-001: WHERE clause is stored as a raw ExprText string rather than a typed
-//     predicate tree. Task-008 (Planner: WHERE clause) will parse the expression
-//     into typed ComparisonExpr, BoolExpr, ParamRef nodes.
+//   - GAP-001 (RESOLVED): WHERE clause is now parsed into a typed predicate tree
+//     (ComparisonExpr, BoolExpr, NotExpr, ParamRef, PropExpr, LiteralExpr). Completed
+//     in task-008. Complex unsupported sub-expressions fall back to RawExpr.
 //   - GAP-002: Property map values in CREATE / SET are stored as raw ExprText strings
 //     (the ANTLR CST expression text). Task-015 (parameter binding) will resolve
 //     $param references to concrete values from the caller-supplied map.
@@ -82,9 +82,9 @@ type MatchClause struct {
 	// Pattern is the list of pattern parts in the MATCH clause.
 	// Each PatternPart is an independent rooted path.
 	Pattern []PatternPart
-	// WhereExpr is the raw text of the WHERE expression, if present.
-	// Task-008 will replace this with a typed predicate tree.
-	WhereExpr string // "" when no WHERE clause
+	// Where is the typed predicate expression tree for the WHERE clause.
+	// Nil when no WHERE clause is present. Set by the parser in task-008.
+	Where Expr
 }
 
 func (*MatchClause) clauseNode() {}

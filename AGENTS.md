@@ -115,7 +115,10 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - `LogicalPlan` and `Expr` both use sealed interfaces (unexported `planNode()`/`exprNode()` methods) — type switches are the dispatch mechanism; never use reflect.
 - `MatchRelPlan.EndNode` is an embedded `MatchNodePlan` (not just `EndVar string`) so the translator can apply destination node label/property constraints without rescanning the scope.
 - WITH pipeline scoping: use a fresh `NewScope()` for the next stage (not `Child()`) — only projected variables are re-bound. `Child()` inherits everything from the parent; WITH explicitly limits visibility.
-- `RawExpr{Text}` is a fallback for deferred expression parsing; task-008 replaces raw WHERE strings with typed `ComparisonExpr`/`BoolExpr`/`NotExpr` trees.
+- `RawExpr{Text}` is a fallback for unsupported sub-expressions; task-008 replaced raw WHERE strings with typed `ComparisonExpr`/`BoolExpr`/`NotExpr` trees built directly from the ANTLR CST in the parser.
+- `MatchClause.Where` is a typed `Expr` (not a raw string); the parser builds the tree via `buildExprFromCST` walking `OC_Expression → OC_OrExpression → ... → OC_Atom`.
+- Operator extraction from `OC_PartialComparisonExpressionContext` uses `strings.HasPrefix(ctx.GetText(), ...)` — `GetText()` strips whitespace, so `<>` must be tested before `<` to avoid false matches.
+- Package-level unused consts/functions are not flagged by `go vet`; review for dead code before finalizing.
 - Only one file in a package should have a package-level doc comment (the `package foo` comment with a `//` block above it); duplicating it in other files causes `go doc` to show it twice.
 - `Plan(q *Query, scope *BindingScope)` is the planner entry point in `cypher/planner.go`; the scope is mutated in place and populated with all named variables.
 - `aliasCounter` in the planner hands out `n0/n1/r0/r1` SQL table aliases; the translator resolves variable→alias via BindingScope, not by inspecting plan node order.

@@ -347,7 +347,7 @@ func TestPlanner_MatchFourHopChain(t *testing.T) {
 	}
 }
 
-// ─── test 11: MATCH with WHERE clause ────────────────────────────────────────
+// ─── test 11: MATCH with WHERE clause produces typed FilterPlan ──────────────
 
 func TestPlanner_MatchWithWhere(t *testing.T) {
 	plan, _ := mustPlan(t, "MATCH (n:Person) WHERE n.age > 18 RETURN n")
@@ -358,20 +358,36 @@ func TestPlanner_MatchWithWhere(t *testing.T) {
 	// Source of filter must be the match node plan.
 	asMatchNode(t, fp.Source)
 
-	// Predicate must be a RawExpr (WHERE clause is stored raw for now).
+	// Predicate must be a typed ComparisonExpr: n.age > 18
 	if fp.Predicate == nil {
 		t.Fatal("expected non-nil Predicate in FilterPlan")
 	}
-	raw, ok := fp.Predicate.(*cypher.RawExpr)
+	cmp, ok := fp.Predicate.(*cypher.ComparisonExpr)
 	if !ok {
-		t.Fatalf("expected *RawExpr predicate (task-008 upgrades to typed), got %T", fp.Predicate)
+		t.Fatalf("expected *ComparisonExpr predicate, got %T", fp.Predicate)
 	}
-	if raw.Text == "" {
-		t.Error("expected non-empty RawExpr.Text")
+	if cmp.Op != ">" {
+		t.Errorf("expected > operator, got %q", cmp.Op)
+	}
+	// LHS: n.age
+	prop, ok := cmp.Left.(*cypher.PropExpr)
+	if !ok {
+		t.Fatalf("expected *PropExpr on LHS, got %T", cmp.Left)
+	}
+	if prop.Variable != "n" || prop.Property != "age" {
+		t.Errorf("expected n.age, got %q.%q", prop.Variable, prop.Property)
+	}
+	// RHS: 18
+	lit, ok := cmp.Right.(*cypher.LiteralExpr)
+	if !ok {
+		t.Fatalf("expected *LiteralExpr on RHS, got %T", cmp.Right)
+	}
+	if lit.Value != int64(18) {
+		t.Errorf("expected int64(18), got %v (%T)", lit.Value, lit.Value)
 	}
 }
 
-// ─── test 12: MATCH with $param in WHERE ─────────────────────────────────────
+// ─── test 12: MATCH with $param in WHERE produces ParamRef in predicate tree ─
 
 func TestPlanner_MatchWhereWithParam(t *testing.T) {
 	plan, _ := mustPlan(t, "MATCH (n:Person) WHERE n.name = $name RETURN n")
@@ -381,6 +397,21 @@ func TestPlanner_MatchWhereWithParam(t *testing.T) {
 
 	if fp.Predicate == nil {
 		t.Fatal("expected non-nil predicate")
+	}
+	// Predicate must be a ComparisonExpr with RHS = ParamRef.
+	cmp, ok := fp.Predicate.(*cypher.ComparisonExpr)
+	if !ok {
+		t.Fatalf("expected *ComparisonExpr, got %T", fp.Predicate)
+	}
+	if cmp.Op != "=" {
+		t.Errorf("expected = operator, got %q", cmp.Op)
+	}
+	pr, ok := cmp.Right.(*cypher.ParamRef)
+	if !ok {
+		t.Fatalf("expected *ParamRef on RHS, got %T", cmp.Right)
+	}
+	if pr.Name != "name" {
+		t.Errorf("ParamRef.Name: want %q got %q", "name", pr.Name)
 	}
 }
 
@@ -654,4 +685,247 @@ func TestPlanner_OptionalMatch(t *testing.T) {
 	if !mBinding.IsNullable {
 		t.Error("variable 'm' introduced by OPTIONAL MATCH must be IsNullable=true")
 	}
+}
+
+// ─── task-008 WHERE clause tests ─────────────────────────────────────────────
+
+// asComparison unwraps a plan predicate as *ComparisonExpr; fails otherwise.
+func asComparison(t *testing.T, expr cypher.Expr) *cypher.ComparisonExpr {
+	t.Helper()
+	cmp, ok := expr.(*cypher.ComparisonExpr)
+	if !ok {
+		t.Fatalf("expected *ComparisonExpr, got %T", expr)
+	}
+	return cmp
+}
+
+// asBoolExpr unwraps an expression as *BoolExpr; fails otherwise.
+func asBoolExpr(t *testing.T, expr cypher.Expr) *cypher.BoolExpr {
+	t.Helper()
+	be, ok := expr.(*cypher.BoolExpr)
+	if !ok {
+		t.Fatalf("expected *BoolExpr, got %T", expr)
+	}
+	return be
+}
+
+// asNotExpr unwraps an expression as *NotExpr; fails otherwise.
+func asNotExpr(t *testing.T, expr cypher.Expr) *cypher.NotExpr {
+	t.Helper()
+	ne, ok := expr.(*cypher.NotExpr)
+	if !ok {
+		t.Fatalf("expected *NotExpr, got %T", expr)
+	}
+	return ne
+}
+
+// getFilterPredicate returns the predicate from a ReturnPlan → FilterPlan chain.
+func getFilterPredicate(t *testing.T, query string) cypher.Expr {
+	t.Helper()
+	plan, _ := mustPlan(t, query)
+	rp := asReturn(t, plan)
+	fp := asFilter(t, rp.Source)
+	if fp.Predicate == nil {
+		t.Fatal("expected non-nil Predicate")
+	}
+	return fp.Predicate
+}
+
+// ─── test 26: all six comparison operators ───────────────────────────────────
+
+func TestPlanner_WHERE_AllComparisonOperators(t *testing.T) {
+	tests := []struct {
+		query string
+		op    string
+	}{
+		{"MATCH (n:T) WHERE n.x = 1 RETURN n", "="},
+		{"MATCH (n:T) WHERE n.x <> 1 RETURN n", "<>"},
+		{"MATCH (n:T) WHERE n.x < 1 RETURN n", "<"},
+		{"MATCH (n:T) WHERE n.x > 1 RETURN n", ">"},
+		{"MATCH (n:T) WHERE n.x <= 1 RETURN n", "<="},
+		{"MATCH (n:T) WHERE n.x >= 1 RETURN n", ">="},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.op, func(t *testing.T) {
+			pred := getFilterPredicate(t, tc.query)
+			cmp := asComparison(t, pred)
+			if cmp.Op != tc.op {
+				t.Errorf("op: want %q got %q", tc.op, cmp.Op)
+			}
+			// LHS must be PropExpr n.x
+			prop, ok := cmp.Left.(*cypher.PropExpr)
+			if !ok {
+				t.Fatalf("LHS: expected *PropExpr, got %T", cmp.Left)
+			}
+			if prop.Variable != "n" || prop.Property != "x" {
+				t.Errorf("LHS: want n.x, got %q.%q", prop.Variable, prop.Property)
+			}
+			// RHS must be LiteralExpr(1)
+			lit, ok := cmp.Right.(*cypher.LiteralExpr)
+			if !ok {
+				t.Fatalf("RHS: expected *LiteralExpr, got %T", cmp.Right)
+			}
+			if lit.Value != int64(1) {
+				t.Errorf("RHS: want int64(1), got %v (%T)", lit.Value, lit.Value)
+			}
+		})
+	}
+}
+
+// ─── test 27: AND combinator ─────────────────────────────────────────────────
+
+func TestPlanner_WHERE_AndCombinator(t *testing.T) {
+	pred := getFilterPredicate(t, "MATCH (n:Person) WHERE n.age > 18 AND n.active = true RETURN n")
+
+	be := asBoolExpr(t, pred)
+	if be.Op != "AND" {
+		t.Errorf("expected AND, got %q", be.Op)
+	}
+	// Left: n.age > 18
+	asComparison(t, be.Left)
+	// Right: n.active = true
+	asComparison(t, be.Right)
+}
+
+// ─── test 28: OR combinator ──────────────────────────────────────────────────
+
+func TestPlanner_WHERE_OrCombinator(t *testing.T) {
+	pred := getFilterPredicate(t, "MATCH (n:Person) WHERE n.age > 18 OR n.vip = true RETURN n")
+
+	be := asBoolExpr(t, pred)
+	if be.Op != "OR" {
+		t.Errorf("expected OR, got %q", be.Op)
+	}
+	asComparison(t, be.Left)
+	asComparison(t, be.Right)
+}
+
+// ─── test 29: NOT combinator ─────────────────────────────────────────────────
+
+func TestPlanner_WHERE_NotCombinator(t *testing.T) {
+	pred := getFilterPredicate(t, "MATCH (n:Person) WHERE NOT n.age < 18 RETURN n")
+
+	ne := asNotExpr(t, pred)
+	asComparison(t, ne.Expr)
+}
+
+// ─── test 30: nested AND/OR/NOT precedence ───────────────────────────────────
+
+func TestPlanner_WHERE_NestedBooleanLogic(t *testing.T) {
+	// NOT n.age < 18 OR n.vip = true
+	// Grammar: NOT binds tighter than OR → root is OR(NOT(age<18), vip=true)
+	pred := getFilterPredicate(t, "MATCH (n:Person) WHERE NOT n.age < 18 OR n.vip = true RETURN n")
+
+	be := asBoolExpr(t, pred)
+	if be.Op != "OR" {
+		t.Errorf("expected OR at root, got %q", be.Op)
+	}
+	asNotExpr(t, be.Left)
+	asComparison(t, be.Right)
+}
+
+// ─── test 31: $param reference in WHERE ──────────────────────────────────────
+
+func TestPlanner_WHERE_ParamReference(t *testing.T) {
+	pred := getFilterPredicate(t, "MATCH (n:Person) WHERE n.age > $minAge RETURN n")
+
+	cmp := asComparison(t, pred)
+	if cmp.Op != ">" {
+		t.Errorf("expected > operator, got %q", cmp.Op)
+	}
+	pr, ok := cmp.Right.(*cypher.ParamRef)
+	if !ok {
+		t.Fatalf("RHS: expected *ParamRef, got %T", cmp.Right)
+	}
+	if pr.Name != "minAge" {
+		t.Errorf("ParamRef.Name: want %q got %q", "minAge", pr.Name)
+	}
+}
+
+// ─── test 32: multiple $param references in AND clause ───────────────────────
+
+func TestPlanner_WHERE_MultipleParams(t *testing.T) {
+	pred := getFilterPredicate(t, "MATCH (n:Person) WHERE n.name = $name AND n.age > $minAge RETURN n")
+
+	be := asBoolExpr(t, pred)
+	if be.Op != "AND" {
+		t.Errorf("expected AND, got %q", be.Op)
+	}
+
+	left := asComparison(t, be.Left)
+	if _, ok := left.Right.(*cypher.ParamRef); !ok {
+		t.Errorf("left RHS: expected *ParamRef, got %T", left.Right)
+	}
+
+	right := asComparison(t, be.Right)
+	if _, ok := right.Right.(*cypher.ParamRef); !ok {
+		t.Errorf("right RHS: expected *ParamRef, got %T", right.Right)
+	}
+}
+
+// ─── test 33: WHERE with string literal ──────────────────────────────────────
+
+func TestPlanner_WHERE_StringLiteral(t *testing.T) {
+	pred := getFilterPredicate(t, `MATCH (n:Person) WHERE n.name = 'Alice' RETURN n`)
+
+	cmp := asComparison(t, pred)
+	lit, ok := cmp.Right.(*cypher.LiteralExpr)
+	if !ok {
+		t.Fatalf("expected *LiteralExpr, got %T", cmp.Right)
+	}
+	if lit.Value != "Alice" {
+		t.Errorf("expected %q, got %v", "Alice", lit.Value)
+	}
+}
+
+// ─── test 34: WHERE with boolean literal ─────────────────────────────────────
+
+func TestPlanner_WHERE_BooleanLiteral(t *testing.T) {
+	pred := getFilterPredicate(t, "MATCH (n:Person) WHERE n.active = true RETURN n")
+
+	cmp := asComparison(t, pred)
+	lit, ok := cmp.Right.(*cypher.LiteralExpr)
+	if !ok {
+		t.Fatalf("expected *LiteralExpr, got %T", cmp.Right)
+	}
+	if lit.Value != true {
+		t.Errorf("expected true, got %v", lit.Value)
+	}
+}
+
+// ─── test 35: WHERE with float literal ───────────────────────────────────────
+
+func TestPlanner_WHERE_FloatLiteral(t *testing.T) {
+	pred := getFilterPredicate(t, "MATCH (n:Item) WHERE n.price > 9.99 RETURN n")
+
+	cmp := asComparison(t, pred)
+	lit, ok := cmp.Right.(*cypher.LiteralExpr)
+	if !ok {
+		t.Fatalf("expected *LiteralExpr, got %T", cmp.Right)
+	}
+	if v, ok := lit.Value.(float64); !ok || v != 9.99 {
+		t.Errorf("expected float64(9.99), got %v (%T)", lit.Value, lit.Value)
+	}
+}
+
+// ─── test 36: invalid WHERE syntax returns structured error, not panic ────────
+
+func TestPlanner_WHERE_InvalidSyntax(t *testing.T) {
+	// Syntax error in the WHERE predicate itself.
+	_, err := cypher.Parse("MATCH (n) WHERE = n.x RETURN n")
+	// The parser (or planner) must return an error, not panic.
+	if err == nil {
+		// Plan should also fail if parse succeeded.
+		q, _ := cypher.Parse("MATCH (n) WHERE = n.x RETURN n")
+		if q != nil {
+			scope := cypher.NewScope()
+			_, planErr := cypher.Plan(q, scope)
+			if planErr == nil {
+				t.Error("expected error for invalid WHERE syntax, got nil")
+			}
+		}
+	}
+	// Either the parser or planner returns an error — both are acceptable outcomes.
+	// The key requirement is no panic.
 }

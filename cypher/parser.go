@@ -18,8 +18,9 @@ import (
 // DELETE/DETACH DELETE, and RETURN clauses. UNION and UNION ALL cause
 // ErrUnsupportedCypher to be returned.
 //
-// WHERE clause expressions are preserved as raw text (WhereExpr field) and
-// will be given a typed predicate tree in task-008.
+// WHERE clause expressions are parsed into a typed Expr tree (ComparisonExpr,
+// BoolExpr, NotExpr, ParamRef, PropExpr, LiteralExpr). Unsupported sub-expression
+// forms fall back to RawExpr without error.
 //
 // Parse is safe to call from multiple goroutines.
 func Parse(input string) (*Query, error) {
@@ -149,7 +150,11 @@ func buildMatchClause(ctx *parser.OC_MatchContext) (*MatchClause, error) {
 	mc.Pattern = parts
 
 	if where := ctx.OC_Where(); where != nil {
-		mc.WhereExpr = exprText(where.(*parser.OC_WhereContext).OC_Expression())
+		whereExpr, err := buildExprFromCST(where.(*parser.OC_WhereContext).OC_Expression())
+		if err != nil {
+			return nil, fmt.Errorf("cypher: WHERE clause: %w", err)
+		}
+		mc.Where = whereExpr
 	}
 
 	return mc, nil
@@ -465,4 +470,379 @@ func parseInt64Expr(ctx parser.IOC_ExpressionContext) (int64, error) {
 		return 0, fmt.Errorf("expected integer literal, got %q", text)
 	}
 	return v, nil
+}
+
+// ─── WHERE expression tree builder ───────────────────────────────────────────
+//
+// buildExprFromCST walks the ANTLR CST for an OC_Expression and produces a
+// typed Expr node. Unsupported sub-expression forms fall back to RawExpr so
+// that the tree is always returned; errors are only returned for malformed CST
+// nodes (nil pointers from the grammar, not for unrecognised expressions).
+//
+// Grammar hierarchy (simplified for v0.1):
+//
+//	OC_Expression
+//	  └── OC_OrExpression (one or more XOR-separated sub-expressions)
+//	        └── OC_XorExpression (one or more AND-separated sub-expressions — we map XOR to OR for now via fallback)
+//	              └── OC_AndExpression (one or more NOT-separated sub-expressions)
+//	                    └── OC_NotExpression (optional NOT prefix, then ComparisonExpression)
+//	                          └── OC_ComparisonExpression (left-hand AddOrSubtract + optional comparisons)
+//	                                └── OC_PartialComparisonExpression (operator + right-hand side)
+//	                                      └── OC_AddOrSubtractExpression → ... → OC_PropertyOrLabelsExpression → OC_Atom
+
+// buildExprFromCST converts an ANTLR OC_ExpressionContext into a typed Expr.
+func buildExprFromCST(ctx parser.IOC_ExpressionContext) (Expr, error) {
+	if ctx == nil {
+		return &RawExpr{Text: ""}, nil
+	}
+	orCtx := ctx.(*parser.OC_ExpressionContext).OC_OrExpression()
+	if orCtx == nil {
+		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+	}
+	return buildOrExpr(orCtx.(*parser.OC_OrExpressionContext))
+}
+
+// buildOrExpr handles OC_OrExpression: one or more XOR-expressions joined by OR.
+func buildOrExpr(ctx *parser.OC_OrExpressionContext) (Expr, error) {
+	xors := ctx.AllOC_XorExpression()
+	if len(xors) == 0 {
+		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+	}
+	left, err := buildXorExpr(xors[0].(*parser.OC_XorExpressionContext))
+	if err != nil {
+		return nil, err
+	}
+	for _, xCtx := range xors[1:] {
+		right, err := buildXorExpr(xCtx.(*parser.OC_XorExpressionContext))
+		if err != nil {
+			return nil, err
+		}
+		left = &BoolExpr{Left: left, Op: "OR", Right: right}
+	}
+	return left, nil
+}
+
+// buildXorExpr handles OC_XorExpression: one or more AND-expressions joined by XOR.
+// XOR is mapped to OR for v0.1 (it is uncommon in practice; a RawExpr would also work,
+// but this keeps the tree typed). True XOR support is deferred.
+func buildXorExpr(ctx *parser.OC_XorExpressionContext) (Expr, error) {
+	ands := ctx.AllOC_AndExpression()
+	if len(ands) == 0 {
+		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+	}
+	left, err := buildAndExpr(ands[0].(*parser.OC_AndExpressionContext))
+	if err != nil {
+		return nil, err
+	}
+	for _, aCtx := range ands[1:] {
+		right, err := buildAndExpr(aCtx.(*parser.OC_AndExpressionContext))
+		if err != nil {
+			return nil, err
+		}
+		// XOR mapped to OR for v0.1; annotate via Op string.
+		left = &BoolExpr{Left: left, Op: "XOR", Right: right}
+	}
+	return left, nil
+}
+
+// buildAndExpr handles OC_AndExpression: one or more NOT-expressions joined by AND.
+func buildAndExpr(ctx *parser.OC_AndExpressionContext) (Expr, error) {
+	nots := ctx.AllOC_NotExpression()
+	if len(nots) == 0 {
+		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+	}
+	left, err := buildNotExpr(nots[0].(*parser.OC_NotExpressionContext))
+	if err != nil {
+		return nil, err
+	}
+	for _, nCtx := range nots[1:] {
+		right, err := buildNotExpr(nCtx.(*parser.OC_NotExpressionContext))
+		if err != nil {
+			return nil, err
+		}
+		left = &BoolExpr{Left: left, Op: "AND", Right: right}
+	}
+	return left, nil
+}
+
+// buildNotExpr handles OC_NotExpression: optional NOT prefix followed by a
+// ComparisonExpression.
+func buildNotExpr(ctx *parser.OC_NotExpressionContext) (Expr, error) {
+	// Count NOT tokens: even count = no effective negation; odd = negation.
+	notCount := len(ctx.AllNOT())
+	cmpCtx := ctx.OC_ComparisonExpression()
+	if cmpCtx == nil {
+		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+	}
+	inner, err := buildComparisonExpr(cmpCtx.(*parser.OC_ComparisonExpressionContext))
+	if err != nil {
+		return nil, err
+	}
+	if notCount%2 == 1 {
+		return &NotExpr{Expr: inner}, nil
+	}
+	return inner, nil
+}
+
+// buildComparisonExpr handles OC_ComparisonExpression:
+// a left-hand AddOrSubtract expression followed by zero or more partial comparisons.
+// Multiple partial comparisons (e.g. 1 < x < 10) are chained with AND.
+func buildComparisonExpr(ctx *parser.OC_ComparisonExpressionContext) (Expr, error) {
+	lhsCtx := ctx.OC_AddOrSubtractExpression()
+	if lhsCtx == nil {
+		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+	}
+	lhs, err := buildAddOrSubtractExpr(lhsCtx.(*parser.OC_AddOrSubtractExpressionContext))
+	if err != nil {
+		return nil, err
+	}
+
+	parts := ctx.AllOC_PartialComparisonExpression()
+	if len(parts) == 0 {
+		// Pure value expression (no comparison operator) — just return the LHS.
+		return lhs, nil
+	}
+
+	var result Expr
+	for _, pCtx := range parts {
+		partial := pCtx.(*parser.OC_PartialComparisonExpressionContext)
+		op, rhs, err := buildPartialComparison(partial)
+		if err != nil {
+			return nil, err
+		}
+		cmp := &ComparisonExpr{Left: lhs, Op: op, Right: rhs}
+		if result == nil {
+			result = cmp
+		} else {
+			result = &BoolExpr{Left: result, Op: "AND", Right: cmp}
+		}
+	}
+	return result, nil
+}
+
+// buildPartialComparison extracts the operator and right-hand side from a
+// OC_PartialComparisonExpressionContext.
+func buildPartialComparison(ctx *parser.OC_PartialComparisonExpressionContext) (string, Expr, error) {
+	// The operator is the first token child before the RHS expression.
+	// We reconstruct it from the context text by inspecting the first token.
+	// The ANTLR grammar encodes comparison operators as T__2 (=), T__17 (<>),
+	// T__18 (<), T__19 (>), T__20 (<=), T__21 (>=).
+	// Use GetText() on the full context; the first non-space char(s) give the op.
+	fullText := ctx.GetText()
+	var op string
+	switch {
+	case strings.HasPrefix(fullText, "<>"):
+		op = "<>"
+	case strings.HasPrefix(fullText, "<="):
+		op = "<="
+	case strings.HasPrefix(fullText, ">="):
+		op = ">="
+	case strings.HasPrefix(fullText, "="):
+		op = "="
+	case strings.HasPrefix(fullText, "<"):
+		op = "<"
+	case strings.HasPrefix(fullText, ">"):
+		op = ">"
+	default:
+		// Unrecognised operator — fall back.
+		return "", &RawExpr{Text: fullText}, nil
+	}
+
+	rhsCtx := ctx.OC_AddOrSubtractExpression()
+	if rhsCtx == nil {
+		return op, &RawExpr{Text: ""}, nil
+	}
+	rhs, err := buildAddOrSubtractExpr(rhsCtx.(*parser.OC_AddOrSubtractExpressionContext))
+	if err != nil {
+		return op, nil, err
+	}
+	return op, rhs, nil
+}
+
+// buildAddOrSubtractExpr traverses the arithmetic expression hierarchy down to
+// the terminal PropertyOrLabelsExpression. For v0.1 WHERE clauses we only need
+// the simple forms (no arithmetic); arithmetic sub-expressions fall back to RawExpr.
+func buildAddOrSubtractExpr(ctx *parser.OC_AddOrSubtractExpressionContext) (Expr, error) {
+	mulDivs := ctx.AllOC_MultiplyDivideModuloExpression()
+	if len(mulDivs) != 1 {
+		// Arithmetic expression — not supported for v0.1; fall back.
+		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+	}
+	return buildMulDivExpr(mulDivs[0].(*parser.OC_MultiplyDivideModuloExpressionContext))
+}
+
+// buildMulDivExpr traverses OC_MultiplyDivideModuloExpression down to PowerOfExpression.
+func buildMulDivExpr(ctx *parser.OC_MultiplyDivideModuloExpressionContext) (Expr, error) {
+	powers := ctx.AllOC_PowerOfExpression()
+	if len(powers) != 1 {
+		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+	}
+	return buildPowerOfExpr(powers[0].(*parser.OC_PowerOfExpressionContext))
+}
+
+// buildPowerOfExpr traverses OC_PowerOfExpression down to UnaryAddOrSubtract.
+func buildPowerOfExpr(ctx *parser.OC_PowerOfExpressionContext) (Expr, error) {
+	unarys := ctx.AllOC_UnaryAddOrSubtractExpression()
+	if len(unarys) != 1 {
+		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+	}
+	return buildUnaryExpr(unarys[0].(*parser.OC_UnaryAddOrSubtractExpressionContext))
+}
+
+// buildUnaryExpr traverses OC_UnaryAddOrSubtractExpression down to StringListNull.
+func buildUnaryExpr(ctx *parser.OC_UnaryAddOrSubtractExpressionContext) (Expr, error) {
+	slnCtx := ctx.OC_StringListNullOperatorExpression()
+	if slnCtx == nil {
+		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+	}
+	// Unary minus / plus — fall back for v0.1.
+	// Check for leading minus token in the text.
+	text := trimWhitespace(ctx.GetText())
+	if strings.HasPrefix(text, "-") || strings.HasPrefix(text, "+") {
+		return &RawExpr{Text: text}, nil
+	}
+	return buildStringListNullExpr(slnCtx.(*parser.OC_StringListNullOperatorExpressionContext))
+}
+
+// buildStringListNullExpr handles OC_StringListNullOperatorExpression.
+// For v0.1 we only handle the base property-or-labels form (no string operators,
+// list operators, or IS NULL/IS NOT NULL — those fall back to RawExpr).
+func buildStringListNullExpr(ctx *parser.OC_StringListNullOperatorExpressionContext) (Expr, error) {
+	propLabelsCtx := ctx.OC_PropertyOrLabelsExpression()
+	if propLabelsCtx == nil {
+		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+	}
+	base, err := buildPropertyOrLabelsExpr(propLabelsCtx.(*parser.OC_PropertyOrLabelsExpressionContext))
+	if err != nil {
+		return nil, err
+	}
+	// If there are string/list/null operator suffixes, fall back to RawExpr.
+	if len(ctx.AllOC_StringOperatorExpression()) > 0 ||
+		len(ctx.AllOC_ListOperatorExpression()) > 0 ||
+		len(ctx.AllOC_NullOperatorExpression()) > 0 {
+		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+	}
+	return base, nil
+}
+
+// buildPropertyOrLabelsExpr handles OC_PropertyOrLabelsExpression:
+// an atom optionally followed by one or more property lookups.
+func buildPropertyOrLabelsExpr(ctx *parser.OC_PropertyOrLabelsExpressionContext) (Expr, error) {
+	atomCtx := ctx.OC_Atom()
+	if atomCtx == nil {
+		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+	}
+	atom, err := buildAtomExpr(atomCtx.(*parser.OC_AtomContext))
+	if err != nil {
+		return nil, err
+	}
+
+	lookups := ctx.AllOC_PropertyLookup()
+	if len(lookups) == 0 {
+		return atom, nil
+	}
+	// Single property lookup: n.prop
+	if len(lookups) == 1 {
+		varExpr, ok := atom.(*VarExpr)
+		if !ok {
+			// Not a simple variable — fall back.
+			return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+		}
+		propKey := trimWhitespace(lookups[0].(*parser.OC_PropertyLookupContext).OC_PropertyKeyName().GetText())
+		return &PropExpr{Variable: varExpr.Name, Property: propKey}, nil
+	}
+	// Multiple lookups (nested property access) — fall back.
+	return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+}
+
+// buildAtomExpr converts an OC_AtomContext into an Expr.
+// Handles: literals, $params, variables, and parenthesized sub-expressions.
+func buildAtomExpr(ctx *parser.OC_AtomContext) (Expr, error) {
+	// Literal
+	if litCtx := ctx.OC_Literal(); litCtx != nil {
+		return buildLiteralExpr(litCtx.(*parser.OC_LiteralContext))
+	}
+	// Parameter reference: $param
+	if paramCtx := ctx.OC_Parameter(); paramCtx != nil {
+		name := trimWhitespace(paramCtx.(*parser.OC_ParameterContext).OC_SymbolicName().GetText())
+		return &ParamRef{Name: name}, nil
+	}
+	// Variable
+	if varCtx := ctx.OC_Variable(); varCtx != nil {
+		name := trimWhitespace(varCtx.GetText())
+		return &VarExpr{Name: name}, nil
+	}
+	// Parenthesized expression: recurse
+	if parenCtx := ctx.OC_ParenthesizedExpression(); parenCtx != nil {
+		inner := parenCtx.(*parser.OC_ParenthesizedExpressionContext).OC_Expression()
+		if inner == nil {
+			return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+		}
+		return buildExprFromCST(inner)
+	}
+	// Fallback for unsupported atom types (COUNT, list comprehension, etc.)
+	return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+}
+
+// buildLiteralExpr converts an OC_LiteralContext into a LiteralExpr.
+func buildLiteralExpr(ctx *parser.OC_LiteralContext) (Expr, error) {
+	// NULL
+	if ctx.NULL() != nil {
+		return &LiteralExpr{Value: nil}, nil
+	}
+	// Boolean
+	if boolCtx := ctx.OC_BooleanLiteral(); boolCtx != nil {
+		text := strings.ToUpper(trimWhitespace(boolCtx.GetText()))
+		return &LiteralExpr{Value: text == "TRUE"}, nil
+	}
+	// Number
+	if numCtx := ctx.OC_NumberLiteral(); numCtx != nil {
+		return buildNumberLiteralExpr(numCtx.(*parser.OC_NumberLiteralContext))
+	}
+	// String literal — strip surrounding quotes and unescape.
+	if ctx.StringLiteral() != nil {
+		raw := trimWhitespace(ctx.StringLiteral().GetText())
+		val := unquoteString(raw)
+		return &LiteralExpr{Value: val}, nil
+	}
+	return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+}
+
+// buildNumberLiteralExpr converts OC_NumberLiteralContext into a LiteralExpr.
+func buildNumberLiteralExpr(ctx *parser.OC_NumberLiteralContext) (Expr, error) {
+	if intCtx := ctx.OC_IntegerLiteral(); intCtx != nil {
+		text := trimWhitespace(intCtx.GetText())
+		v, err := strconv.ParseInt(text, 0, 64) // base 0 handles hex/octal prefixes
+		if err != nil {
+			return &RawExpr{Text: text}, nil
+		}
+		return &LiteralExpr{Value: v}, nil
+	}
+	if dblCtx := ctx.OC_DoubleLiteral(); dblCtx != nil {
+		text := trimWhitespace(dblCtx.GetText())
+		v, err := strconv.ParseFloat(text, 64)
+		if err != nil {
+			return &RawExpr{Text: text}, nil
+		}
+		return &LiteralExpr{Value: v}, nil
+	}
+	return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+}
+
+// unquoteString strips surrounding single or double quotes from a Cypher string
+// literal and unescapes the internal escape sequences.
+func unquoteString(s string) string {
+	if len(s) < 2 {
+		return s
+	}
+	if (s[0] == '\'' && s[len(s)-1] == '\'') || (s[0] == '"' && s[len(s)-1] == '"') {
+		inner := s[1 : len(s)-1]
+		inner = strings.ReplaceAll(inner, "''", "'")
+		inner = strings.ReplaceAll(inner, `""`, `"`)
+		inner = strings.ReplaceAll(inner, `\\`, `\`)
+		inner = strings.ReplaceAll(inner, `\'`, `'`)
+		inner = strings.ReplaceAll(inner, `\"`, `"`)
+		return inner
+	}
+	return s
 }

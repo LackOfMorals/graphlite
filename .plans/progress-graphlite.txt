@@ -204,3 +204,49 @@ Key Decisions:
   plain fmt.Errorf used for unsupported-construct errors in the planner (same as parser).
 
 Next Task: task-008 (Planner: WHERE clause)
+
+================================================================================
+TASK-008: Planner: WHERE clause (comparisons, AND/OR/NOT, parameter references)
+Date: 2026-05-19T18:00:00Z
+================================================================================
+
+Summary:
+Replaced the `MatchClause.WhereExpr string` raw-text field with a typed
+`Where Expr` field populated by a new ANTLR CST expression tree builder in
+`parser.go`. The builder walks OC_Expression → OC_OrExpression → OC_XorExpression
+→ OC_AndExpression → OC_NotExpression → OC_ComparisonExpression →
+OC_PartialComparisonExpression down to OC_Atom, producing
+ComparisonExpr/BoolExpr/NotExpr/PropExpr/LiteralExpr/ParamRef/VarExpr nodes.
+Unsupported sub-expressions (arithmetic, string operators, IS NULL, etc.) fall
+back to RawExpr without error. The planner's planMatchClause now passes
+mc.Where directly rather than wrapping WhereExpr in RawExpr.
+
+Files Changed:
+- cypher/ast.go (modified — MatchClause.WhereExpr string → Where Expr; updated audit table and GAP-001)
+- cypher/parser.go (modified — removed WhereExpr assignment; added buildExprFromCST,
+  buildOrExpr, buildXorExpr, buildAndExpr, buildNotExpr, buildComparisonExpr,
+  buildPartialComparison, buildAddOrSubtractExpr, buildMulDivExpr, buildPowerOfExpr,
+  buildUnaryExpr, buildStringListNullExpr, buildPropertyOrLabelsExpr, buildAtomExpr,
+  buildLiteralExpr, buildNumberLiteralExpr, unquoteString; updated Parse doc comment)
+- cypher/parser_test.go (modified — updated 3 tests from WhereExpr string checks to
+  typed Where Expr assertions; test 08 and 16 now verify tree structure; test 21 now
+  verifies OR/NOT structure)
+- cypher/planner.go (modified — planMatchClause now returns mc.Where directly)
+- cypher/planner_test.go (modified — test 11 and 12 updated to check typed predicates;
+  11 new tests added covering all 6 operators, AND/OR/NOT, params, literals, float,
+  and invalid syntax)
+
+Key Decisions:
+- Expression tree is built in the parser (not the planner) because the ANTLR CST is only
+  available at parse time; the planner only receives the already-built Expr.
+- Operator extraction uses string prefix matching on GetText() (which strips whitespace) —
+  more robust than inspecting ANTLR token types directly, which would require importing
+  parser constants.
+- XOR is emitted as BoolExpr{Op: "XOR"} rather than OR, preserving semantic accuracy for
+  future translators even though it's rare in practice.
+- buildPartialComparison takes only the context; the LHS is always taken from the
+  enclosing OC_ComparisonExpression's OC_AddOrSubtractExpression.
+- Review finding fixed: removed unused token constants (tokEq etc.) and operatorText()
+  function; cleaned up stale doc comment on Parse.
+
+Next Task: task-009 (Planner: RETURN projections, ORDER BY, LIMIT, SKIP)

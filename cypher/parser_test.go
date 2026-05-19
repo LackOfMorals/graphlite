@@ -233,14 +233,22 @@ func TestParse_MatchThreeHops(t *testing.T) {
 	}
 }
 
-// ─── test 08: WHERE clause preserved as raw text ─────────────────────────────
+// ─── test 08: WHERE clause produces a typed predicate tree ───────────────────
 
-func TestParse_WhereClauseRawText(t *testing.T) {
+func TestParse_WhereClauseTypedTree(t *testing.T) {
 	q := mustParse(t, "MATCH (n:Person) WHERE n.age > 18 AND n.active = true RETURN n")
 
 	m := getMatch(t, q, 0)
-	if m.WhereExpr == "" {
-		t.Error("expected non-empty WhereExpr")
+	if m.Where == nil {
+		t.Error("expected non-nil Where predicate tree")
+	}
+	// Expect AND at the root: (n.age > 18) AND (n.active = true)
+	boolExpr, ok := m.Where.(*cypher.BoolExpr)
+	if !ok {
+		t.Fatalf("expected *BoolExpr at root, got %T", m.Where)
+	}
+	if boolExpr.Op != "AND" {
+		t.Errorf("expected AND, got %q", boolExpr.Op)
 	}
 }
 
@@ -389,14 +397,33 @@ func TestParse_DetachDelete(t *testing.T) {
 	}
 }
 
-// ─── test 16: $param in WHERE ─────────────────────────────────────────────────
+// ─── test 16: $param in WHERE produces ParamRef nodes ────────────────────────
 
 func TestParse_ParamInWhere(t *testing.T) {
 	q := mustParse(t, "MATCH (n:Person) WHERE n.name = $name AND n.age > $minAge RETURN n")
 
 	m := getMatch(t, q, 0)
-	if m.WhereExpr == "" {
-		t.Error("expected non-empty WhereExpr for WHERE with $params")
+	if m.Where == nil {
+		t.Error("expected non-nil Where predicate tree for WHERE with $params")
+	}
+	// Root should be AND.
+	boolExpr, ok := m.Where.(*cypher.BoolExpr)
+	if !ok {
+		t.Fatalf("expected *BoolExpr at root, got %T", m.Where)
+	}
+	if boolExpr.Op != "AND" {
+		t.Errorf("expected AND, got %q", boolExpr.Op)
+	}
+	// Left side: n.name = $name → ComparisonExpr with RHS = ParamRef
+	cmp, ok := boolExpr.Left.(*cypher.ComparisonExpr)
+	if !ok {
+		t.Fatalf("left of AND: expected *ComparisonExpr, got %T", boolExpr.Left)
+	}
+	if cmp.Op != "=" {
+		t.Errorf("expected = operator, got %q", cmp.Op)
+	}
+	if _, ok := cmp.Right.(*cypher.ParamRef); !ok {
+		t.Errorf("right of = expected *ParamRef, got %T", cmp.Right)
 	}
 }
 
@@ -445,14 +472,26 @@ func TestParse_SyntaxError(t *testing.T) {
 	}
 }
 
-// ─── test 21: WHERE OR/NOT combinators ────────────────────────────────────────
+// ─── test 21: WHERE OR/NOT combinators produce typed nodes ───────────────────
 
 func TestParse_WhereOrNotCombinators(t *testing.T) {
 	q := mustParse(t, "MATCH (n:Person) WHERE NOT n.age < 18 OR n.vip = true RETURN n")
 
 	m := getMatch(t, q, 0)
-	if m.WhereExpr == "" {
-		t.Error("expected non-empty WhereExpr for OR/NOT clause")
+	if m.Where == nil {
+		t.Error("expected non-nil Where predicate tree for OR/NOT clause")
+	}
+	// Root: OR
+	boolExpr, ok := m.Where.(*cypher.BoolExpr)
+	if !ok {
+		t.Fatalf("expected *BoolExpr at root, got %T", m.Where)
+	}
+	if boolExpr.Op != "OR" {
+		t.Errorf("expected OR at root, got %q", boolExpr.Op)
+	}
+	// Left side: NOT (n.age < 18)
+	if _, ok := boolExpr.Left.(*cypher.NotExpr); !ok {
+		t.Errorf("left of OR: expected *NotExpr, got %T", boolExpr.Left)
 	}
 }
 
