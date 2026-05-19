@@ -491,3 +491,46 @@ Key Decisions:
 - BindParams returns the original Result unchanged on error (not a partial result).
 
 Next Task: task-016 (Native API: graphlite.Open, query execution, transactions)
+
+================================================================================
+TASK-017: Result types: lazy iteration, Record, Node, Relationship, ResultSummary
+Date: 2026-05-19T24:00:00Z
+================================================================================
+
+Summary:
+Implemented result.go in the root package with QueryResult (lazy streaming cursor),
+EagerResult (pre-collected result), ResultSummary interface, and Counters interface.
+Added mapColumnValue to detect and decode whole-node and whole-relationship JSON
+projections emitted by the SQL translator's VarExpr handling. Tests in result_test.go
+cover scalar columns, node projection, relationship projection, lazy iteration,
+Collect, Consume, counters, and the column value mapper.
+
+Files Changed:
+- result.go (created — QueryResult, EagerResult, ResultSummary, Counters, mapColumnValue,
+  tryParseNode, tryParseRelationship, decodeProps, splitLabels, jsonNumberToElementID)
+- result_test.go (created — 18 tests covering all acceptance criteria)
+- go.mod (modified — added github.com/neo4j/neo4j-go-driver/v6 v6.1.0 as indirect dep;
+  go directive bumped from 1.23.0 to 1.24 by go get)
+- go.sum (modified — new checksums for neo4j driver)
+
+Key Decisions:
+- QueryResult wraps *sql.Rows directly (not a slice of pre-scanned values) for true
+  lazy streaming; each Next() call scans one row on demand.
+- mapColumnValue detects whole-node JSON (keys: id, labels, props; no type key) vs
+  whole-relationship JSON (keys: id, type, start_id, end_id, props) using key presence
+  checks on the decoded map — no sentinel values or extra columns needed.
+- props is stored/returned as a nested JSON object by SQLite's json() function, so
+  decodeProps receives json.RawMessage that is already an object literal, not a string.
+- tryParseNode excludes objects that have a "type" key to avoid misidentifying
+  relationship projections as nodes.
+- QueryCounters is an exported struct (not the internal queryCounters) so the execution
+  layer (task-016) can set counter values without importing unexported types.
+- MapColumnValue and SplitLabels are thin exported wrappers enabling black-box tests
+  from package graphlite_test; they are also useful for task-019 driver compat layer.
+- newEagerResult is called via the exported NewEagerResult shim; keeps the internal
+  implementation path separate from the public API.
+- go directive bumped to 1.24 as a side effect of adding neo4j driver; modernc.org/sqlite
+  v1.35.0 still builds fine at go 1.24 (the go directive is a minimum, not a maximum).
+
+Next Task: task-016 (Native API: graphlite.Open, query execution, transactions) —
+now unblocked since task-017 is complete.

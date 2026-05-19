@@ -17,6 +17,8 @@ github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWE
 github.com/mattn/go-isatty v0.0.20/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D7dTCTo3Y=
 github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOFAw7w=
 github.com/ncruces/go-strftime v1.0.0/go.mod h1:Fwc5htZGVVkseilnfgOVb9mKy6w1naJmn9CehxcKcls=
+github.com/neo4j/neo4j-go-driver/v6 v6.1.0 h1:kx/h9lHV9XJEWTzAV0/23/bzvdl8qcq3rLhHN3Z118M=
+github.com/neo4j/neo4j-go-driver/v6 v6.1.0/go.mod h1:hzSTfNfM31p1uRSzL1F/BAYOgaiTarE6OAQBajfsm+I=
 github.com/nleeper/goment v1.4.4 h1:GlMTpxvhueljArSunzYjN9Ri4SOmpn0Vh2hg2z/IIl8=
 github.com/nleeper/goment v1.4.4/go.mod h1:zDl5bAyDhqxwQKAvkSXMRLOdCowrdZz53ofRJc4VhTo=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=

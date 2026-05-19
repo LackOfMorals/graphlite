@@ -150,3 +150,9 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - `sql.ErrMissingParam{Name string}` is returned by `BindParams` when a required `$paramName` is absent. The task-016 execution layer should wrap it as `*graphlite.ErrMissingParameter` when returning to public API callers.
 - `idSentinel` values in write-operation `Args` are intentionally preserved by `BindParams` — they are resolved by the execution layer (task-016) using last-insert-rowid or scope lookup, not via the params map.
 - nil params map is safe in `BindParams`: Go map lookup on a nil map returns `(nil, false)`, so any `paramSentinel` triggers `ErrMissingParam` rather than a panic.
+- `QueryResult` wraps `*sql.Rows` directly for lazy streaming; `Next(ctx)` scans one row per call via `rows.Scan`.
+- `mapColumnValue` detects whole-node vs whole-relationship JSON by checking for the presence/absence of specific keys (`"type"` distinguishes rels from nodes). No type sentinel column is needed.
+- SQLite's `json()` function returns nested JSON as an embedded object, NOT as a double-encoded string. `"props":{"name":"Alice"}` is correct; `"props":"{\"name\":\"Alice\"}"` is wrong. Tests must use the nested-object form.
+- `QueryCounters` (exported) is the public API for setting write-operation counters; `queryCounters` (unexported) is the internal storage. `SetCounters(QueryCounters)` bridges them.
+- `go.mod` `go` directive was bumped to `1.24` when the neo4j driver was added via `go get`; modernc.org/sqlite v1.35.0 still builds at go 1.24. The directive is a minimum, not a maximum.
+- `NewQueryResultFromRows`, `NewEagerResult`, `MapColumnValue`, `SplitLabels` are exported for black-box tests and for use by task-016/018/019. Internal versions (`newQueryResult`, `newEagerResult`, `mapColumnValue`, `splitLabels`) remain unexported.

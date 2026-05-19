@@ -315,7 +315,7 @@ tasks:
       SQLite rows to Record, Node, and Relationship values matching the neo4j-go-driver/v6 type
       signatures exactly. ResultSummary.Counters() must return node/relationship created/deleted
       counts from the write operation.
-    status: pending
+    status: completed
     dependencies:
       - task-002
       - task-004
@@ -326,7 +326,7 @@ tasks:
       - "Node results have Props map[string]any, Labels []string, ElementId string"
       - "Relationship results have Props, Type, StartElementId, EndElementId string"
       - "ResultSummary.Counters() returns accurate created/deleted counts after write operations"
-    completed_at: null
+    completed_at: "2026-05-19T24:00:00Z"
 
   - id: task-018
     title: "DriverCompat: implement neo4j.Driver interface"
