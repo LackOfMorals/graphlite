@@ -25,3 +25,37 @@ Key Decisions:
 - Test helper uses strings.Contains (stdlib) rather than a manual implementation.
 
 Next Task: task-003 (SQLite schema DDL and storage interface definition)
+
+================================================================================
+TASK-003: SQLite schema DDL and storage interface definition
+Date: 2026-05-19T11:00:00Z
+================================================================================
+
+Summary:
+Defined the store.Store and store.Tx interfaces as the abstraction boundary
+between the Cypher/SQL layers and SQLite persistence. Implemented the full
+DDL schema (nodes + edges tables, four indexes) in schema.go, and the
+SQLiteStore struct in sqlite.go with Open(), Close(), Begin/Commit/Rollback,
+and all node/edge CRUD operations using modernc.org/sqlite (CGO-free).
+A querier interface pattern enables code reuse between non-tx and tx contexts.
+
+Files Changed:
+- store/store.go (implemented — Store interface, Tx interface, NodeRow, EdgeRow)
+- store/schema.go (implemented — schemaDDL const with all tables and indexes)
+- store/sqlite.go (implemented — SQLiteStore, sqliteTx, Open, CRUD helpers, row scanners)
+- store/store_test.go (created — tests for Open, WAL, schema, transactions)
+- go.mod (updated — added modernc.org/sqlite v1.35.0 as direct dependency)
+- go.sum (created — dependency checksums)
+
+Key Decisions:
+- Used querier interface (ExecContext/QueryContext/QueryRowContext) to share
+  helper functions between *sql.DB and *sql.Tx — avoids duplicating all CRUD.
+- sqliteTx embeds *SQLiteStore but overrides all methods to use *sql.Tx executor.
+- listNodesByLabel uses four OR branches (exact, prefix, suffix, middle) to
+  correctly match whole-label names in the comma-separated labels column.
+- modernc.org/sqlite v1.35.0 selected (not latest v1.50.1) to keep Go minimum
+  at 1.23.0 rather than 1.25.0; go.mod go directive is 1.23.0.
+- WAL mode applied before schema DDL; in-memory DBs report "memory" not "wal"
+  for journal_mode — test accounts for this.
+
+Next Task: task-004 (SQLite storage implementation: node/edge CRUD and transactions)

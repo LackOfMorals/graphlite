@@ -47,7 +47,7 @@ tasks:
       persistence) and implement the DDL that creates the nodes and edges tables plus the four
       indexes described in the architecture. Enable WAL mode on open for concurrent-reader support.
       Both :memory: and file-path URIs must be handled.
-    status: pending
+    status: completed
     dependencies:
       - task-001
     acceptance_criteria:
@@ -56,7 +56,7 @@ tasks:
       - "All four indexes (idx_nodes_labels, idx_edges_start, idx_edges_end, idx_edges_type) are created on open"
       - "WAL mode is enabled via PRAGMA journal_mode=WAL on open"
       - ":memory: and file-path URIs both produce a functional store instance"
-    completed_at: null
+    completed_at: "2026-05-19T11:00:00Z"
 
   - id: task-004
     title: "SQLite storage implementation: node/edge CRUD and transactions"

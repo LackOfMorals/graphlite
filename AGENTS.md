@@ -99,3 +99,7 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - The `BindingScope` in `cypher/scope.go` is the most critical data structure — bugs here cause incorrect SQL for any multi-clause query.
 - `Record` uses unexported fields with defensive copies — callers cannot mutate internal state. `NewRecord` panics on key/value length mismatch (programmer error).
 - All error types use pointer receivers (`*ErrFoo`) so `errors.As` works correctly when errors are wrapped with `fmt.Errorf("...: %w", err)`.
+- `modernc.org/sqlite v1.50.1` requires Go 1.25.0; use `v1.35.0` to stay on Go 1.23.0. Running `go get modernc.org/sqlite@latest` will silently bump the `go` directive — pin the version explicitly.
+- In-memory SQLite DBs report `journal_mode = "memory"` even after `PRAGMA journal_mode=WAL` — WAL requires a file. File-based DBs correctly report `"wal"`.
+- The `store` package uses a `querier` interface (ExecContext/QueryContext/QueryRowContext) to share CRUD helpers between `*sql.DB` and `*sql.Tx` — avoids duplicating all methods on `sqliteTx`.
+- `modernc.org/sqlite` is a direct import in `store/sqlite.go`; declare it as a direct (non-indirect) dependency in `go.mod`.
