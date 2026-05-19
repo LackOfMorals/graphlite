@@ -135,3 +135,8 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - `sql.SQLiteDialect.LabelContains` emits four OR LIKE branches — the same pattern as `store.listNodesByLabel`. Returns `[]any` with four copies of the label value; the caller appends them to the SQL args slice in order.
 - Test files in the `sql/` package use `package sql_test` (black-box) with import alias `sqldialect` to avoid collision with the stdlib `"database/sql"` package name.
 - Use `strings.Builder` (not string concatenation `+=`) when building SQL fragments character-by-character — avoids O(n²) allocations.
+- `MatchRelPlan.StartNode` (added task-013) mirrors `EndNode` — both are embedded `MatchNodePlan` values so the translator applies label/prop constraints for both start and end nodes without re-inspecting the AST.
+- `paramSentinel{Name string}` (unexported in `sql/`) is stored in `Result.Args` for `$param` references; task-015 replaces these with actual values. Tests verify sentinel presence by checking the arg is not a `string`.
+- Map iteration over `Props` (map[string]Expr) is non-deterministic — WHERE fragment order for multi-prop inline constraints is not guaranteed. Write tests with at most one prop per map, or sort keys before iterating if deterministic output is required.
+- `MatchRelPlan.StartNode.Labels`/`Props` will be empty when the start variable was already in scope before the hop (MATCH+MATCH re-use); start-node constraints are silently dropped in that case. Fine for v0.1 read queries, but latent issue for multi-clause MATCH patterns.
+- `translateStandaloneFilter` uses `append(append([]string(nil), fc.whereFragments...), predSQL)` to avoid aliasing the source slice's backing array.

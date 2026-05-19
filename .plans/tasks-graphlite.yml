@@ -233,7 +233,7 @@ tasks:
       return nodes) and emits a parameterised SQL string plus an ordered []any argument slice.
       Single-node queries become SELECT from nodes; single-hop queries join nodes and edges; multi-hop
       queries chain multiple joins. The BindingScope drives the variable-to-column mapping.
-    status: pending
+    status: completed
     dependencies:
       - task-012
       - task-009
@@ -245,7 +245,7 @@ tasks:
       - "ORDER BY, LIMIT, and SKIP are appended correctly to the SQL output"
       - "Parameter values are placed in the correct position in the []any argument slice"
       - "Unit tests cover all pattern types and compare SQL output string against expected fixtures"
-    completed_at: null
+    completed_at: "2026-05-19T22:00:00Z"
 
   - id: task-014
     title: "SQL Translator: CREATE, SET, DELETE write operations"

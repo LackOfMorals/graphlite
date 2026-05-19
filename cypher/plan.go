@@ -124,6 +124,9 @@ type MatchRelPlan struct {
 	RelSQLAlias string
 	// StartVar is the Cypher variable name for the start node.
 	StartVar string
+	// StartNode contains the node-level constraints for the start node.
+	// Its SQLAlias is the alias assigned during planning.
+	StartNode MatchNodePlan
 	// EndVar is the Cypher variable name for the end node.
 	EndVar string
 	// EndNode contains the node-level constraints for the destination node.

@@ -201,16 +201,12 @@ func planPatternPart(part PatternPart, optional bool, scope *BindingScope, ac *a
 	// Relationship chain: each hop becomes a MatchRelPlan.
 	// The start node of each hop is either the first node in the chain (for
 	// the first hop) or the end node of the previous hop.
-	//
-	// We do NOT emit a standalone MatchNodePlan for the start node here —
-	// the MatchRelPlan carries the start variable name and the translator
-	// looks it up in the scope for the JOIN condition. If the start variable
-	// is new (not previously bound), we still add it to the scope.
 	var plans []LogicalPlan
 	currentVar := part.Start.Variable
 
-	// Ensure the start node is in the scope.
-	if err := ensureNodeInScope(part.Start, optional, scope, ac); err != nil {
+	// Plan the start node (allocates alias, adds to scope, captures labels/props).
+	startNodePlan, err := planNodePattern(part.Start, optional, scope, ac)
+	if err != nil {
 		return nil, err
 	}
 
@@ -237,6 +233,7 @@ func planPatternPart(part PatternPart, optional bool, scope *BindingScope, ac *a
 			RelProps:    planPropsMap(hop.Rel.Props),
 			RelSQLAlias: relAlias,
 			StartVar:    currentVar,
+			StartNode:   *startNodePlan,
 			EndVar:      hop.Node.Variable,
 			EndNode:     *endNodePlan,
 			ToRight:     hop.Rel.ToRight,
@@ -257,33 +254,12 @@ func planPatternPart(part PatternPart, optional bool, scope *BindingScope, ac *a
 		}
 
 		plans = append(plans, relPlan)
+		// For subsequent hops, the "start node" is the current hop's end node.
 		currentVar = hop.Node.Variable
+		startNodePlan = endNodePlan
 	}
 
 	return plans, nil
-}
-
-// ensureNodeInScope adds the node to the scope if it has a variable name and
-// is not already bound. This handles the start node of a chain.
-func ensureNodeInScope(np NodePattern, optional bool, scope *BindingScope, ac *aliasCounter) error {
-	if np.Variable == "" {
-		// Anonymous node: no binding needed.
-		return nil
-	}
-	if _, already := scope.Resolve(np.Variable); already {
-		// Already bound from an earlier clause or pattern part — reuse.
-		return nil
-	}
-	// New variable: allocate an alias and bind it.
-	alias := ac.nextNode()
-	scope.Bind(np.Variable, Binding{
-		Alias:      alias,
-		Column:     alias + ".id",
-		Table:      "nodes",
-		IsNode:     true,
-		IsNullable: optional,
-	})
-	return nil
 }
 
 // planNodePattern creates a MatchNodePlan for a node pattern.

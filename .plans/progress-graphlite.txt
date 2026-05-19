@@ -376,3 +376,43 @@ Key Decisions:
   dialect implementations to the conformance test.
 
 Next Task: task-013 (SQL Translator: MATCH/WHERE/RETURN read queries)
+
+================================================================================
+TASK-013: SQL Translator: MATCH/WHERE/RETURN read queries
+Date: 2026-05-19T22:00:00Z
+================================================================================
+
+Summary:
+Implemented the SQL translator in sql/translator.go: Translator type with
+NewTranslator(Dialect) and Translate(plan, scope) → Result{SQL, Args}.
+The translator walks ReturnPlan → FilterPlan → MatchNodePlan / MatchRelPlan /
+SequencePlan trees and emits parameterised SELECT statements for read queries.
+Added 20 unit tests in sql/translator_test.go covering all v0.1 read-query forms.
+Also added MatchRelPlan.StartNode to cypher/plan.go (and updated the planner) so
+start-node label/property constraints are properly captured and emitted in SQL.
+
+Files Changed:
+- sql/translator.go (implemented — Translator, Result, fromClause, exprToSQL, paramSentinel)
+- sql/translator_test.go (created — 20 unit tests: node match, label/prop, WHERE, single-hop,
+  undirected, multi-hop, ORDER BY, LIMIT/SKIP, DISTINCT, AND/OR/NOT, inline props, multi-label,
+  param position, left-direction, multi-alias, golden fixture, end-node label, rel var return)
+- cypher/plan.go (modified — added StartNode MatchNodePlan field to MatchRelPlan)
+- cypher/planner.go (modified — populate StartNode in MatchRelPlan; removed ensureNodeInScope
+  (replaced by planNodePattern call); propagate startNodePlan = endNodePlan for multi-hop chains)
+
+Key Decisions:
+- MatchRelPlan.StartNode (embedded MatchNodePlan) mirrors the existing EndNode field pattern
+  so the translator applies start-node label/prop constraints without re-inspecting the AST.
+- paramSentinel{Name} is stored in args for $param references — task-015 replaces these
+  with actual values from the caller-supplied map[string]any.
+- String literals use bind args (never inlined); numeric/bool literals are inlined as SQL values.
+- Boolean false/true → SQL 0/1 (SQLite has no native bool type).
+- Whole-node VarExpr → json_object(...) with id/labels/props; whole-rel → json_object with
+  id/type/start_id/end_id/props.
+- Slice aliasing in translateStandaloneFilter fixed per review: fresh slice allocation avoids
+  mutating the caller's whereFragments backing array.
+- buildFromClauseForSequence cleaned up: removed unused `first` variable and stale comment.
+- Map iteration order for Props is non-deterministic (Go map); single-prop tests avoid this;
+  noted in AGENTS.md for future multi-prop test authors.
+
+Next Task: task-014 (SQL Translator: CREATE, SET, DELETE write operations)
