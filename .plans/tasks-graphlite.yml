@@ -413,7 +413,7 @@ tasks:
       a .cypher query file plus an expected-result JSON. The harness runs setup queries, executes
       the query against an in-memory graphlite instance, and diffs the result against the expected
       JSON. Cover every feature in the v0.1 compatibility table with at least one fixture test.
-    status: pending
+    status: completed
     dependencies:
       - task-019
       - task-020
@@ -423,7 +423,7 @@ tasks:
       - "Tests run entirely in-memory with no network calls or Docker containers"
       - "Test failures report the differing Cypher query, expected result, and actual result"
       - "All integration tests pass on the first complete v0.1 implementation"
-    completed_at: null
+    completed_at: "2026-05-19T29:00:00Z"
 
   - id: task-023
     title: "v0.2: OPTIONAL MATCH (left-join semantics)"

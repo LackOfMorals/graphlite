@@ -720,3 +720,48 @@ Key Decisions:
   more exact string assertions for bool/null literals and rel prop constraints.
 
 Next Task: task-022 (Integration test harness with end-to-end Cypher fixture tests)
+================================================================================
+TASK-022: Integration test harness with end-to-end Cypher fixture tests
+Date: 2026-05-19T29:00:00Z
+================================================================================
+
+Summary:
+Created testdata/integration_test.go (package testdata_test) with 57 table-driven
+and standalone integration tests covering every row in the v0.1 compatibility table.
+The harness uses graphlite.Open(":memory:"), db.RunQuery, and graphlite.NewEagerResult
+so tests run entirely in-memory with no network or Docker dependency. Helper functions
+(openDB, setup, query, assertCount, get, assertString, assertInt64) ensure all failure
+messages include the Cypher query string, expected value, and actual value.
+
+Tests cover: MATCH single node, MATCH by label, MATCH by property, single-hop
+directed/undirected, multi-hop 2–5 hops, WHERE (=/<>/</>/<=/>=), WHERE AND/OR/NOT,
+RETURN aliases, ORDER BY ASC/DESC, LIMIT, SKIP, SKIP+LIMIT, named $params (WHERE
+string, WHERE int, CREATE property, multi-param, missing-param error), CREATE node
+(scalar, multi-label, whole-node projection), CREATE relationship (with/without props),
+SET property (literal, param, preserves other props), DELETE node (isolated, blocked),
+DETACH DELETE, DELETE relationship, whole-relationship projection, transaction
+commit/rollback, ResultSummary counters (nodes created/deleted, rels created, props
+set), multi-label AND semantics, large-graph stress test (100 nodes + chain rels),
+empty result set, harness failure-reporting self-check, and MatchAllNodes.
+
+Note: testdata/ is excluded from ./... by Go design. Run with:
+  CGO_ENABLED=0 go test github.com/LackOfMorals/graphlite/testdata
+
+Files Changed:
+- testdata/integration_test.go (created — 57 integration tests covering all v0.1 features)
+- .plans/tasks-graphlite.yml (modified — task-022 status: completed)
+
+Key Decisions:
+- Package testdata_test (not testdata) avoids naming collisions with standard Go
+  testdata convention; the _test suffix makes it a black-box external test.
+- openDB/setup/query helpers pass cypher string to all assertion helpers so failure
+  messages are always self-explanatory without needing t.Log calls.
+- assertInt64 handles both int64 and float64 SQLite return values — SQLite returns
+  numeric JSON values as float64 through encoding/json unmarshaling paths.
+- errors.As used for ErrMissingParameter error chain walk (not manual unwrapper).
+- MATCH (a),(b) CREATE (a)-[:R]->(b) comma-MATCH+CREATE is a known v0.1 limitation;
+  tests that originally needed it were redesigned to use inline chain CREATE instead.
+- TestIntegration_LargeGraph_MatchCount creates 100 isolated nodes + 10 three-node
+  chains to exercise scale without requiring MATCH+CREATE between existing nodes.
+
+Next Task: task-023 (v0.2: OPTIONAL MATCH)

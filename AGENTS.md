@@ -182,3 +182,8 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - `store` package uses `MaxOpenConns(1)` — in transaction tests, never call store methods (`s.InsertNode`, etc.) while a transaction is open on the same store; the tx holds the sole connection and the store call blocks forever. Use a helper that inserts fixtures via `tx.InsertNode` instead.
 - `translateStandaloneMatch` and `translateStandaloneFilter` are only reached when a bare `MatchNodePlan` or `FilterPlan` is passed directly to `Translate()` — the normal `Parse+Plan` pipeline always wraps the result in a `ReturnPlan`. Test these paths by constructing plan nodes directly.
 - `ProjectionItem` (not `Projection`) is the struct type for `ReturnPlan.Projections`; `MatchRelPlan.RelVariable` (not `RelVar`) is the field for the relationship variable name.
+- `testdata/` package is excluded from `./...` by Go design (Go ignores directories named "testdata"). Run integration tests explicitly: `CGO_ENABLED=0 go test github.com/LackOfMorals/graphlite/testdata`.
+- `Tx.Commit()` and `Tx.Rollback()` take no arguments (not context.Context). `Tx.Run(ctx, cypher, params)` takes a context.
+- `MATCH (a:L1), (b:L2) CREATE (a)-[:R]->(b)` (comma-separated MATCH + CREATE between existing nodes) is a known v0.1 limitation — the translateSequenceWrite path emits `n1.id` which SQLite rejects. Use inline chain CREATE or MATCH single pattern + CREATE instead.
+- `assertInt64` in integration tests must handle both `int64` and `float64` — SQLite returns JSON-decoded numeric values as `float64` through the `encoding/json` path when props are stored as JSON objects.
+- Use `errors.As(err, &target)` to walk wrapped error chains; do not reimplement the unwrapper interface manually.
