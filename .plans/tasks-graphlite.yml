@@ -375,7 +375,7 @@ tasks:
       transaction. Each node carries labels []string and props map[string]any; each edge carries
       type string, startId, endId (referencing the node array index or a stable ID field), and
       props. On any parse or constraint error the entire import is rolled back.
-    status: pending
+    status: completed
     dependencies:
       - task-016
     acceptance_criteria:
@@ -384,7 +384,7 @@ tasks:
       - "A referential integrity error (edge references non-existent node) rolls back the entire import"
       - "JSON depth and size limits (protection against JSON bombs) are enforced during parsing"
       - "Integration test imports a 1000-node, 2000-edge graph and verifies counts via MATCH queries"
-    completed_at: null
+    completed_at: "2026-05-19T12:00:00Z"
 
   - id: task-021
     title: "Unit test suite for all four layers (parser, planner, translator, store)"
