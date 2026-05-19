@@ -1,3 +1,5 @@
+//go:build ignore
+
 // This file is a graphlite-injected shim added to the vendored neo4j package
 // to allow graphlite's compatSession to implement neo4j.Session, including its
 // unexported methods (executeQueryRead, executeQueryWrite, getServerInfo,
