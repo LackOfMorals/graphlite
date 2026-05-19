@@ -1088,3 +1088,384 @@ func TestPlanner_ReturnDistinctProperty(t *testing.T) {
 		t.Fatalf("expected *PropExpr, got %T", proj.Expr)
 	}
 }
+
+// ─── task-010: Planner CREATE nodes and relationships ─────────────────────────
+
+// asCreateNode unwraps a plan as *CreateNodePlan; fails otherwise.
+func asCreateNode(t *testing.T, plan cypher.LogicalPlan) *cypher.CreateNodePlan {
+	t.Helper()
+	cn, ok := plan.(*cypher.CreateNodePlan)
+	if !ok {
+		t.Fatalf("expected *CreateNodePlan, got %T", plan)
+	}
+	return cn
+}
+
+// asCreateRel unwraps a plan as *CreateRelPlan; fails otherwise.
+func asCreateRel(t *testing.T, plan cypher.LogicalPlan) *cypher.CreateRelPlan {
+	t.Helper()
+	cr, ok := plan.(*cypher.CreateRelPlan)
+	if !ok {
+		t.Fatalf("expected *CreateRelPlan, got %T", plan)
+	}
+	return cr
+}
+
+// ─── test 44: CREATE single node with labels and literal props ───────────────
+
+func TestPlanner_CreateSingleNode(t *testing.T) {
+	plan, scope := mustPlan(t, `CREATE (n:Person {name: 'Alice', age: 30})`)
+
+	cn := asCreateNode(t, plan)
+
+	if cn.Variable != "n" {
+		t.Errorf("Variable: want %q got %q", "n", cn.Variable)
+	}
+	if len(cn.Labels) != 1 || cn.Labels[0] != "Person" {
+		t.Errorf("Labels: want [Person] got %v", cn.Labels)
+	}
+	if len(cn.Props) != 2 {
+		t.Errorf("Props: want 2 entries got %d", len(cn.Props))
+	}
+
+	// name = 'Alice' → LiteralExpr{Value: "Alice"}
+	nameProp, ok := cn.Props["name"]
+	if !ok {
+		t.Fatal("expected Props[name]")
+	}
+	lit, ok := nameProp.(*cypher.LiteralExpr)
+	if !ok {
+		t.Fatalf("Props[name]: expected *LiteralExpr, got %T", nameProp)
+	}
+	if lit.Value != "Alice" {
+		t.Errorf("Props[name]: want %q got %v", "Alice", lit.Value)
+	}
+
+	// age = 30 → LiteralExpr{Value: int64(30)}
+	ageProp, ok := cn.Props["age"]
+	if !ok {
+		t.Fatal("expected Props[age]")
+	}
+	ageLit, ok := ageProp.(*cypher.LiteralExpr)
+	if !ok {
+		t.Fatalf("Props[age]: expected *LiteralExpr, got %T", ageProp)
+	}
+	if ageLit.Value != int64(30) {
+		t.Errorf("Props[age]: want int64(30) got %v (%T)", ageLit.Value, ageLit.Value)
+	}
+
+	// Variable "n" must be in scope as a node.
+	b, ok := scope.Resolve("n")
+	if !ok {
+		t.Fatal("expected 'n' in scope after CREATE")
+	}
+	if !b.IsNode {
+		t.Error("expected IsNode=true for created node variable")
+	}
+}
+
+// ─── test 45: CREATE single node without properties ──────────────────────────
+
+func TestPlanner_CreateSingleNodeNoProps(t *testing.T) {
+	plan, scope := mustPlan(t, "CREATE (n:Animal)")
+
+	cn := asCreateNode(t, plan)
+
+	if cn.Variable != "n" {
+		t.Errorf("Variable: want %q got %q", "n", cn.Variable)
+	}
+	if len(cn.Labels) != 1 || cn.Labels[0] != "Animal" {
+		t.Errorf("Labels: want [Animal] got %v", cn.Labels)
+	}
+	if len(cn.Props) != 0 {
+		t.Errorf("Props: want empty got %v", cn.Props)
+	}
+
+	if _, ok := scope.Resolve("n"); !ok {
+		t.Fatal("expected 'n' in scope")
+	}
+}
+
+// ─── test 46: CREATE single node with multi-labels ───────────────────────────
+
+func TestPlanner_CreateSingleNodeMultiLabels(t *testing.T) {
+	plan, _ := mustPlan(t, "CREATE (n:Person:Employee)")
+
+	cn := asCreateNode(t, plan)
+
+	if len(cn.Labels) != 2 {
+		t.Fatalf("expected 2 labels, got %d: %v", len(cn.Labels), cn.Labels)
+	}
+	labelSet := map[string]bool{cn.Labels[0]: true, cn.Labels[1]: true}
+	if !labelSet["Person"] || !labelSet["Employee"] {
+		t.Errorf("expected Person and Employee, got %v", cn.Labels)
+	}
+}
+
+// ─── test 47: CREATE node with $param properties → ParamRef nodes ────────────
+
+func TestPlanner_CreateNodeWithParamProps(t *testing.T) {
+	plan, _ := mustPlan(t, "CREATE (n:Person {name: $name, age: $age})")
+
+	cn := asCreateNode(t, plan)
+
+	if len(cn.Props) != 2 {
+		t.Fatalf("expected 2 props, got %d", len(cn.Props))
+	}
+
+	// name: $name → ParamRef{Name: "name"}
+	nameProp, ok := cn.Props["name"]
+	if !ok {
+		t.Fatal("expected Props[name]")
+	}
+	pr, ok := nameProp.(*cypher.ParamRef)
+	if !ok {
+		t.Fatalf("Props[name]: expected *ParamRef, got %T", nameProp)
+	}
+	if pr.Name != "name" {
+		t.Errorf("ParamRef.Name: want %q got %q", "name", pr.Name)
+	}
+
+	// age: $age → ParamRef{Name: "age"}
+	ageProp, ok := cn.Props["age"]
+	if !ok {
+		t.Fatal("expected Props[age]")
+	}
+	agePR, ok := ageProp.(*cypher.ParamRef)
+	if !ok {
+		t.Fatalf("Props[age]: expected *ParamRef, got %T", ageProp)
+	}
+	if agePR.Name != "age" {
+		t.Errorf("ParamRef.Name: want %q got %q", "age", agePR.Name)
+	}
+}
+
+// ─── test 48: CREATE relationship between two MATCH variables ─────────────────
+
+func TestPlanner_CreateRelationshipBetweenMatchedNodes(t *testing.T) {
+	plan, scope := mustPlan(t, "MATCH (a:Person), (b:Person) CREATE (a)-[:KNOWS]->(b)")
+
+	// The overall plan is a SequencePlan: [matchPlanForA, matchPlanForB, createRel]
+	// or it could be a SequencePlan(match-seq, createRel). Let's unwrap it.
+	seq := asSequence(t, plan)
+
+	// Find the CreateRelPlan in the sequence steps.
+	var relPlan *cypher.CreateRelPlan
+	for _, step := range seq.Steps {
+		if cr, ok := step.(*cypher.CreateRelPlan); ok {
+			relPlan = cr
+			break
+		}
+	}
+	if relPlan == nil {
+		t.Fatal("expected *CreateRelPlan in plan sequence")
+	}
+
+	if relPlan.Type != "KNOWS" {
+		t.Errorf("Type: want %q got %q", "KNOWS", relPlan.Type)
+	}
+	if relPlan.StartVar != "a" {
+		t.Errorf("StartVar: want %q got %q", "a", relPlan.StartVar)
+	}
+	if relPlan.EndVar != "b" {
+		t.Errorf("EndVar: want %q got %q", "b", relPlan.EndVar)
+	}
+	if len(relPlan.Props) != 0 {
+		t.Errorf("Props: want empty got %v", relPlan.Props)
+	}
+
+	// a and b must remain as node bindings in scope.
+	for _, v := range []string{"a", "b"} {
+		b, ok := scope.Resolve(v)
+		if !ok {
+			t.Fatalf("expected %q in scope", v)
+		}
+		if !b.IsNode {
+			t.Errorf("expected %q to be a node binding", v)
+		}
+	}
+}
+
+// ─── test 49: CREATE relationship with properties ─────────────────────────────
+
+func TestPlanner_CreateRelWithProps(t *testing.T) {
+	plan, _ := mustPlan(t, "MATCH (a:Person), (b:Person) CREATE (a)-[:FRIENDS {since: 2020}]->(b)")
+
+	seq := asSequence(t, plan)
+
+	var relPlan *cypher.CreateRelPlan
+	for _, step := range seq.Steps {
+		if cr, ok := step.(*cypher.CreateRelPlan); ok {
+			relPlan = cr
+			break
+		}
+	}
+	if relPlan == nil {
+		t.Fatal("expected *CreateRelPlan in plan sequence")
+	}
+
+	if relPlan.Type != "FRIENDS" {
+		t.Errorf("Type: want %q got %q", "FRIENDS", relPlan.Type)
+	}
+
+	sinceProp, ok := relPlan.Props["since"]
+	if !ok {
+		t.Fatal("expected Props[since]")
+	}
+	lit, ok := sinceProp.(*cypher.LiteralExpr)
+	if !ok {
+		t.Fatalf("Props[since]: expected *LiteralExpr, got %T", sinceProp)
+	}
+	if lit.Value != int64(2020) {
+		t.Errorf("Props[since]: want int64(2020) got %v (%T)", lit.Value, lit.Value)
+	}
+}
+
+// ─── test 50: compound CREATE (node + relationship in one statement) ──────────
+
+func TestPlanner_CompoundCreateNodeAndRel(t *testing.T) {
+	// Creates (a:Person) and (b:Person) as new nodes, then the relationship between them.
+	plan, scope := mustPlan(t, "CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person {name: 'Bob'})")
+
+	// Expected: SequencePlan[CreateNodePlan(a), CreateNodePlan(b), CreateRelPlan(a→b)]
+	seq := asSequence(t, plan)
+
+	if len(seq.Steps) != 3 {
+		t.Fatalf("expected 3 steps (2 nodes + 1 rel), got %d", len(seq.Steps))
+	}
+
+	// Step 0: CreateNodePlan for 'a'
+	nodeA := asCreateNode(t, seq.Steps[0])
+	if nodeA.Variable != "a" {
+		t.Errorf("step[0] Variable: want %q got %q", "a", nodeA.Variable)
+	}
+	if len(nodeA.Labels) != 1 || nodeA.Labels[0] != "Person" {
+		t.Errorf("step[0] Labels: want [Person] got %v", nodeA.Labels)
+	}
+
+	// Step 1: CreateNodePlan for 'b'
+	nodeB := asCreateNode(t, seq.Steps[1])
+	if nodeB.Variable != "b" {
+		t.Errorf("step[1] Variable: want %q got %q", "b", nodeB.Variable)
+	}
+	if len(nodeB.Labels) != 1 || nodeB.Labels[0] != "Person" {
+		t.Errorf("step[1] Labels: want [Person] got %v", nodeB.Labels)
+	}
+
+	// Step 2: CreateRelPlan
+	relPlan := asCreateRel(t, seq.Steps[2])
+	if relPlan.Type != "KNOWS" {
+		t.Errorf("step[2] Type: want %q got %q", "KNOWS", relPlan.Type)
+	}
+	if relPlan.StartVar != "a" {
+		t.Errorf("step[2] StartVar: want %q got %q", "a", relPlan.StartVar)
+	}
+	if relPlan.EndVar != "b" {
+		t.Errorf("step[2] EndVar: want %q got %q", "b", relPlan.EndVar)
+	}
+
+	// Both node variables in scope.
+	for _, v := range []string{"a", "b"} {
+		b, ok := scope.Resolve(v)
+		if !ok {
+			t.Fatalf("expected %q in scope", v)
+		}
+		if !b.IsNode {
+			t.Errorf("expected %q to be a node binding", v)
+		}
+	}
+}
+
+// ─── test 51: compound CREATE with multiple nodes and relationships ────────────
+
+func TestPlanner_CompoundCreateMultipleNodesAndRels(t *testing.T) {
+	// CREATE (a:X)-[:E1]->(b:Y)-[:E2]->(c:Z)
+	// Expected: SequencePlan[CreateNode(a), CreateNode(b), CreateRel(a→b), CreateNode(c), CreateRel(b→c)]
+	// Note: the planner emits end nodes before their outgoing relationships.
+	plan, scope := mustPlan(t, "CREATE (a:X)-[:E1]->(b:Y)-[:E2]->(c:Z)")
+
+	seq := asSequence(t, plan)
+
+	// We should have: node(a), node(b), rel(a→b), node(c), rel(b→c) = 5 steps
+	if len(seq.Steps) != 5 {
+		t.Fatalf("expected 5 steps, got %d: %v", len(seq.Steps), seq.Steps)
+	}
+
+	// Verify node variables are all in scope.
+	for _, v := range []string{"a", "b", "c"} {
+		b, ok := scope.Resolve(v)
+		if !ok {
+			t.Fatalf("expected %q in scope", v)
+		}
+		if !b.IsNode {
+			t.Errorf("expected %q to be a node binding", v)
+		}
+	}
+
+	// Count the relationship plans and verify their types.
+	relPlans := make([]*cypher.CreateRelPlan, 0)
+	for _, step := range seq.Steps {
+		if cr, ok := step.(*cypher.CreateRelPlan); ok {
+			relPlans = append(relPlans, cr)
+		}
+	}
+	if len(relPlans) != 2 {
+		t.Fatalf("expected 2 relationship plans, got %d", len(relPlans))
+	}
+	if relPlans[0].Type != "E1" {
+		t.Errorf("rel[0] Type: want %q got %q", "E1", relPlans[0].Type)
+	}
+	if relPlans[1].Type != "E2" {
+		t.Errorf("rel[1] Type: want %q got %q", "E2", relPlans[1].Type)
+	}
+}
+
+// ─── test 52: CREATE anonymous node (no variable) ────────────────────────────
+
+func TestPlanner_CreateAnonymousNode(t *testing.T) {
+	plan, scope := mustPlan(t, "CREATE (:Ghost)")
+
+	cn := asCreateNode(t, plan)
+
+	if cn.Variable != "" {
+		t.Errorf("Variable: want empty string got %q", cn.Variable)
+	}
+	if len(cn.Labels) != 1 || cn.Labels[0] != "Ghost" {
+		t.Errorf("Labels: want [Ghost] got %v", cn.Labels)
+	}
+	// No variable added to scope.
+	if len(scope.Names()) != 0 {
+		t.Errorf("scope should be empty for anonymous node, got names: %v", scope.Names())
+	}
+}
+
+// ─── test 53: CREATE relationship with $param properties ──────────────────────
+
+func TestPlanner_CreateRelWithParamProps(t *testing.T) {
+	plan, _ := mustPlan(t, "MATCH (a:Person), (b:Person) CREATE (a)-[:KNOWS {since: $since}]->(b)")
+
+	seq := asSequence(t, plan)
+
+	var relPlan *cypher.CreateRelPlan
+	for _, step := range seq.Steps {
+		if cr, ok := step.(*cypher.CreateRelPlan); ok {
+			relPlan = cr
+			break
+		}
+	}
+	if relPlan == nil {
+		t.Fatal("expected *CreateRelPlan in sequence")
+	}
+
+	sinceProp, ok := relPlan.Props["since"]
+	if !ok {
+		t.Fatal("expected Props[since]")
+	}
+	pr, ok := sinceProp.(*cypher.ParamRef)
+	if !ok {
+		t.Fatalf("Props[since]: expected *ParamRef, got %T", sinceProp)
+	}
+	if pr.Name != "since" {
+		t.Errorf("ParamRef.Name: want %q got %q", "since", pr.Name)
+	}
+}

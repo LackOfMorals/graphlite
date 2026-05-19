@@ -277,3 +277,33 @@ Key Decisions:
 - Test 37 also asserts sort Expr != nil (non-nil expressions for all sort specs).
 
 Next Task: task-010 (Planner: CREATE nodes and relationships)
+
+================================================================================
+TASK-010: Planner: CREATE nodes and relationships
+Date: 2026-05-19T19:00:00Z
+================================================================================
+
+Summary:
+The planCreateClause implementation in cypher/planner.go was already complete from
+task-007 (it was stubbed in alongside the MATCH planner). This task audited the
+existing coverage against the acceptance criteria and added 10 targeted unit tests
+(tests 44-53) covering all CREATE pattern forms.
+
+Files Changed:
+- cypher/planner_test.go (modified — 10 new tests covering single-node CREATE with
+  literal/param props, multi-label node, anonymous node, relationship between MATCH-ed
+  nodes, relationship with literal/param props, compound CREATE node+rel, and compound
+  CREATE with multiple nodes and relationships in one statement)
+
+Key Decisions:
+- planCreateClause already handled all acceptance criteria; no new production code needed.
+- Added asCreateNode() and asCreateRel() helper unwrapper functions following the
+  established pattern (asMatchNode, asMatchRel, etc.) already in the file.
+- Tests 48, 49, 53 (MATCH + CREATE) use a loop to find the CreateRelPlan in the sequence
+  rather than hard-coding its index — robust against the exact sequence shape (flat vs nested).
+- Test 51 verifies the 5-step ordering for a 3-node chain: node(a), node(b), rel(a→b),
+  node(c), rel(b→c) — this matches the planCreateClause loop order (end node emitted
+  before its outgoing relationship at each hop).
+- Test 52 verifies anonymous node (no variable) leaves scope empty.
+
+Next Task: task-011 (Planner: SET property, DELETE, and DETACH DELETE)

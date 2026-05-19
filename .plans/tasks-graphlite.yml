@@ -178,7 +178,7 @@ tasks:
       and compound CREATE patterns that create multiple nodes and relationships in one statement.
       The planner emits a CreateNodePlan (labels, props map) and CreateRelPlan (type, start var,
       end var, props map). Props with $param values are carried as ParamRef nodes.
-    status: pending
+    status: completed
     dependencies:
       - task-006
     acceptance_criteria:
@@ -187,7 +187,7 @@ tasks:
       - "Compound CREATE (multiple nodes + relationships in one statement) produces multiple plan nodes in correct order"
       - "$param references in property maps are represented as ParamRef nodes"
       - "Unit tests cover single-node, single-relationship, and compound CREATE patterns"
-    completed_at: null
+    completed_at: "2026-05-19T19:00:00Z"
 
   - id: task-011
     title: "Planner: SET property, DELETE, and DETACH DELETE"
