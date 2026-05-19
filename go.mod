@@ -3,13 +3,13 @@ module github.com/LackOfMorals/graphlite
 go 1.24
 
 require (
+	github.com/antlr/antlr4/runtime/Go/antlr v0.0.0-20210803070921-b358b509191a
 	github.com/cloudprivacylabs/opencypher v1.0.0
 	github.com/neo4j/neo4j-go-driver/v6 v6.1.0
 	modernc.org/sqlite v1.35.0
 )
 
 require (
-	github.com/antlr/antlr4/runtime/Go/antlr v0.0.0-20210803070921-b358b509191a // indirect
 	github.com/cloudprivacylabs/lpg/v2 v2.0.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect

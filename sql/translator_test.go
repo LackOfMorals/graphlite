@@ -217,6 +217,21 @@ func TestTranslate_LimitOnly(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 10b: SKIP only (no LIMIT) — SQLite requires LIMIT -1 OFFSET n
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestTranslate_SkipOnly(t *testing.T) {
+	// Grammar quirk: SKIP precedes LIMIT in cloudprivacylabs/opencypher.
+	// With SKIP only (no LIMIT), the translator must emit LIMIT -1 OFFSET n
+	// because SQLite rejects a bare OFFSET clause without a preceding LIMIT.
+	result := translateCypher(t, `MATCH (n:Person) RETURN n.name SKIP 3`)
+	containsAll(t, result, "LIMIT -1", "OFFSET 3")
+	if !strings.Contains(result.SQL, "LIMIT -1 OFFSET 3") {
+		t.Errorf("skip-only: expected 'LIMIT -1 OFFSET 3' in SQL, got: %s", result.SQL)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Test 11: RETURN DISTINCT
 // ─────────────────────────────────────────────────────────────────────────────
 

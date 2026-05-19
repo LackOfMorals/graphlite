@@ -221,11 +221,15 @@ func (t *Translator) translateReturnPlan(rp *cypher.ReturnPlan, scope *cypher.Bi
 	}
 
 	// LIMIT / SKIP (SQLite: LIMIT n OFFSET m).
+	// SQLite requires LIMIT before OFFSET; when only SKIP is present we emit
+	// LIMIT -1 (unlimited) so that OFFSET is valid syntax.
 	if rp.Limit != nil {
 		fmt.Fprintf(&b, " LIMIT %d", *rp.Limit)
-	}
-	if rp.Skip != nil {
-		fmt.Fprintf(&b, " OFFSET %d", *rp.Skip)
+		if rp.Skip != nil {
+			fmt.Fprintf(&b, " OFFSET %d", *rp.Skip)
+		}
+	} else if rp.Skip != nil {
+		fmt.Fprintf(&b, " LIMIT -1 OFFSET %d", *rp.Skip)
 	}
 
 	return b.String(), nil

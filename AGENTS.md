@@ -11,6 +11,11 @@ graphlite is an embedded property graph database for Go, backed by SQLite and qu
 
 ## Feedback Commands
 
+### First-time setup (if vendor/ is absent)
+```bash
+go mod vendor && bash scripts/apply-vendor-shim.sh
+```
+
 ### Build
 ```bash
 CGO_ENABLED=0 go build ./...
@@ -161,8 +166,12 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - `KindMatchForWrite` SELECT is emitted as the first statement in a MATCH+write sequence. The executor must drain it into memory (`collectMatchRows`) BEFORE running any write statement — SQLite's single connection cannot hold an open `*sql.Rows` cursor and a concurrent write.
 - `Tx` in `session.go` wraps `*sql.Tx` directly (obtained via `d.st.DB().BeginTx()`), not `store.Tx`. This avoids an adapter and gives the execution layer direct access to the transaction.
 - `Consume` and `Collect` on `QueryResult` must guard against `r.rows == nil` — write results have `rows: nil` and `consumed: true` at construction; calling `rows.Close()` on nil panics.
-- `neo4j.Session` and `neo4j.Result` interfaces have **unexported methods** (`executeQueryRead`, `executeQueryWrite`, `getServerInfo`, `verifyAuthentication`, `buffer`, `errorHandler`). They CANNOT be implemented from outside the `neo4j` package directly. The only workaround is to embed the interface itself (`neo4j.Session` or `neo4j.Result`) in your struct — the nil embedded value satisfies the unexported method requirements at compile time (panics if called at runtime via the nil path, but the public override methods prevent that for normal usage paths).
+- `neo4j.Session` and `neo4j.Result` interfaces have **unexported methods** (`executeQueryRead`, `executeQueryWrite`, `getServerInfo`, `verifyAuthentication`, `buffer`, `errorHandler`). They CANNOT be implemented from outside the `neo4j` package directly. For `neo4j.Result`, the nil-embedding trick works because `buffer`/`errorHandler` are never called on user-facing paths. For `neo4j.Session`, nil-embedding is UNSAFE: `neo4j.ExecuteQuery` calls `session.executeQueryWrite` via `selectTxFunctionApi`, which promotes the method through the embedded field — if that field is nil, the call panics at runtime (not compile time). Use `*neo4j.EmbeddableSession` (the vendor shim in `vendor/.../neo4j/graphlite_bridge.go`) instead.
 - `neo4j.Driver` CAN be satisfied from outside the package (all its methods are public). Only `Session` and `Result` require the embedding trick.
+- `neo4j.ExecuteQuery` routes via `session.executeQueryWrite` (default/Write routing) or `session.executeQueryRead` (Read routing). These are unexported Session methods. The `EmbeddableSession` vendor shim satisfies them via `ExecQueryWriteFn`/`ExecQueryReadFn` callbacks set in `NewSession` to delegate to `runManagedTx`.
+- SQLite requires `LIMIT` before `OFFSET`. When Cypher has only `SKIP` (no `LIMIT`), emit `LIMIT -1 OFFSET n` — bare `OFFSET` without a preceding `LIMIT` is a syntax error in SQLite.
+- The vendor shim (`vendor/github.com/neo4j/neo4j-go-driver/v6/neo4j/graphlite_bridge.go`) exports `EmbeddableSession` and `ManagedTransactionWorkFunc`. The `vendor/` directory is gitignored (228MB). The shim source is tracked at `scripts/graphlite_bridge.go`; after any `go mod vendor` run, restore it with `bash scripts/apply-vendor-shim.sh`. Without the shim, `neo4j.ExecuteQuery` panics.
+- Build and test use `-mod=vendor` implicitly when `vendor/` is present. If `vendor/` is absent, run `go mod vendor && bash scripts/apply-vendor-shim.sh` first.
 - `neo4j.ExplicitTransaction` has only public methods (`Run`, `Commit`, `Rollback`, `Close`) and can be implemented directly without embedding.
 - `compatExplicitTx.Close` must check `tx.done` before rolling back — calling Rollback on an already-done Tx returns an error. Guard: `if e.tx.done { return nil }`.
 - `neo4j.Node` and `neo4j.Relationship` are type aliases for `dbtype.Node`/`dbtype.Relationship`. Their properties field is `Props map[string]any` (NOT `Properties`). Use `neo4j.Node{ElementId: ..., Labels: ..., Props: ...}`.

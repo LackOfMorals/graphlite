@@ -64,7 +64,20 @@ func (d *DriverCompat) Target() url.URL { return d.target }
 // NewSession creates a new neo4j.Session backed by this DriverCompat.
 // SessionConfig.DatabaseName is accepted and silently ignored.
 func (d *DriverCompat) NewSession(_ context.Context, _ neo4j.SessionConfig) neo4j.Session {
-	return &compatSession{db: d.db}
+	s := &compatSession{db: d.db}
+	// Wire the EmbeddableSession's unexported-method callbacks to our
+	// runManagedTx implementation. neo4j.ExecuteQuery calls
+	// session.executeQueryWrite (or executeQueryRead) via selectTxFunctionApi;
+	// those methods are satisfied by EmbeddableSession and delegate here.
+	s.EmbeddableSession = &neo4j.EmbeddableSession{
+		ExecQueryReadFn: func(ctx context.Context, work neo4j.ManagedTransactionWork, _ ...func(*neo4j.TransactionConfig)) (any, error) {
+			return s.runManagedTx(ctx, work)
+		},
+		ExecQueryWriteFn: func(ctx context.Context, work neo4j.ManagedTransactionWork, _ ...func(*neo4j.TransactionConfig)) (any, error) {
+			return s.runManagedTx(ctx, work)
+		},
+	}
+	return s
 }
 
 // VerifyConnectivity reports nil — graphlite is always reachable.
@@ -94,31 +107,20 @@ func (d *DriverCompat) Close(_ context.Context) error { return d.db.Close() }
 // compatSession — implements neo4j.Session
 // ─────────────────────────────────────────────────────────────────────────────
 
-// compatSession satisfies neo4j.Session by embedding neo4j.Session (to inherit
-// unexported method signatures required by the interface) and overriding all
-// public methods with real graphlite-backed implementations.
+// compatSession satisfies neo4j.Session by embedding *neo4j.EmbeddableSession
+// (a concrete type injected into the vendored neo4j package by graphlite) instead
+// of embedding a nil neo4j.Session interface. This avoids the nil-pointer panic
+// that would otherwise occur when neo4j.ExecuteQuery calls the unexported
+// session.executeQueryWrite / session.executeQueryRead methods.
 //
-// The embedded neo4j.Session field is nil at runtime. Calling any unexported
-// method (executeQueryRead, executeQueryWrite, getServerInfo, verifyAuthentication)
-// via reflection or internal neo4j package logic will panic — those paths are
-// never reached when graphlite is used as a drop-in replacement, because
-// neo4j.ExecuteQuery calls session.executeQueryRead/Write via the interface value
-// stored in the driver's own session type. Since DriverCompat.NewSession returns
-// *compatSession, ExecuteQuery will dispatch to the public ExecuteRead/ExecuteWrite
-// methods below.
-//
-// NOTE: neo4j.ExecuteQuery internally calls session.executeQueryRead or
-// session.executeQueryWrite (unexported) which ARE methods on compatSession via
-// the embedded nil interface. This would panic at runtime. To make ExecuteQuery
-// work end-to-end, task-019 will implement ExecuteRead and ExecuteWrite correctly;
-// the ExecuteQuery path calls selectTxFunctionApi which references the unexported
-// methods. For task-018 (driver interface + lifecycle only) this is acceptable;
-// task-019 resolves it by ensuring the session returned from NewSession is used
-// correctly by ExecuteQuery callers.
+// The embedded EmbeddableSession holds ExecQueryReadFn / ExecQueryWriteFn
+// callbacks that delegate to this session's runManagedTx. All public Session
+// methods (BeginTransaction, ExecuteRead, ExecuteWrite, Run, Close) are
+// overridden directly on compatSession.
 type compatSession struct {
-	neo4j.Session // embed to satisfy unexported interface methods
-	db            *DB
-	closed        bool
+	*neo4j.EmbeddableSession // concrete embed; satisfies unexported Session methods
+	db                       *DB
+	closed                   bool
 }
 
 // LastBookmarks returns an empty bookmark slice (graphlite does not use bookmarks).

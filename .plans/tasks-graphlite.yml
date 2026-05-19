@@ -356,7 +356,7 @@ tasks:
       and session.ExecuteWrite() with neo4j.ManagedTransaction callback signatures (no retry
       required, but callback must be honoured). Tier 3: session.BeginTransaction() with
       explicit Commit() / Rollback().
-    status: pending
+    status: completed
     dependencies:
       - task-018
     acceptance_criteria:
@@ -365,7 +365,7 @@ tasks:
       - "session.ExecuteWrite with a ManagedTransaction callback writes data and commits on success"
       - "session.BeginTransaction returns an explicit transaction; Commit persists; Rollback reverts"
       - "Integration tests use the DriverCompat API exclusively, running all v0.1 Cypher features through it"
-    completed_at: null
+    completed_at: "2026-05-19T27:00:00Z"
 
   - id: task-020
     title: "JSON bulk import (atomic, rollback on error)"

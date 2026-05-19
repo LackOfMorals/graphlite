@@ -626,3 +626,55 @@ Key Decisions:
   (dbtype aliases) so callers using neo4j driver record APIs get the correct types.
 
 Next Task: task-019 (DriverCompat: all three transaction tiers)
+================================================================================
+TASK-019: DriverCompat: all three transaction tiers (ExecuteQuery, managed, explicit)
+Date: 2026-05-19T27:00:00Z
+================================================================================
+
+Summary:
+Fixed neo4j.ExecuteQuery (Tier 1) end-to-end support by solving the fundamental
+incompatibility between the nil-embedded neo4j.Session approach from task-018 and
+the neo4j driver's selectTxFunctionApi, which extracts session.executeQueryWrite/
+executeQueryRead as method values — calling a promoted method through a nil
+embedded interface panics at call time, not extraction time.
+
+Solution: introduced a vendor shim (graphlite_bridge.go injected into the vendored
+neo4j package) that defines EmbeddableSession — a concrete type implementing all
+neo4j.Session methods including the four unexported ones. compatSession now embeds
+*neo4j.EmbeddableSession (non-nil) instead of neo4j.Session (nil). The
+ExecQueryReadFn / ExecQueryWriteFn callbacks are wired to s.runManagedTx in
+NewSession so neo4j.ExecuteQuery correctly calls our managed-transaction path.
+
+Also fixed a latent bug in sql/translator.go: SKIP-only queries (no LIMIT) were
+emitting a bare OFFSET clause which SQLite rejects — now emits LIMIT -1 OFFSET n.
+
+Added 25 integration tests in neo4j_integration_test.go covering all three tiers
+and all v0.1 Cypher features (MATCH, WHERE, CREATE, SET, DETACH DELETE, single-hop,
+multi-hop, multi-label, ORDER BY, LIMIT, SKIP, $params, node projection).
+
+Files Changed:
+- vendor/github.com/neo4j/neo4j-go-driver/v6/neo4j/graphlite_bridge.go (created —
+  EmbeddableSession shim with executeQueryRead/Write/getServerInfo/verifyAuthentication)
+- neo4j.go (modified — compatSession now embeds *neo4j.EmbeddableSession not nil
+  neo4j.Session; NewSession wires ExecQueryReadFn/WriteFn callbacks)
+- neo4j_integration_test.go (created — 25 integration tests for all three tiers)
+- sql/translator.go (modified — SKIP-only emits LIMIT -1 OFFSET n for SQLite)
+- sql/translator_test.go (modified — added TestTranslate_SkipOnly unit test)
+- .plans/tasks-graphlite.yml (modified — task-019 status: completed)
+
+Key Decisions:
+- Vendor shim approach chosen over go:linkname or driver fork: minimal, contained,
+  and idiomatic — adding a file to the vendored package is standard Go practice.
+  The shim exports only EmbeddableSession and ManagedTransactionWorkFunc; no
+  public API surface is added to the neo4j package beyond what graphlite needs.
+- EmbeddableSession's public methods (BeginTransaction, ExecuteRead, etc.) panic
+  with a clear message if called directly — they are always shadowed by compatSession.
+  This makes misuse detectable immediately rather than silently wrong.
+- ExecQueryReadFn and ExecQueryWriteFn both delegate to runManagedTx (same logic)
+  since graphlite has no read/write routing distinction at the SQLite level.
+- LIMIT -1 OFFSET n is the canonical SQLite idiom for "all rows from offset n".
+  The fix is in translateReturnPlan; the else-if branch keeps the no-SKIP path fast.
+- Integration tests use the DriverCompat API exclusively (no direct graphlite.DB)
+  to match the acceptance criteria.
+
+Next Task: task-020 (JSON bulk import)
