@@ -928,3 +928,163 @@ func TestPlanner_WHERE_InvalidSyntax(t *testing.T) {
 	// Either the parser or planner returns an error — both are acceptable outcomes.
 	// The key requirement is no panic.
 }
+
+// ─── task-009: RETURN projections, ORDER BY, LIMIT, SKIP ─────────────────────
+
+// ─── test 37: ORDER BY multiple columns (ASC and DESC) ──────────────────────
+
+func TestPlanner_ReturnOrderByMultipleColumns(t *testing.T) {
+	plan, _ := mustPlan(t, "MATCH (n:Person) RETURN n.name AS name, n.age AS age ORDER BY name ASC, age DESC")
+
+	rp := asReturn(t, plan)
+
+	// Two projections.
+	if len(rp.Projections) != 2 {
+		t.Fatalf("expected 2 projections, got %d", len(rp.Projections))
+	}
+	if rp.Projections[0].Alias != "name" {
+		t.Errorf("proj[0] alias: want %q got %q", "name", rp.Projections[0].Alias)
+	}
+	if rp.Projections[1].Alias != "age" {
+		t.Errorf("proj[1] alias: want %q got %q", "age", rp.Projections[1].Alias)
+	}
+
+	// Two sort specs: name ASC, age DESC.
+	if len(rp.OrderBy) != 2 {
+		t.Fatalf("expected 2 sort specs, got %d", len(rp.OrderBy))
+	}
+	if rp.OrderBy[0].Descending {
+		t.Error("sort[0] (name ASC): expected Descending=false")
+	}
+	if !rp.OrderBy[1].Descending {
+		t.Error("sort[1] (age DESC): expected Descending=true")
+	}
+
+	// Sort expressions must be resolved (not nil).
+	if rp.OrderBy[0].Expr == nil {
+		t.Error("sort[0] Expr must be non-nil")
+	}
+	if rp.OrderBy[1].Expr == nil {
+		t.Error("sort[1] Expr must be non-nil")
+	}
+}
+
+// ─── test 38: RETURN relationship variable projection ────────────────────────
+
+func TestPlanner_ReturnRelationshipVariable(t *testing.T) {
+	plan, _ := mustPlan(t, "MATCH (a)-[r:KNOWS]->(b) RETURN r")
+
+	rp := asReturn(t, plan)
+
+	if len(rp.Projections) != 1 {
+		t.Fatalf("expected 1 projection, got %d", len(rp.Projections))
+	}
+	proj := rp.Projections[0]
+	// 'r' is in scope as a relationship variable, so parseExprText should produce VarExpr.
+	ve, ok := proj.Expr.(*cypher.VarExpr)
+	if !ok {
+		t.Fatalf("expected *VarExpr for relationship variable return, got %T", proj.Expr)
+	}
+	if ve.Name != "r" {
+		t.Errorf("VarExpr.Name: want %q got %q", "r", ve.Name)
+	}
+}
+
+// ─── test 39: LIMIT only (no SKIP) ──────────────────────────────────────────
+
+func TestPlanner_ReturnLimitOnly(t *testing.T) {
+	plan, _ := mustPlan(t, "MATCH (n:Person) RETURN n LIMIT 5")
+
+	rp := asReturn(t, plan)
+
+	if rp.Limit == nil || *rp.Limit != 5 {
+		t.Errorf("Limit: want 5 got %v", rp.Limit)
+	}
+	if rp.Skip != nil {
+		t.Errorf("Skip: expected nil, got %v", rp.Skip)
+	}
+}
+
+// ─── test 40: SKIP only (no LIMIT) ──────────────────────────────────────────
+
+func TestPlanner_ReturnSkipOnly(t *testing.T) {
+	plan, _ := mustPlan(t, "MATCH (n:Person) RETURN n SKIP 10")
+
+	rp := asReturn(t, plan)
+
+	if rp.Skip == nil || *rp.Skip != 10 {
+		t.Errorf("Skip: want 10 got %v", rp.Skip)
+	}
+	if rp.Limit != nil {
+		t.Errorf("Limit: expected nil, got %v", rp.Limit)
+	}
+}
+
+// ─── test 41: property projection without alias ──────────────────────────────
+
+func TestPlanner_ReturnPropertyNoAlias(t *testing.T) {
+	plan, _ := mustPlan(t, "MATCH (n:Person) RETURN n.name")
+
+	rp := asReturn(t, plan)
+
+	if len(rp.Projections) != 1 {
+		t.Fatalf("expected 1 projection, got %d", len(rp.Projections))
+	}
+	proj := rp.Projections[0]
+	if proj.Alias != "" {
+		t.Errorf("Alias: want empty string got %q", proj.Alias)
+	}
+	pe, ok := proj.Expr.(*cypher.PropExpr)
+	if !ok {
+		t.Fatalf("expected *PropExpr for n.name, got %T", proj.Expr)
+	}
+	if pe.Variable != "n" || pe.Property != "name" {
+		t.Errorf("PropExpr: want n.name got %q.%q", pe.Variable, pe.Property)
+	}
+}
+
+// ─── test 42: three-column ORDER BY (mixed ASC/DESC) ─────────────────────────
+
+func TestPlanner_ReturnOrderByThreeColumns(t *testing.T) {
+	plan, _ := mustPlan(t,
+		"MATCH (n:Person) RETURN n.name AS name, n.age AS age, n.score AS score ORDER BY name ASC, age DESC, score ASC")
+
+	rp := asReturn(t, plan)
+
+	if len(rp.Projections) != 3 {
+		t.Fatalf("expected 3 projections, got %d", len(rp.Projections))
+	}
+	if len(rp.OrderBy) != 3 {
+		t.Fatalf("expected 3 sort specs, got %d", len(rp.OrderBy))
+	}
+
+	// Verify ASC/DESC flags in order.
+	descExpected := []bool{false, true, false}
+	for i, spec := range rp.OrderBy {
+		if spec.Descending != descExpected[i] {
+			t.Errorf("sort[%d]: Descending want %v got %v", i, descExpected[i], spec.Descending)
+		}
+	}
+}
+
+// ─── test 43: RETURN DISTINCT with property ──────────────────────────────────
+
+func TestPlanner_ReturnDistinctProperty(t *testing.T) {
+	plan, _ := mustPlan(t, "MATCH (n:Person) RETURN DISTINCT n.name AS name")
+
+	rp := asReturn(t, plan)
+
+	if !rp.Distinct {
+		t.Error("expected Distinct=true")
+	}
+	if len(rp.Projections) != 1 {
+		t.Fatalf("expected 1 projection, got %d", len(rp.Projections))
+	}
+	proj := rp.Projections[0]
+	if proj.Alias != "name" {
+		t.Errorf("Alias: want %q got %q", "name", proj.Alias)
+	}
+	if _, ok := proj.Expr.(*cypher.PropExpr); !ok {
+		t.Fatalf("expected *PropExpr, got %T", proj.Expr)
+	}
+}

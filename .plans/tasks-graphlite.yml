@@ -160,7 +160,7 @@ tasks:
       projections (n, r), AS aliasing, ORDER BY (ASC/DESC), LIMIT, and SKIP. The ReturnPlan node
       carries a projection list (each item is an expression + optional alias), an optional sort
       spec, and optional limit/skip values.
-    status: pending
+    status: completed
     dependencies:
       - task-007
     acceptance_criteria:
@@ -169,7 +169,7 @@ tasks:
       - "ORDER BY with ASC/DESC on multiple columns produces a correctly ordered sort spec"
       - "LIMIT and SKIP values are carried as integers in the ReturnPlan"
       - "Unit tests cover aliased projections, multi-column ORDER BY, and LIMIT/SKIP combinations"
-    completed_at: null
+    completed_at: "2026-05-19T18:30:00Z"
 
   - id: task-010
     title: "Planner: CREATE nodes and relationships"

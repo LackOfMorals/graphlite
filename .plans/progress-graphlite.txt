@@ -250,3 +250,30 @@ Key Decisions:
   function; cleaned up stale doc comment on Parse.
 
 Next Task: task-009 (Planner: RETURN projections, ORDER BY, LIMIT, SKIP)
+
+================================================================================
+TASK-009: Planner: RETURN projections, ORDER BY, LIMIT, SKIP
+Date: 2026-05-19T18:30:00Z
+================================================================================
+
+Summary:
+The planReturnClause implementation in cypher/planner.go was already complete from
+task-007 (property projections, whole-variable projections, ORDER BY, SKIP, LIMIT,
+DISTINCT). This task audited the existing coverage against the acceptance criteria
+and added 7 targeted unit tests (tests 37-43) to close the gaps.
+
+Files Changed:
+- cypher/planner_test.go (modified — 7 new tests covering multi-column ORDER BY,
+  relationship variable RETURN, LIMIT-only, SKIP-only, property projection without
+  alias, three-column ORDER BY, and RETURN DISTINCT with property)
+
+Key Decisions:
+- planReturnClause already handled all acceptance criteria; no new production code needed.
+- Added tests 37-43 to explicitly verify: multi-column ORDER BY ASC/DESC correctness,
+  VarExpr for relationship variable projection, nil-independence of Skip/Limit fields,
+  and DISTINCT flag propagation.
+- Test 38 verifies that 'r' (a relationship variable in scope) produces *VarExpr —
+  this was not covered by prior tests which only checked node variables.
+- Test 37 also asserts sort Expr != nil (non-nil expressions for all sort specs).
+
+Next Task: task-010 (Planner: CREATE nodes and relationships)
