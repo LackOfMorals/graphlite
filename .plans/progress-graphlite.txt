@@ -585,3 +585,44 @@ Key Decisions:
   bug where Kind defaulted to 0 (KindSelect) caused CREATEs to return lazy cursors.
 
 Next Task: task-018 (DriverCompat: implement neo4j.Driver interface)
+
+================================================================================
+TASK-018: DriverCompat: implement neo4j.Driver interface
+Date: 2026-05-19T26:00:00Z
+================================================================================
+
+Summary:
+Implemented neo4j.go as the full DriverCompat adapter satisfying neo4j.Driver v6.
+The key challenge: neo4j.Session and neo4j.Result both have unexported methods
+(executeQueryRead, executeQueryWrite, getServerInfo, verifyAuthentication, buffer,
+errorHandler), making them impossible to implement from outside the neo4j package.
+Solved via interface embedding: compatSession embeds neo4j.Session (nil at runtime)
+to inherit unexported method signatures; compatResult embeds neo4j.Result similarly.
+All public methods are overridden with real graphlite-backed implementations.
+Promoted neo4j driver from indirect to direct dependency in go.mod.
+15 tests in neo4j_test.go cover all acceptance criteria.
+
+Files Changed:
+- neo4j.go (implemented — DriverCompat, NewDriver, compatSession, compatManagedTx,
+  compatExplicitTx, compatResult, toNeo4jRecord, toNeo4jValue, compatResultSummary,
+  compatCounters, compatServerInfo, compatQuery, compatDatabaseInfo)
+- neo4j_test.go (created — 15 tests covering all acceptance criteria plus session/tx)
+- go.mod (modified — neo4j driver promoted from indirect to direct dependency)
+
+Key Decisions:
+- neo4j.Session and neo4j.Result have unexported methods; the only way to satisfy
+  them from outside the neo4j package is to embed the interface itself (nil value)
+  in our struct. This is a standard Go pattern for partial interface implementation.
+- compatExplicitTx.Close guards against double-rollback by checking tx.done first;
+  returns nil if the transaction is already committed or rolled back.
+- Dead compatGqlStatusObject type (and the notifications import) removed after review
+  — it was never returned by any method and added only "for completeness".
+- neo4j.go file doc comment changed from package-level to file-level to avoid
+  duplicating the canonical package doc comment in driver.go (AGENTS.md gotcha).
+- NewDriver accepts neo4j.AuthToken (value type) rather than auth.TokenManager
+  (interface) — this matches the common call patterns (NoAuth(), BasicAuth()) that
+  callers use and keeps the signature simple for a drop-in local substitute.
+- toNeo4jValue converts graphlite *Node/*Relationship to neo4j.Node/Relationship
+  (dbtype aliases) so callers using neo4j driver record APIs get the correct types.
+
+Next Task: task-019 (DriverCompat: all three transaction tiers)

@@ -336,7 +336,7 @@ tasks:
       constructor. Auth config is accepted and silently ignored. DatabaseName in SessionConfig
       is accepted and ignored. The URI \":memory:\" opens an in-memory store; a file path opens
       a persistent store. A compile-time interface assertion must guard against v6 drift.
-    status: pending
+    status: completed
     dependencies:
       - task-016
       - task-017
@@ -346,7 +346,7 @@ tasks:
       - "neo4j.BasicAuth and neo4j.NoAuth are accepted without error and ignored"
       - "SessionConfig.DatabaseName is accepted and ignored without error"
       - "driver.Close(ctx) releases all resources cleanly"
-    completed_at: null
+    completed_at: "2026-05-19T26:00:00Z"
 
   - id: task-019
     title: "DriverCompat: all three transaction tiers (ExecuteQuery, managed, explicit)"
