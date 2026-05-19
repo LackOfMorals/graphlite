@@ -117,3 +117,9 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - WITH pipeline scoping: use a fresh `NewScope()` for the next stage (not `Child()`) — only projected variables are re-bound. `Child()` inherits everything from the parent; WITH explicitly limits visibility.
 - `RawExpr{Text}` is a fallback for deferred expression parsing; task-008 replaces raw WHERE strings with typed `ComparisonExpr`/`BoolExpr`/`NotExpr` trees.
 - Only one file in a package should have a package-level doc comment (the `package foo` comment with a `//` block above it); duplicating it in other files causes `go doc` to show it twice.
+- `Plan(q *Query, scope *BindingScope)` is the planner entry point in `cypher/planner.go`; the scope is mutated in place and populated with all named variables.
+- `aliasCounter` in the planner hands out `n0/n1/r0/r1` SQL table aliases; the translator resolves variable→alias via BindingScope, not by inspecting plan node order.
+- Multi-hop MATCH patterns produce a `SequencePlan{Steps: []MatchRelPlan{...}}` — one `MatchRelPlan` per hop; the translator emits one SQL JOIN per step.
+- `planNodePatternNewAlias` is a package-level `var` aliasing `planNodePattern` — the two functions were identical (only the name differed for call-site clarity).
+- `parseExprText` in `planner.go` converts raw expression strings to typed `Expr` nodes; unrecognised forms fall back to `RawExpr`. It does NOT handle negative literals (e.g. `-42` → `RawExpr`).
+- `ErrUnsupportedCypher` lives in the root package; the `cypher/` package cannot import it (circular dep) — use `fmt.Errorf` for unsupported-construct errors in `cypher/`.

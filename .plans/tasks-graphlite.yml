@@ -124,7 +124,7 @@ tasks:
       (a)-[r:TYPE]->(b) directed single-hop, (a)-[r:TYPE]-(b) undirected single-hop, and
       multi-hop chains up to 5 hops. Each hop adds a BindingScope entry for the relationship
       and target node variable.
-    status: pending
+    status: completed
     dependencies:
       - task-006
     acceptance_criteria:
@@ -133,7 +133,7 @@ tasks:
       - "Multi-hop chains of 2, 3, 4, and 5 hops produce the correct number of join plan nodes"
       - "Undirected hops emit a plan that checks both directions (start_id and end_id)"
       - "Unit tests assert the exact LogicalPlan tree for each pattern form"
-    completed_at: null
+    completed_at: "2026-05-19T16:30:00Z"
 
   - id: task-008
     title: "Planner: WHERE clause (comparisons, AND/OR/NOT, parameter references)"

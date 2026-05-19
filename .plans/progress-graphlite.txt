@@ -167,3 +167,40 @@ Key Decisions:
   (only projected variables are visible in the next stage).
 
 Next Task: task-007 (Planner: MATCH patterns)
+
+================================================================================
+TASK-007: Planner: MATCH patterns (node, label, property, single-hop, multi-hop)
+Date: 2026-05-19T16:30:00Z
+================================================================================
+
+Summary:
+Implemented cypher/planner.go with the Plan(q *Query, scope *BindingScope) function
+that walks the AST and emits a LogicalPlan tree. Covers all six MATCH pattern forms:
+(n), (n:Label), (n:Label {prop:val}), directed single-hop, undirected single-hop,
+and multi-hop chains (2-5 hops). Also stubs CREATE, SET, DELETE clause planning
+(needed to produce a coherent plan tree for compound queries) and implements
+parseExprText for converting raw expression strings to typed Expr nodes.
+25 unit tests cover all pattern forms and edge cases.
+
+Files Changed:
+- cypher/planner.go (implemented — Plan, planMatchClause, planPatternPart,
+  planNodePattern, planCreateClause, planSetClause, planDeleteClause,
+  parseExprText, planPropsMap, aliasCounter)
+- cypher/planner_test.go (created — 25 unit tests covering all six MATCH forms,
+  multi-hop alias uniqueness, scope binding, OPTIONAL MATCH, inline props/params)
+
+Key Decisions:
+- aliasCounter generates n0/n1/r0/r1 aliases; the translator resolves variable→alias
+  via BindingScope, not by re-examining plan node order.
+- planNodePattern and planNodePatternNewAlias were consolidated into one function
+  (planNodePatternNewAlias is an alias var pointing to planNodePattern).
+- WHERE clause stored as RawExpr (task-008 replaces with typed predicate tree).
+- planCreateClause also stubs SET/DELETE planning so the planner handles full
+  compound queries (MATCH+SET, MATCH+DELETE, compound CREATE) from day one.
+- Variable-length path patterns (VarLength=true) return a clear error immediately.
+- parseExprText handles $param, string/int/float/bool/null literals, n.prop, and
+  bare variable names; complex expressions fall back to RawExpr.
+- ErrUnsupportedCypher is in the root package (cannot import from cypher/);
+  plain fmt.Errorf used for unsupported-construct errors in the planner (same as parser).
+
+Next Task: task-008 (Planner: WHERE clause)
