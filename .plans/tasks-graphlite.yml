@@ -12,14 +12,14 @@ tasks:
       parser, planner, translator, store packages), and wire up a GitHub Actions CI pipeline
       that builds and tests on Linux amd64/arm64, macOS arm64, and Windows amd64 in CGO-free
       mode. Add go.sum, .gitignore, and an initial README stub with the compatibility table.
-    status: pending
+    status: completed
     dependencies: []
     acceptance_criteria:
       - "go build ./... succeeds on all three target platforms in CGO-free mode (GOFLAGS=-tags=modernc)"
       - "GitHub Actions workflow runs on push and PR, covering linux/amd64, linux/arm64, darwin/arm64, windows/amd64"
       - "Package layout matches the architecture diagram: driver, session, compat, parser, planner, translator, store top-level packages"
       - "README exists with compatibility table stub and honest scope statement"
-    completed_at: null
+    completed_at: "2026-05-19T00:00:00Z"
 
   - id: task-002
     title: "Core domain types: Node, Relationship, Record, error types"

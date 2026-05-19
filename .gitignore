@@ -1,0 +1,30 @@
+# Binaries and build output
+/graphlite
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test output
+*.test
+*.out
+/bench/results/
+
+# Go module cache and vendor
+vendor/
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# GoReleaser
+dist/

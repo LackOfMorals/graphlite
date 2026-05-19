@@ -1,0 +1,3 @@
+// Package compat contains the openCypher TCK test harness.
+// Run with: go test -tags=tck ./compat/...
+package compat
