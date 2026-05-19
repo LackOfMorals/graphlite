@@ -179,3 +179,6 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - Only one file per package should have a `// Package foo ...` doc comment. Use `// This file contains ...` for secondary files to avoid `go doc` showing duplicate package docs.
 - `buildSelectList` adds implicit aliases: `VarExpr` → variable name; `PropExpr` → `var_name` (underscore, not dot — dot is not a valid unquoted SQL identifier). Explicit `AS alias` always wins.
 - `buildMatchForWriteSelect` sorts `scope.Names()` before building columns for deterministic SQL output (map iteration is unordered).
+- `store` package uses `MaxOpenConns(1)` — in transaction tests, never call store methods (`s.InsertNode`, etc.) while a transaction is open on the same store; the tx holds the sole connection and the store call blocks forever. Use a helper that inserts fixtures via `tx.InsertNode` instead.
+- `translateStandaloneMatch` and `translateStandaloneFilter` are only reached when a bare `MatchNodePlan` or `FilterPlan` is passed directly to `Translate()` — the normal `Parse+Plan` pipeline always wraps the result in a `ReturnPlan`. Test these paths by constructing plan nodes directly.
+- `ProjectionItem` (not `Projection`) is the struct type for `ReturnPlan.Projections`; `MatchRelPlan.RelVariable` (not `RelVar`) is the field for the relationship variable name.

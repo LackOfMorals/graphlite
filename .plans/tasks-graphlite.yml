@@ -394,7 +394,7 @@ tasks:
       SQL string and parameter slice given a known LogicalPlan, and store tests assert CRUD
       behaviour against an in-memory SQLite instance. Each test is independent and does not
       require a running database server.
-    status: pending
+    status: completed
     dependencies:
       - task-014
       - task-004
@@ -404,7 +404,7 @@ tasks:
       - "Translator tests compare SQL output against golden fixture strings"
       - "Store tests cover insert, get, delete, list, and transaction rollback"
       - "Test coverage for parser, planner, and translator packages is at least 80%"
-    completed_at: null
+    completed_at: "2026-05-19T28:00:00Z"
 
   - id: task-022
     title: "Integration test harness with end-to-end Cypher fixture tests"

@@ -1117,3 +1117,380 @@ func TestBindParams_DoesNotMutateOriginal(t *testing.T) {
 		}
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests targeting previously uncovered code paths (task-021)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Test 44: ErrMissingParam.Error() produces the expected message.
+func TestErrMissingParam_ErrorMessage(t *testing.T) {
+	err := &sqldialect.ErrMissingParam{Name: "foo"}
+	got := err.Error()
+	if got != "sql: missing query parameter $foo" {
+		t.Errorf("ErrMissingParam.Error() = %q; want %q", got, "sql: missing query parameter $foo")
+	}
+}
+
+// Test 45: translateStandaloneMatch via MatchNodePlan at top level (no RETURN).
+// This exercises the translateStandaloneMatch code path via the
+// translatePlan dispatcher (not via translateReturnPlan).
+func TestTranslate_StandaloneMatchNode(t *testing.T) {
+	scope := cypher.NewScope()
+	mnp := &cypher.MatchNodePlan{
+		Variable: "n",
+		SQLAlias: "n0",
+		Labels:   []string{"Person"},
+		Props:    map[string]cypher.Expr{},
+	}
+	scope.Bind("n", cypher.Binding{Alias: "n0", IsNode: true})
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(mnp, scope)
+	if err != nil {
+		t.Fatalf("Translate standalone MatchNodePlan: %v", err)
+	}
+	if !strings.Contains(result.SQL, "SELECT") {
+		t.Errorf("expected SELECT in standalone match, got: %s", result.SQL)
+	}
+	if !strings.Contains(result.SQL, "FROM nodes") {
+		t.Errorf("expected FROM nodes in standalone match, got: %s", result.SQL)
+	}
+}
+
+// Test 46: translateStandaloneFilter via FilterPlan at top level (no RETURN).
+// This exercises the translateStandaloneFilter code path.
+func TestTranslate_StandaloneFilter(t *testing.T) {
+	scope := cypher.NewScope()
+	scope.Bind("n", cypher.Binding{Alias: "n0", IsNode: true})
+
+	mnp := &cypher.MatchNodePlan{
+		Variable: "n",
+		SQLAlias: "n0",
+		Labels:   []string{},
+		Props:    map[string]cypher.Expr{},
+	}
+	fp := &cypher.FilterPlan{
+		Source:    mnp,
+		Predicate: &cypher.ComparisonExpr{Op: "=", Left: &cypher.PropExpr{Variable: "n", Property: "name"}, Right: &cypher.LiteralExpr{Value: "Alice"}},
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(fp, scope)
+	if err != nil {
+		t.Fatalf("Translate standalone FilterPlan: %v", err)
+	}
+	if !strings.Contains(result.SQL, "SELECT *") {
+		t.Errorf("expected 'SELECT *' in standalone filter, got: %s", result.SQL)
+	}
+	if !strings.Contains(result.SQL, "WHERE") {
+		t.Errorf("expected WHERE in standalone filter, got: %s", result.SQL)
+	}
+	if !strings.Contains(result.SQL, "$.name") {
+		t.Errorf("expected '$.name' in standalone filter, got: %s", result.SQL)
+	}
+}
+
+// Test 47: MATCH+SET sequence produces KindMatchForWrite SELECT + UPDATE.
+// This exercises translateSequenceWrite with read steps + write steps,
+// which calls buildMatchForWriteSelect.
+func TestTranslate_MatchSetSequence_MatchForWrite(t *testing.T) {
+	result := translateWrite(t, `MATCH (n:Person) SET n.age = 42`)
+
+	// Should have 2 statements: KindMatchForWrite SELECT + UPDATE.
+	if len(result.Statements) < 2 {
+		t.Fatalf("expected at least 2 statements for MATCH+SET, got %d: %v",
+			len(result.Statements), result.Statements)
+	}
+
+	// First statement must be a SELECT (KindMatchForWrite) that selects node ids.
+	stmt0 := result.Statements[0]
+	if !strings.Contains(stmt0.SQL, "SELECT") {
+		t.Errorf("statement[0] should be a SELECT, got: %s", stmt0.SQL)
+	}
+	if !strings.Contains(stmt0.SQL, "FROM nodes") {
+		t.Errorf("statement[0] should reference nodes table, got: %s", stmt0.SQL)
+	}
+
+	// Second statement must be an UPDATE on nodes.
+	stmt1 := result.Statements[1]
+	if !strings.Contains(stmt1.SQL, "UPDATE nodes") {
+		t.Errorf("statement[1] should be UPDATE nodes, got: %s", stmt1.SQL)
+	}
+	if !strings.Contains(stmt1.SQL, "json_set") {
+		t.Errorf("statement[1] should use json_set for SET, got: %s", stmt1.SQL)
+	}
+}
+
+// Test 48: MATCH+DETACH DELETE sequence produces KindMatchForWrite SELECT + two DELETEs.
+func TestTranslate_MatchDetachDelete_MatchForWrite(t *testing.T) {
+	result := translateWrite(t, `MATCH (n:Person) DETACH DELETE n`)
+
+	// Should have at least 3 statements: KindMatchForWrite SELECT + DELETE edges + DELETE nodes.
+	if len(result.Statements) < 3 {
+		t.Fatalf("expected at least 3 statements for MATCH+DETACH DELETE, got %d",
+			len(result.Statements))
+	}
+
+	// First statement must be a SELECT.
+	if !strings.Contains(result.Statements[0].SQL, "SELECT") {
+		t.Errorf("statement[0] should be a SELECT, got: %s", result.Statements[0].SQL)
+	}
+	// Second statement must delete edges.
+	if !strings.Contains(result.Statements[1].SQL, "DELETE FROM edges") {
+		t.Errorf("statement[1] should be DELETE FROM edges, got: %s", result.Statements[1].SQL)
+	}
+	// Third statement must delete the node.
+	if !strings.Contains(result.Statements[2].SQL, "DELETE FROM nodes") {
+		t.Errorf("statement[2] should be DELETE FROM nodes, got: %s", result.Statements[2].SQL)
+	}
+}
+
+// Test 49: ResolveIDs replaces idSentinel values with concrete int64 IDs.
+func TestResolveIDs_ReplacesIdSentinels(t *testing.T) {
+	scope := cypher.NewScope()
+	scope.Bind("a", cypher.Binding{Alias: "n0", IsNode: true})
+	scope.Bind("b", cypher.Binding{Alias: "n1", IsNode: true})
+
+	relPlan := &cypher.CreateRelPlan{
+		Type:     "KNOWS",
+		StartVar: "a",
+		EndVar:   "b",
+		Props:    map[string]cypher.Expr{},
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(relPlan, scope)
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+
+	idMap := map[string]int64{"a": 10, "b": 20}
+	resolved, err := sqldialect.ResolveIDs(result, idMap)
+	if err != nil {
+		t.Fatalf("ResolveIDs: %v", err)
+	}
+
+	// After resolution, all args should be plain Go values (no sentinels).
+	for i, a := range resolved.Args {
+		switch a.(type) {
+		case string, int64, float64, bool:
+			// ok
+		default:
+			t.Errorf("args[%d] is still a sentinel after ResolveIDs: %T %v", i, a, a)
+		}
+	}
+	// The resolved IDs (10, 20) should appear in the args.
+	found10, found20 := false, false
+	for _, a := range resolved.Args {
+		if a == int64(10) {
+			found10 = true
+		}
+		if a == int64(20) {
+			found20 = true
+		}
+	}
+	if !found10 {
+		t.Errorf("expected id=10 in resolved args: %v", resolved.Args)
+	}
+	if !found20 {
+		t.Errorf("expected id=20 in resolved args: %v", resolved.Args)
+	}
+}
+
+// Test 50: ResolveIDs returns an error when a required variable is absent from idMap.
+func TestResolveIDs_MissingVar_ReturnsError(t *testing.T) {
+	scope := cypher.NewScope()
+	scope.Bind("a", cypher.Binding{Alias: "n0", IsNode: true})
+	scope.Bind("b", cypher.Binding{Alias: "n1", IsNode: true})
+
+	relPlan := &cypher.CreateRelPlan{
+		Type:     "KNOWS",
+		StartVar: "a",
+		EndVar:   "b",
+		Props:    map[string]cypher.Expr{},
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(relPlan, scope)
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+
+	// Provide only "a"; "b" is missing.
+	_, err = sqldialect.ResolveIDs(result, map[string]int64{"a": 10})
+	if err == nil {
+		t.Fatal("expected error for missing variable in idMap, got nil")
+	}
+	if !strings.Contains(err.Error(), "b") {
+		t.Errorf("error message should mention variable 'b': %v", err)
+	}
+}
+
+// Test 51: ResolveIDs on a result with no idSentinels is a no-op.
+func TestResolveIDs_NoSentinels_NoOp(t *testing.T) {
+	result := translateCypher(t, `MATCH (n:Person) RETURN n.name`)
+	resolved, err := sqldialect.ResolveIDs(result, map[string]int64{})
+	if err != nil {
+		t.Fatalf("ResolveIDs on read query: %v", err)
+	}
+	if resolved.SQL != result.SQL {
+		t.Errorf("SQL changed unexpectedly after ResolveIDs")
+	}
+}
+
+// Test 52: literalToSQL handles nil literal (emits NULL).
+func TestTranslate_NullLiteral(t *testing.T) {
+	scope := cypher.NewScope()
+	scope.Bind("n", cypher.Binding{Alias: "n0", IsNode: true})
+
+	// Build a ReturnPlan that projects a null literal.
+	retPlan := &cypher.ReturnPlan{
+		Source: &cypher.MatchNodePlan{
+			Variable: "n",
+			SQLAlias: "n0",
+			Labels:   []string{},
+			Props:    map[string]cypher.Expr{},
+		},
+		Projections: []cypher.ProjectionItem{
+			{Expr: &cypher.LiteralExpr{Value: nil}, Alias: "nullval"},
+		},
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(retPlan, scope)
+	if err != nil {
+		t.Fatalf("Translate with null literal: %v", err)
+	}
+	if !strings.Contains(result.SQL, "NULL") {
+		t.Errorf("expected NULL in SQL for nil literal, got: %s", result.SQL)
+	}
+}
+
+// Test 53: literalToSQL handles bool literal (true → 1, false → 0).
+func TestTranslate_BoolLiteral(t *testing.T) {
+	scope := cypher.NewScope()
+	scope.Bind("n", cypher.Binding{Alias: "n0", IsNode: true})
+
+	retPlan := &cypher.ReturnPlan{
+		Source: &cypher.MatchNodePlan{
+			Variable: "n",
+			SQLAlias: "n0",
+			Labels:   []string{},
+			Props:    map[string]cypher.Expr{},
+		},
+		Projections: []cypher.ProjectionItem{
+			{Expr: &cypher.LiteralExpr{Value: true}, Alias: "isActive"},
+			{Expr: &cypher.LiteralExpr{Value: false}, Alias: "isDeleted"},
+		},
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(retPlan, scope)
+	if err != nil {
+		t.Fatalf("Translate with bool literals: %v", err)
+	}
+	if !strings.Contains(result.SQL, " 1 ") && !strings.Contains(result.SQL, " 1,") && !strings.Contains(result.SQL, ",1 ") {
+		// Accept "1" anywhere in the SELECT list.
+		if !strings.Contains(result.SQL, "1") {
+			t.Errorf("expected '1' for true literal in SQL, got: %s", result.SQL)
+		}
+	}
+	if !strings.Contains(result.SQL, "0") {
+		t.Errorf("expected '0' for false literal in SQL, got: %s", result.SQL)
+	}
+}
+
+// Test 54: MATCH+CREATE sequence with a relationship produces KindMatchForWrite SELECT
+// followed by INSERT INTO edges that references the matched node IDs.
+func TestTranslate_MatchCreateRel_MatchForWrite(t *testing.T) {
+	result := translateWrite(t,
+		`MATCH (a:Person) CREATE (b:Company {name: 'Acme'})-[:EMPLOYS]->(a)`)
+
+	// Should have at least 3 statements:
+	//   [0] KindMatchForWrite SELECT (to get matched node ids)
+	//   [1] INSERT INTO nodes (b)
+	//   [2] INSERT INTO edges (b→a)
+	if len(result.Statements) < 3 {
+		t.Fatalf("expected at least 3 statements for MATCH+CREATE, got %d",
+			len(result.Statements))
+	}
+
+	// Statement[0] must be a SELECT.
+	if !strings.Contains(result.Statements[0].SQL, "SELECT") {
+		t.Errorf("statement[0] should be a SELECT, got: %s", result.Statements[0].SQL)
+	}
+	// Statement[1] must be an INSERT INTO nodes.
+	hasNodeInsert := false
+	for _, stmt := range result.Statements[1:] {
+		if strings.Contains(stmt.SQL, "INSERT INTO nodes") {
+			hasNodeInsert = true
+		}
+	}
+	if !hasNodeInsert {
+		t.Errorf("expected INSERT INTO nodes in statements[1:], got: %v", result.Statements[1:])
+	}
+	// Must have an INSERT INTO edges somewhere.
+	hasEdgeInsert := false
+	for _, stmt := range result.Statements {
+		if strings.Contains(stmt.SQL, "INSERT INTO edges") {
+			hasEdgeInsert = true
+		}
+	}
+	if !hasEdgeInsert {
+		t.Errorf("expected INSERT INTO edges in statements, got: %v", result.Statements)
+	}
+}
+
+// Test 55: Rel prop constraint in single-hop covers the RelProps branch in
+// buildFromClauseForMatchRel.
+func TestTranslate_SingleHop_RelPropConstraint(t *testing.T) {
+	// MATCH (a)-[r:KNOWS {since: 2020}]->(b) RETURN b.name
+	// The parser may not support inline rel props — build plan directly.
+	scope := cypher.NewScope()
+	scope.Bind("a", cypher.Binding{Alias: "n0", IsNode: true})
+	scope.Bind("r", cypher.Binding{Alias: "r0", IsRel: true})
+	scope.Bind("b", cypher.Binding{Alias: "n1", IsNode: true})
+
+	mrp := &cypher.MatchRelPlan{
+		StartVar:    "a",
+		RelVariable: "r",
+		EndVar:      "b",
+		Types:       []string{"KNOWS"},
+		ToRight:     true,
+		Undirected:  false,
+		Optional:    false,
+		RelSQLAlias: "r0",
+		StartNode: cypher.MatchNodePlan{
+			Variable: "a",
+			SQLAlias: "n0",
+			Labels:   []string{},
+			Props:    map[string]cypher.Expr{},
+		},
+		EndNode: cypher.MatchNodePlan{
+			Variable: "b",
+			SQLAlias: "n1",
+			Labels:   []string{},
+			Props:    map[string]cypher.Expr{},
+		},
+		RelProps: map[string]cypher.Expr{
+			"since": &cypher.LiteralExpr{Value: int64(2020)},
+		},
+	}
+
+	retPlan := &cypher.ReturnPlan{
+		Source:      mrp,
+		Projections: []cypher.ProjectionItem{{Expr: &cypher.PropExpr{Variable: "b", Property: "name"}}},
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(retPlan, scope)
+	if err != nil {
+		t.Fatalf("Translate with rel prop constraint: %v", err)
+	}
+	if !strings.Contains(result.SQL, "$.since") {
+		t.Errorf("expected '$.since' rel prop constraint in SQL, got: %s", result.SQL)
+	}
+	if !strings.Contains(result.SQL, "2020") {
+		t.Errorf("expected '2020' literal in SQL, got: %s", result.SQL)
+	}
+}

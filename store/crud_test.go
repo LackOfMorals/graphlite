@@ -795,3 +795,317 @@ func TestNestedTransactionError(t *testing.T) {
 		t.Fatal("expected error from nested Begin, got nil")
 	}
 }
+
+// ============================================================
+// Transaction delegate method coverage (task-021)
+// The sqliteTx type delegates each operation to the shared helpers via the
+// embedded *sql.Tx executor. These tests ensure the delegate methods are
+// exercised (they appear as 0% uncovered in the coverage report even though
+// the helpers themselves are tested above via the direct store path).
+// ============================================================
+
+// openTx opens an in-memory store and begins a transaction.
+// The transaction is automatically rolled back when the test ends unless the
+// caller commits it.
+func openTx(t *testing.T) (*store.SQLiteStore, store.Tx) {
+	t.Helper()
+	s := openMemory(t)
+	tx, err := s.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback() })
+	return s, tx
+}
+
+// TestTxDB verifies that DB() on a Tx returns the same *sql.DB as the store.
+func TestTxDB(t *testing.T) {
+	s, tx := openTx(t)
+	if tx.DB() != s.DB() {
+		t.Error("tx.DB() should return the same *sql.DB as the parent store")
+	}
+}
+
+// TestTxGetNode verifies that GetNode works within a transaction.
+func TestTxGetNode(t *testing.T) {
+	_, tx := openTx(t)
+	ctx := context.Background()
+
+	id, err := tx.InsertNode(ctx, "TxGet", `{"x":1}`)
+	if err != nil {
+		t.Fatalf("tx.InsertNode: %v", err)
+	}
+	n, err := tx.GetNode(ctx, id)
+	if err != nil {
+		t.Fatalf("tx.GetNode: %v", err)
+	}
+	if n.ID != id {
+		t.Errorf("tx.GetNode: expected ID %d, got %d", id, n.ID)
+	}
+	if n.Labels != "TxGet" {
+		t.Errorf("tx.GetNode: expected labels %q, got %q", "TxGet", n.Labels)
+	}
+}
+
+// TestTxListNodes verifies that ListNodes works within a transaction.
+func TestTxListNodes(t *testing.T) {
+	_, tx := openTx(t)
+	ctx := context.Background()
+
+	for range 3 {
+		if _, err := tx.InsertNode(ctx, "TxList", `{}`); err != nil {
+			t.Fatalf("tx.InsertNode: %v", err)
+		}
+	}
+	nodes, err := tx.ListNodes(ctx)
+	if err != nil {
+		t.Fatalf("tx.ListNodes: %v", err)
+	}
+	if len(nodes) != 3 {
+		t.Errorf("tx.ListNodes: expected 3 nodes, got %d", len(nodes))
+	}
+}
+
+// TestTxListNodesByLabel verifies that ListNodesByLabel works within a transaction.
+func TestTxListNodesByLabel(t *testing.T) {
+	_, tx := openTx(t)
+	ctx := context.Background()
+
+	if _, err := tx.InsertNode(ctx, "Alpha", `{}`); err != nil {
+		t.Fatalf("tx.InsertNode Alpha: %v", err)
+	}
+	if _, err := tx.InsertNode(ctx, "Beta", `{}`); err != nil {
+		t.Fatalf("tx.InsertNode Beta: %v", err)
+	}
+
+	alphas, err := tx.ListNodesByLabel(ctx, "Alpha")
+	if err != nil {
+		t.Fatalf("tx.ListNodesByLabel(Alpha): %v", err)
+	}
+	if len(alphas) != 1 {
+		t.Errorf("tx.ListNodesByLabel: expected 1 Alpha node, got %d", len(alphas))
+	}
+}
+
+// TestTxUpdateNodeProps verifies that UpdateNodeProps works within a transaction.
+func TestTxUpdateNodeProps(t *testing.T) {
+	_, tx := openTx(t)
+	ctx := context.Background()
+
+	id, err := tx.InsertNode(ctx, "Upd", `{"v":1}`)
+	if err != nil {
+		t.Fatalf("tx.InsertNode: %v", err)
+	}
+	if err := tx.UpdateNodeProps(ctx, id, `{"v":99}`); err != nil {
+		t.Fatalf("tx.UpdateNodeProps: %v", err)
+	}
+	n, err := tx.GetNode(ctx, id)
+	if err != nil {
+		t.Fatalf("tx.GetNode after update: %v", err)
+	}
+	if !strings.Contains(n.Props, "99") {
+		t.Errorf("tx.UpdateNodeProps: expected updated props to contain '99', got %q", n.Props)
+	}
+}
+
+// insertTxNodes inserts two nodes within tx and returns their IDs.
+// All work stays on the transaction's connection to avoid the deadlock caused
+// by calling s.InsertNode() (which needs the shared single connection) while
+// tx already holds it.
+func insertTxNodes(t *testing.T, tx store.Tx) (n1, n2 int64) {
+	t.Helper()
+	ctx := context.Background()
+	var err error
+	n1, err = tx.InsertNode(ctx, "TxNodeA", `{}`)
+	if err != nil {
+		t.Fatalf("insertTxNodes: InsertNode A: %v", err)
+	}
+	n2, err = tx.InsertNode(ctx, "TxNodeB", `{}`)
+	if err != nil {
+		t.Fatalf("insertTxNodes: InsertNode B: %v", err)
+	}
+	return n1, n2
+}
+
+// TestTxGetEdge verifies that GetEdge works within a transaction.
+func TestTxGetEdge(t *testing.T) {
+	_, tx := openTx(t)
+	ctx := context.Background()
+
+	n1, n2 := insertTxNodes(t, tx)
+
+	edgeID, err := tx.InsertEdge(ctx, "REL", n1, n2, `{"w":1}`)
+	if err != nil {
+		t.Fatalf("tx.InsertEdge: %v", err)
+	}
+	e, err := tx.GetEdge(ctx, edgeID)
+	if err != nil {
+		t.Fatalf("tx.GetEdge: %v", err)
+	}
+	if e.ID != edgeID {
+		t.Errorf("tx.GetEdge: expected ID %d, got %d", edgeID, e.ID)
+	}
+	if e.Type != "REL" {
+		t.Errorf("tx.GetEdge: expected type %q, got %q", "REL", e.Type)
+	}
+}
+
+// TestTxDeleteEdge verifies that DeleteEdge works within a transaction.
+func TestTxDeleteEdge(t *testing.T) {
+	_, tx := openTx(t)
+	ctx := context.Background()
+
+	n1, n2 := insertTxNodes(t, tx)
+
+	edgeID, err := tx.InsertEdge(ctx, "DEL_REL", n1, n2, `{}`)
+	if err != nil {
+		t.Fatalf("tx.InsertEdge: %v", err)
+	}
+	if err := tx.DeleteEdge(ctx, edgeID); err != nil {
+		t.Fatalf("tx.DeleteEdge: %v", err)
+	}
+	_, err = tx.GetEdge(ctx, edgeID)
+	if err == nil {
+		t.Fatal("expected error after tx.DeleteEdge, got nil")
+	}
+}
+
+// TestTxListEdges verifies that ListEdges works within a transaction.
+func TestTxListEdges(t *testing.T) {
+	_, tx := openTx(t)
+	ctx := context.Background()
+
+	n1, n2 := insertTxNodes(t, tx)
+
+	for range 2 {
+		if _, err := tx.InsertEdge(ctx, "TX_E", n1, n2, `{}`); err != nil {
+			t.Fatalf("tx.InsertEdge: %v", err)
+		}
+	}
+	edges, err := tx.ListEdges(ctx)
+	if err != nil {
+		t.Fatalf("tx.ListEdges: %v", err)
+	}
+	if len(edges) != 2 {
+		t.Errorf("tx.ListEdges: expected 2 edges, got %d", len(edges))
+	}
+}
+
+// TestTxListEdgesByType verifies that ListEdgesByType works within a transaction.
+func TestTxListEdgesByType(t *testing.T) {
+	_, tx := openTx(t)
+	ctx := context.Background()
+
+	n1, n2 := insertTxNodes(t, tx)
+
+	if _, err := tx.InsertEdge(ctx, "TYPE_A", n1, n2, `{}`); err != nil {
+		t.Fatalf("tx.InsertEdge TYPE_A: %v", err)
+	}
+	if _, err := tx.InsertEdge(ctx, "TYPE_B", n1, n2, `{}`); err != nil {
+		t.Fatalf("tx.InsertEdge TYPE_B: %v", err)
+	}
+
+	results, err := tx.ListEdgesByType(ctx, "TYPE_A")
+	if err != nil {
+		t.Fatalf("tx.ListEdgesByType(TYPE_A): %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("tx.ListEdgesByType: expected 1 TYPE_A edge, got %d", len(results))
+	}
+}
+
+// TestTxListEdgesByStartNode verifies that ListEdgesByStartNode works within a transaction.
+func TestTxListEdgesByStartNode(t *testing.T) {
+	_, tx := openTx(t)
+	ctx := context.Background()
+
+	n1, n2 := insertTxNodes(t, tx)
+
+	if _, err := tx.InsertEdge(ctx, "FROM_N1", n1, n2, `{}`); err != nil {
+		t.Fatalf("tx.InsertEdge: %v", err)
+	}
+	results, err := tx.ListEdgesByStartNode(ctx, n1)
+	if err != nil {
+		t.Fatalf("tx.ListEdgesByStartNode: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("tx.ListEdgesByStartNode: expected 1 edge from n1, got %d", len(results))
+	}
+	if results[0].StartID != n1 {
+		t.Errorf("tx.ListEdgesByStartNode: expected StartID=%d, got %d", n1, results[0].StartID)
+	}
+}
+
+// TestTxListEdgesByEndNode verifies that ListEdgesByEndNode works within a transaction.
+func TestTxListEdgesByEndNode(t *testing.T) {
+	_, tx := openTx(t)
+	ctx := context.Background()
+
+	n1, n2 := insertTxNodes(t, tx)
+
+	if _, err := tx.InsertEdge(ctx, "TO_N2", n1, n2, `{}`); err != nil {
+		t.Fatalf("tx.InsertEdge: %v", err)
+	}
+	results, err := tx.ListEdgesByEndNode(ctx, n2)
+	if err != nil {
+		t.Fatalf("tx.ListEdgesByEndNode: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("tx.ListEdgesByEndNode: expected 1 edge to n2, got %d", len(results))
+	}
+	if results[0].EndID != n2 {
+		t.Errorf("tx.ListEdgesByEndNode: expected EndID=%d, got %d", n2, results[0].EndID)
+	}
+}
+
+// TestTxEdgeExistsForNode verifies that EdgeExistsForNode works within a transaction.
+func TestTxEdgeExistsForNode(t *testing.T) {
+	_, tx := openTx(t)
+	ctx := context.Background()
+
+	n1, n2 := insertTxNodes(t, tx)
+
+	// Before inserting any edge, EdgeExistsForNode should be false.
+	exists, err := tx.EdgeExistsForNode(ctx, n1)
+	if err != nil {
+		t.Fatalf("tx.EdgeExistsForNode before insert: %v", err)
+	}
+	if exists {
+		t.Errorf("tx.EdgeExistsForNode: expected false before any edge, got true")
+	}
+
+	if _, err := tx.InsertEdge(ctx, "EDGE", n1, n2, `{}`); err != nil {
+		t.Fatalf("tx.InsertEdge: %v", err)
+	}
+
+	exists, err = tx.EdgeExistsForNode(ctx, n1)
+	if err != nil {
+		t.Fatalf("tx.EdgeExistsForNode after insert: %v", err)
+	}
+	if !exists {
+		t.Errorf("tx.EdgeExistsForNode: expected true after edge insert, got false")
+	}
+}
+
+// TestTxUpdateEdgeProps verifies that UpdateEdgeProps works within a transaction.
+func TestTxUpdateEdgeProps(t *testing.T) {
+	_, tx := openTx(t)
+	ctx := context.Background()
+
+	n1, n2 := insertTxNodes(t, tx)
+
+	edgeID, err := tx.InsertEdge(ctx, "UPD_REL", n1, n2, `{"before":1}`)
+	if err != nil {
+		t.Fatalf("tx.InsertEdge: %v", err)
+	}
+	if err := tx.UpdateEdgeProps(ctx, edgeID, `{"after":2}`); err != nil {
+		t.Fatalf("tx.UpdateEdgeProps: %v", err)
+	}
+	e, err := tx.GetEdge(ctx, edgeID)
+	if err != nil {
+		t.Fatalf("tx.GetEdge after UpdateEdgeProps: %v", err)
+	}
+	if !strings.Contains(e.Props, "after") {
+		t.Errorf("tx.UpdateEdgeProps: expected updated props to contain 'after', got %q", e.Props)
+	}
+}

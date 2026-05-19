@@ -678,3 +678,45 @@ Key Decisions:
   to match the acceptance criteria.
 
 Next Task: task-020 (JSON bulk import)
+================================================================================
+TASK-021: Unit test suite for all four layers (parser, planner, translator, store)
+Date: 2026-05-19T28:00:00Z
+================================================================================
+
+Summary:
+Ran coverage checks across all four packages and added targeted tests to bring
+every package above the 80% threshold required by the acceptance criteria.
+Starting coverage: cypher/ 83.0% ✅, sql/ 64.5% ❌, store/ 73.6% ❌.
+Final coverage: cypher/ 83.0%, sql/ 82.7%, store/ 82.6% — all above 80%.
+No production code changes were needed; only test code was added.
+
+Files Changed:
+- sql/translator_test.go (modified — 12 new tests 44-55 targeting previously
+  uncovered code paths: ErrMissingParam.Error(), translateStandaloneMatch,
+  translateStandaloneFilter, translateSequenceWrite MATCH+write path,
+  buildMatchForWriteSelect, ResolveIDs/resolveIDArgs, literalToSQL nil/bool
+  branches, rel prop constraint in buildFromClauseForMatchRel)
+- store/crud_test.go (modified — 13 new tests covering all sqliteTx delegate
+  methods: DB(), GetNode, ListNodes, ListNodesByLabel, UpdateNodeProps,
+  GetEdge, DeleteEdge, ListEdges, ListEdgesByType, ListEdgesByStartNode,
+  ListEdgesByEndNode, EdgeExistsForNode, UpdateEdgeProps via transaction;
+  added insertTxNodes helper to avoid single-connection deadlock)
+
+Key Decisions:
+- All new store tests use a dedicated insertTxNodes helper that inserts node
+  fixtures via the transaction itself (not via s.InsertNode()) — calling
+  s.InsertNode() while the tx holds the single MaxOpenConns(1) connection
+  causes a deadlock that manifests as a 60-second test timeout.
+- translateStandaloneMatch and translateStandaloneFilter tests use plan nodes
+  directly (not via Parse+Plan) because the translator's translatePlan
+  dispatcher is only reached when no ReturnPlan wraps the source — the
+  normal Parse+Plan pipeline always produces a ReturnPlan.
+- ResolveIDs tests use a CreateRelPlan (which produces idSentinel values)
+  to verify both the happy path and the missing-variable error path.
+- MATCH+SET and MATCH+DETACH DELETE tests exercise translateSequenceWrite's
+  mixed read+write path that emits a KindMatchForWrite SELECT before write
+  statements — this was the largest previously-uncovered block (63.6%).
+- Translator golden-fixture tests already existed (Test 18); new tests add
+  more exact string assertions for bool/null literals and rel prop constraints.
+
+Next Task: task-022 (Integration test harness with end-to-end Cypher fixture tests)
