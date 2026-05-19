@@ -522,8 +522,7 @@ func parseExprText(text string, scope *BindingScope) (Expr, error) {
 	}
 
 	// $param reference.
-	if strings.HasPrefix(text, "$") {
-		name := strings.TrimPrefix(text, "$")
+	if name, ok := strings.CutPrefix(text, "$"); ok {
 		return &ParamRef{Name: name}, nil
 	}
 
