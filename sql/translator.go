@@ -17,12 +17,34 @@ import (
 	"github.com/LackOfMorals/graphlite/cypher"
 )
 
-// Result carries the output of a single translation pass.
-type Result struct {
-	// SQL is the fully formed SQL statement, with "?" placeholders.
+// Statement is a single parameterised SQL statement together with its bind
+// arguments. Write operations that require multiple statements (e.g.
+// DETACH DELETE, or a compound CREATE) return multiple Statements.
+type Statement struct {
+	// SQL is a single fully-formed SQL statement, with "?" placeholders.
 	SQL string
 	// Args is the ordered slice of values to bind to the placeholders.
 	Args []any
+}
+
+// Result carries the output of a single translation pass.
+//
+// For read queries (SELECT) there is always exactly one Statement, and the
+// top-level SQL/Args fields mirror it for convenience.
+//
+// For write queries there may be multiple Statements; the SQL and Args fields
+// contain the first statement only — callers should iterate Statements for
+// multi-statement write operations.
+type Result struct {
+	// SQL is the fully formed SQL statement, with "?" placeholders.
+	// For multi-statement write plans this is the first statement's SQL.
+	SQL string
+	// Args is the ordered slice of values to bind to the placeholders.
+	// For multi-statement write plans this is the first statement's args.
+	Args []any
+	// Statements carries all generated SQL statements in execution order.
+	// Single-statement results always have len(Statements) == 1.
+	Statements []Statement
 }
 
 // Translator converts a cypher.LogicalPlan tree into SQL.
@@ -42,12 +64,34 @@ func NewTranslator(d Dialect) *Translator {
 
 // Translate walks plan and returns the SQL string and argument slice.
 // It returns an error when the plan contains unsupported constructs.
+//
+// For read plans the result contains a single SQL SELECT statement.
+// For write plans (CREATE, SET, DELETE, SequencePlan of write ops) the result
+// may contain multiple Statements; the caller must execute them all in order.
 func (t *Translator) Translate(plan cypher.LogicalPlan, scope *cypher.BindingScope) (Result, error) {
-	sql, err := t.translatePlan(plan, scope)
+	// Try write-plan translation first (handles CREATE/SET/DELETE/SequencePlan).
+	stmts, handled, err := t.translateWritePlan(plan, scope)
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{SQL: sql, Args: t.args}, nil
+	if handled {
+		if len(stmts) == 0 {
+			return Result{}, fmt.Errorf("sql: write plan produced no statements")
+		}
+		return Result{
+			SQL:        stmts[0].SQL,
+			Args:       stmts[0].Args,
+			Statements: stmts,
+		}, nil
+	}
+
+	// Fall back to read-plan translation (SELECT queries).
+	sqlStr, err := t.translatePlan(plan, scope)
+	if err != nil {
+		return Result{}, err
+	}
+	stmt := Statement{SQL: sqlStr, Args: t.args}
+	return Result{SQL: sqlStr, Args: t.args, Statements: []Statement{stmt}}, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -580,4 +624,327 @@ func (t *Translator) literalToSQL(e *cypher.LiteralExpr) (string, error) {
 // sentinels with actual values from the caller-supplied map[string]any.
 type paramSentinel struct {
 	Name string
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Write-plan translation
+// ─────────────────────────────────────────────────────────────────────────────
+
+// translateWritePlan attempts to translate a write-operation plan node.
+// If the plan is a write plan it sets handled=true and returns the Statements.
+// If the plan is a read plan it returns handled=false (the caller falls back to
+// the read-plan path).
+func (t *Translator) translateWritePlan(plan cypher.LogicalPlan, scope *cypher.BindingScope) (stmts []Statement, handled bool, err error) {
+	switch p := plan.(type) {
+	case *cypher.CreateNodePlan:
+		stmt, e := t.translateCreateNode(p, scope)
+		if e != nil {
+			return nil, true, e
+		}
+		return []Statement{stmt}, true, nil
+
+	case *cypher.CreateRelPlan:
+		stmt, e := t.translateCreateRel(p, scope)
+		if e != nil {
+			return nil, true, e
+		}
+		return []Statement{stmt}, true, nil
+
+	case *cypher.SetPropPlan:
+		stmt, e := t.translateSetProp(p, scope)
+		if e != nil {
+			return nil, true, e
+		}
+		return []Statement{stmt}, true, nil
+
+	case *cypher.DeleteNodePlan:
+		ss, e := t.translateDeleteNode(p, scope)
+		if e != nil {
+			return nil, true, e
+		}
+		return ss, true, nil
+
+	case *cypher.DeleteRelPlan:
+		stmt, e := t.translateDeleteRel(p, scope)
+		if e != nil {
+			return nil, true, e
+		}
+		return []Statement{stmt}, true, nil
+
+	case *cypher.SequencePlan:
+		ss, handled2, e := t.translateSequenceWrite(p, scope)
+		if e != nil {
+			return nil, handled2, e
+		}
+		return ss, handled2, nil
+
+	default:
+		// Not a write plan.
+		return nil, false, nil
+	}
+}
+
+// translateCreateNode emits:
+//
+//	INSERT INTO nodes (labels, props) VALUES (?, json(?))
+//
+// Labels are joined as comma-separated text. Property values are encoded as a
+// JSON object. The returned Statement uses a fresh args slice.
+func (t *Translator) translateCreateNode(p *cypher.CreateNodePlan, scope *cypher.BindingScope) (Statement, error) {
+	// Build the comma-separated labels string.
+	labels := strings.Join(p.Labels, ",")
+
+	// Build the JSON props object: {"key": value, ...}
+	// Property values that are string literals use bind args; others are inlined.
+	// We collect them as a JSON object literal using json() to validate at insert time.
+	propsJSON, propsArgs, err := t.buildPropsJSON(p.Props, scope)
+	if err != nil {
+		return Statement{}, fmt.Errorf("sql: CREATE node props: %w", err)
+	}
+
+	var args []any
+	args = append(args, labels)
+	args = append(args, propsArgs...)
+
+	sql := fmt.Sprintf("INSERT INTO nodes (labels, props) VALUES (?, json(%s))", propsJSON)
+	return Statement{SQL: sql, Args: args}, nil
+}
+
+// translateCreateRel emits:
+//
+//	INSERT INTO edges (type, start_id, end_id, props) VALUES (?, ?, ?, json(?))
+//
+// The start and end node ID positions in Args hold idSentinel values (not
+// literal int64s). The execution layer (task-016) resolves each idSentinel to
+// an actual int64 by looking up the variable's last-insert rowid or querying
+// the scope. The relationship type and props are bound normally.
+func (t *Translator) translateCreateRel(p *cypher.CreateRelPlan, scope *cypher.BindingScope) (Statement, error) {
+	if p.Type == "" {
+		return Statement{}, fmt.Errorf("sql: CREATE relationship requires a type")
+	}
+
+	// Resolve start and end node aliases from scope.
+	startBinding, ok := scope.Resolve(p.StartVar)
+	if !ok {
+		return Statement{}, fmt.Errorf("sql: start variable %q not in scope for CREATE relationship", p.StartVar)
+	}
+	if !startBinding.IsNode {
+		return Statement{}, fmt.Errorf("sql: start variable %q is not a node (got rel=%v)", p.StartVar, startBinding.IsRel)
+	}
+	endBinding, ok := scope.Resolve(p.EndVar)
+	if !ok {
+		return Statement{}, fmt.Errorf("sql: end variable %q not in scope for CREATE relationship", p.EndVar)
+	}
+	if !endBinding.IsNode {
+		return Statement{}, fmt.Errorf("sql: end variable %q is not a node (got rel=%v)", p.EndVar, endBinding.IsRel)
+	}
+
+	// Build the JSON props object.
+	propsJSON, propsArgs, err := t.buildPropsJSON(p.Props, scope)
+	if err != nil {
+		return Statement{}, fmt.Errorf("sql: CREATE relationship props: %w", err)
+	}
+
+	// Args layout: [type, idSentinel(start), idSentinel(end), ...propsArgs]
+	// The two idSentinels are replaced by the execution layer with actual int64 IDs.
+	var args []any
+	args = append(args, p.Type)
+	args = append(args, idSentinel{VarName: p.StartVar, Alias: startBinding.Alias})
+	args = append(args, idSentinel{VarName: p.EndVar, Alias: endBinding.Alias})
+	args = append(args, propsArgs...)
+
+	sql := fmt.Sprintf("INSERT INTO edges (type, start_id, end_id, props) VALUES (?, ?, ?, json(%s))", propsJSON)
+	return Statement{SQL: sql, Args: args}, nil
+}
+
+// translateSetProp emits:
+//
+//	UPDATE nodes SET props = json_set(props, '$.prop', ?) WHERE id = ?
+//
+// The node ID is provided as an idSentinel so the execution layer resolves it
+// from the BindingScope at runtime.
+//
+// For relationship variables the table is "edges" instead of "nodes".
+func (t *Translator) translateSetProp(p *cypher.SetPropPlan, scope *cypher.BindingScope) (Statement, error) {
+	binding, ok := scope.Resolve(p.Variable)
+	if !ok {
+		return Statement{}, fmt.Errorf("sql: variable %q not in scope for SET", p.Variable)
+	}
+
+	// Build the value SQL fragment (with its own fresh arg list).
+	valTranslator := &Translator{dialect: t.dialect}
+	valSQL, err := valTranslator.exprToSQL(p.Value, scope)
+	if err != nil {
+		return Statement{}, fmt.Errorf("sql: SET value expr: %w", err)
+	}
+
+	// In an UPDATE statement the column reference is unqualified ("props", not "n0.props").
+	jsonSetExpr := t.dialect.JSONSet("props", "$."+p.Property, valSQL)
+
+	table := "nodes"
+	if binding.IsRel {
+		table = "edges"
+	}
+
+	var args []any
+	args = append(args, valTranslator.args...)                                  // value bind args (if any)
+	args = append(args, idSentinel{VarName: p.Variable, Alias: binding.Alias}) // WHERE id = ?
+
+	sql := fmt.Sprintf("UPDATE %s SET props = %s WHERE id = ?", table, jsonSetExpr)
+	return Statement{SQL: sql, Args: args}, nil
+}
+
+// translateDeleteNode emits the SQL for DELETE / DETACH DELETE of a node.
+//
+// Non-detach:
+//
+//	The translator emits a guard check (SELECT COUNT(*) FROM edges WHERE …)
+//	followed by the DELETE. The execution layer must abort if the guard returns
+//	a non-zero count. We represent this as two Statements:
+//	  [0] guard: SELECT COUNT(*) FROM edges WHERE start_id = ? OR end_id = ?
+//	  [1] delete: DELETE FROM nodes WHERE id = ?
+//
+// Detach (DETACH DELETE):
+//
+//	Two Statements:
+//	  [0] DELETE FROM edges WHERE start_id = ? OR end_id = ?
+//	  [1] DELETE FROM nodes WHERE id = ?
+func (t *Translator) translateDeleteNode(p *cypher.DeleteNodePlan, scope *cypher.BindingScope) ([]Statement, error) {
+	binding, ok := scope.Resolve(p.Variable)
+	if !ok {
+		return nil, fmt.Errorf("sql: variable %q not in scope for DELETE", p.Variable)
+	}
+
+	sentinel := idSentinel{VarName: p.Variable, Alias: binding.Alias}
+
+	if p.Detach {
+		// DETACH DELETE: remove edges first, then the node.
+		edgesStmt := Statement{
+			SQL:  "DELETE FROM edges WHERE start_id = ? OR end_id = ?",
+			Args: []any{sentinel, sentinel},
+		}
+		nodeStmt := Statement{
+			SQL:  "DELETE FROM nodes WHERE id = ?",
+			Args: []any{sentinel},
+		}
+		return []Statement{edgesStmt, nodeStmt}, nil
+	}
+
+	// Non-detach: guard check + delete.
+	guardStmt := Statement{
+		SQL:  "SELECT COUNT(*) FROM edges WHERE start_id = ? OR end_id = ?",
+		Args: []any{sentinel, sentinel},
+	}
+	nodeStmt := Statement{
+		SQL:  "DELETE FROM nodes WHERE id = ?",
+		Args: []any{sentinel},
+	}
+	return []Statement{guardStmt, nodeStmt}, nil
+}
+
+// translateDeleteRel emits:
+//
+//	DELETE FROM edges WHERE id = ?
+func (t *Translator) translateDeleteRel(p *cypher.DeleteRelPlan, scope *cypher.BindingScope) (Statement, error) {
+	binding, ok := scope.Resolve(p.Variable)
+	if !ok {
+		return Statement{}, fmt.Errorf("sql: variable %q not in scope for DELETE relationship", p.Variable)
+	}
+
+	sentinel := idSentinel{VarName: p.Variable, Alias: binding.Alias}
+	return Statement{
+		SQL:  "DELETE FROM edges WHERE id = ?",
+		Args: []any{sentinel},
+	}, nil
+}
+
+// translateSequenceWrite handles a SequencePlan that contains write operations.
+// If all steps are write plans, it accumulates their Statements in order and
+// returns handled=true. If the sequence contains only read plans, it returns
+// handled=false so the caller uses the read path.
+func (t *Translator) translateSequenceWrite(sp *cypher.SequencePlan, scope *cypher.BindingScope) ([]Statement, bool, error) {
+	var allStmts []Statement
+	anyWrite := false
+
+	for _, step := range sp.Steps {
+		stmts, handled, err := t.translateWritePlan(step, scope)
+		if err != nil {
+			return nil, true, err
+		}
+		if !handled {
+			// Read step (MATCH, FILTER) inside a sequence: these are source-context
+			// steps, not write steps. They don't produce SQL statements here; the
+			// execution layer resolves their variable IDs via prior query results.
+			continue
+		}
+		anyWrite = true
+		allStmts = append(allStmts, stmts...)
+	}
+
+	if !anyWrite {
+		// All steps were read plans — this is a read sequence, not a write sequence.
+		return nil, false, nil
+	}
+	return allStmts, true, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Props JSON builder
+// ─────────────────────────────────────────────────────────────────────────────
+
+// buildPropsJSON builds the SQL fragment and bind args needed to construct a
+// JSON object from a map[string]Expr. It returns a SQL expression suitable for
+// wrapping in json(…), along with the bind arguments.
+//
+// For an empty props map it returns ("'{}'", nil) so INSERT always has a valid
+// JSON props column.
+//
+// The returned SQL fragment uses json_object(key1, val1, key2, val2, ...) when
+// there are properties, and the string literal '{}' otherwise.
+func (t *Translator) buildPropsJSON(props map[string]cypher.Expr, scope *cypher.BindingScope) (string, []any, error) {
+	if len(props) == 0 {
+		return "'{}'", nil, nil
+	}
+
+	// Sort keys for deterministic SQL output (map iteration order is undefined).
+	keys := make([]string, 0, len(props))
+	for k := range props {
+		keys = append(keys, k)
+	}
+	// Simple insertion sort — props maps are always small.
+	for i := 1; i < len(keys); i++ {
+		for j := i; j > 0 && keys[j] < keys[j-1]; j-- {
+			keys[j], keys[j-1] = keys[j-1], keys[j]
+		}
+	}
+
+	parts := make([]string, 0, len(keys)*2)
+	var args []any
+	for _, key := range keys {
+		expr := props[key]
+		// Use a fresh translator so we can collect the arg values cleanly.
+		sub := &Translator{dialect: t.dialect}
+		valSQL, err := sub.exprToSQL(expr, scope)
+		if err != nil {
+			return "", nil, fmt.Errorf("property %q: %w", key, err)
+		}
+		parts = append(parts, "'"+key+"'", valSQL)
+		args = append(args, sub.args...)
+	}
+
+	return "json_object(" + strings.Join(parts, ", ") + ")", args, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ID sentinel type
+// ─────────────────────────────────────────────────────────────────────────────
+
+// idSentinel is stored in the Args slice of write Statements in positions where
+// a node or relationship integer ID is required. The execution layer (task-016)
+// resolves the actual int64 value from prior INSERT results or the BindingScope.
+type idSentinel struct {
+	// VarName is the Cypher variable name (e.g. "n", "r").
+	VarName string
+	// Alias is the SQL table alias assigned by the planner (e.g. "n0", "r0").
+	Alias string
 }

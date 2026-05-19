@@ -255,7 +255,7 @@ tasks:
       inserts or the BindingScope), SetPropPlan emits UPDATE nodes SET props = json_set(...),
       DeleteNodePlan emits DELETE FROM nodes (with a relationship-existence guard for non-detach),
       and DeleteRelPlan emits DELETE FROM edges.
-    status: pending
+    status: completed
     dependencies:
       - task-013
       - task-011
@@ -267,7 +267,7 @@ tasks:
       - "DELETE n (non-detach) emits an error if any edge references the node ID"
       - "DETACH DELETE n emits DELETE FROM edges WHERE start_id=? OR end_id=? followed by DELETE FROM nodes WHERE id=?"
       - "Unit tests verify SQL output for each write operation"
-    completed_at: null
+    completed_at: "2026-05-19T23:00:00Z"
 
   - id: task-015
     title: "Named query parameter binding ($param syntax)"

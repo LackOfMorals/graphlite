@@ -407,3 +407,415 @@ func TestTranslate_ReturnRelationshipVar(t *testing.T) {
 		"end_id",
 	)
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Write operation helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+// translateWrite parses, plans, and translates a write Cypher statement.
+// It returns the Result and asserts that Statements is non-empty.
+func translateWrite(t *testing.T, query string) sqldialect.Result {
+	t.Helper()
+
+	q, err := cypher.Parse(query)
+	if err != nil {
+		t.Fatalf("Parse(%q): %v", query, err)
+	}
+	scope := cypher.NewScope()
+	plan, err := cypher.Plan(q, scope)
+	if err != nil {
+		t.Fatalf("Plan(%q): %v", query, err)
+	}
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(plan, scope)
+	if err != nil {
+		t.Fatalf("Translate(%q): %v", query, err)
+	}
+	if len(result.Statements) == 0 {
+		t.Fatalf("expected at least one Statement, got 0")
+	}
+	return result
+}
+
+// containsAllStmt is like containsAll but checks a specific Statement index.
+func containsAllStmt(t *testing.T, stmt sqldialect.Statement, substrings ...string) {
+	t.Helper()
+	for _, s := range substrings {
+		if !strings.Contains(stmt.SQL, s) {
+			t.Errorf("Statement SQL missing %q\n SQL: %s", s, stmt.SQL)
+		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 21: CREATE node — INSERT INTO nodes
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestTranslate_CreateNode_Insert(t *testing.T) {
+	result := translateWrite(t, `CREATE (n:Person {name: 'Alice'})`)
+	if len(result.Statements) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(result.Statements))
+	}
+	stmt := result.Statements[0]
+	containsAllStmt(t, stmt,
+		"INSERT INTO nodes",
+		"labels",
+		"props",
+		"VALUES",
+		"json(",
+	)
+	// Labels arg must be "Person".
+	if len(stmt.Args) == 0 {
+		t.Fatal("expected bind args, got none")
+	}
+	if stmt.Args[0] != "Person" {
+		t.Errorf("expected first arg to be 'Person', got %v", stmt.Args[0])
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 22: CREATE node with no props — empty JSON object
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestTranslate_CreateNode_NoProps(t *testing.T) {
+	result := translateWrite(t, `CREATE (n:Employee)`)
+	stmt := result.Statements[0]
+	containsAllStmt(t, stmt, "INSERT INTO nodes", "VALUES", "json(")
+	if stmt.Args[0] != "Employee" {
+		t.Errorf("expected 'Employee' label arg, got %v", stmt.Args[0])
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 23: CREATE node with $param prop — param sentinel in args
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestTranslate_CreateNode_ParamProp(t *testing.T) {
+	result := translateWrite(t, `CREATE (n:Person {name: $name})`)
+	stmt := result.Statements[0]
+	containsAllStmt(t, stmt, "INSERT INTO nodes", "json(")
+	// One of the args should be a sentinel (not a string) for $name.
+	foundSentinel := false
+	for _, a := range stmt.Args {
+		if _, isStr := a.(string); !isStr {
+			foundSentinel = true
+		}
+	}
+	if !foundSentinel {
+		t.Errorf("expected a param sentinel in args, all were strings: %v", stmt.Args)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 24: CREATE relationship — INSERT INTO edges
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestTranslate_CreateRel_Insert(t *testing.T) {
+	// Parse and plan manually so we can set up the scope with two nodes.
+	scope := cypher.NewScope()
+	scope.Bind("a", cypher.Binding{Alias: "n0", IsNode: true})
+	scope.Bind("b", cypher.Binding{Alias: "n1", IsNode: true})
+
+	relPlan := &cypher.CreateRelPlan{
+		Type:     "KNOWS",
+		StartVar: "a",
+		EndVar:   "b",
+		Props:    map[string]cypher.Expr{},
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(relPlan, scope)
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	if len(result.Statements) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(result.Statements))
+	}
+	stmt := result.Statements[0]
+	containsAllStmt(t, stmt,
+		"INSERT INTO edges",
+		"type",
+		"start_id",
+		"end_id",
+		"props",
+		"VALUES",
+		"json(",
+	)
+	// First arg is the relationship type.
+	if stmt.Args[0] != "KNOWS" {
+		t.Errorf("expected first arg to be 'KNOWS', got %v", stmt.Args[0])
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 25: CREATE relationship with props
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestTranslate_CreateRel_WithProps(t *testing.T) {
+	scope := cypher.NewScope()
+	scope.Bind("a", cypher.Binding{Alias: "n0", IsNode: true})
+	scope.Bind("b", cypher.Binding{Alias: "n1", IsNode: true})
+
+	relPlan := &cypher.CreateRelPlan{
+		Type:     "WORKS_FOR",
+		StartVar: "a",
+		EndVar:   "b",
+		Props: map[string]cypher.Expr{
+			"since": &cypher.LiteralExpr{Value: int64(2020)},
+		},
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(relPlan, scope)
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	stmt := result.Statements[0]
+	// Type is a bind arg (not inlined in SQL); verify SQL structure and that
+	// the type value is the first arg.
+	containsAllStmt(t, stmt, "INSERT INTO edges", "json(", "json_object")
+	if len(stmt.Args) == 0 || stmt.Args[0] != "WORKS_FOR" {
+		t.Errorf("expected first arg to be 'WORKS_FOR', got %v", stmt.Args)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 26: SET n.prop = literal value
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestTranslate_SetProp_Literal(t *testing.T) {
+	scope := cypher.NewScope()
+	scope.Bind("n", cypher.Binding{Alias: "n0", IsNode: true})
+
+	setPlan := &cypher.SetPropPlan{
+		Variable: "n",
+		Property: "age",
+		Value:    &cypher.LiteralExpr{Value: int64(30)},
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(setPlan, scope)
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	stmt := result.Statements[0]
+	containsAllStmt(t, stmt,
+		"UPDATE nodes",
+		"SET props =",
+		"json_set(props, '$.age', 30)",
+		"WHERE id = ?",
+	)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 27: SET n.prop = $param
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestTranslate_SetProp_Param(t *testing.T) {
+	scope := cypher.NewScope()
+	scope.Bind("n", cypher.Binding{Alias: "n0", IsNode: true})
+
+	setPlan := &cypher.SetPropPlan{
+		Variable: "n",
+		Property: "name",
+		Value:    &cypher.ParamRef{Name: "newName"},
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(setPlan, scope)
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	stmt := result.Statements[0]
+	containsAllStmt(t, stmt,
+		"UPDATE nodes",
+		"SET props =",
+		"json_set(props, '$.name', ?)",
+		"WHERE id = ?",
+	)
+	// Two args: one param sentinel + one idSentinel for WHERE id = ?
+	if len(stmt.Args) != 2 {
+		t.Errorf("expected 2 args (param + id), got %d: %v", len(stmt.Args), stmt.Args)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 28: DELETE n (non-detach) — guard + delete statements
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestTranslate_DeleteNode_NonDetach(t *testing.T) {
+	scope := cypher.NewScope()
+	scope.Bind("n", cypher.Binding{Alias: "n0", IsNode: true})
+
+	delPlan := &cypher.DeleteNodePlan{
+		Variable: "n",
+		Detach:   false,
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(delPlan, scope)
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	// Non-detach: guard check + delete.
+	if len(result.Statements) != 2 {
+		t.Fatalf("expected 2 statements for non-detach DELETE, got %d", len(result.Statements))
+	}
+	containsAllStmt(t, result.Statements[0],
+		"SELECT COUNT(*)",
+		"FROM edges",
+		"start_id",
+		"end_id",
+	)
+	containsAllStmt(t, result.Statements[1],
+		"DELETE FROM nodes",
+		"WHERE id = ?",
+	)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 29: DETACH DELETE n — edges delete + node delete
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestTranslate_DeleteNode_Detach(t *testing.T) {
+	scope := cypher.NewScope()
+	scope.Bind("n", cypher.Binding{Alias: "n0", IsNode: true})
+
+	delPlan := &cypher.DeleteNodePlan{
+		Variable: "n",
+		Detach:   true,
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(delPlan, scope)
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	// DETACH DELETE: edges delete + node delete.
+	if len(result.Statements) != 2 {
+		t.Fatalf("expected 2 statements for DETACH DELETE, got %d", len(result.Statements))
+	}
+	containsAllStmt(t, result.Statements[0],
+		"DELETE FROM edges",
+		"start_id",
+		"end_id",
+	)
+	containsAllStmt(t, result.Statements[1],
+		"DELETE FROM nodes",
+		"WHERE id = ?",
+	)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 30: DELETE r (relationship)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestTranslate_DeleteRel(t *testing.T) {
+	scope := cypher.NewScope()
+	scope.Bind("r", cypher.Binding{Alias: "r0", IsRel: true})
+
+	delPlan := &cypher.DeleteRelPlan{Variable: "r"}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(delPlan, scope)
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	if len(result.Statements) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(result.Statements))
+	}
+	containsAllStmt(t, result.Statements[0],
+		"DELETE FROM edges",
+		"WHERE id = ?",
+	)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 31: Compound CREATE (two nodes + relationship via SequencePlan)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestTranslate_CompoundCreate_NodeAndRel(t *testing.T) {
+	scope := cypher.NewScope()
+
+	nodeA := &cypher.CreateNodePlan{
+		Variable: "a",
+		Labels:   []string{"Person"},
+		Props:    map[string]cypher.Expr{"name": &cypher.LiteralExpr{Value: "Alice"}},
+	}
+	// After planning node a, bind it so CreateRelPlan can resolve it.
+	scope.Bind("a", cypher.Binding{Alias: "n0", IsNode: true})
+
+	nodeB := &cypher.CreateNodePlan{
+		Variable: "b",
+		Labels:   []string{"Company"},
+		Props:    map[string]cypher.Expr{},
+	}
+	scope.Bind("b", cypher.Binding{Alias: "n1", IsNode: true})
+
+	rel := &cypher.CreateRelPlan{
+		Type:     "WORKS_AT",
+		StartVar: "a",
+		EndVar:   "b",
+		Props:    map[string]cypher.Expr{},
+	}
+
+	seq := &cypher.SequencePlan{
+		Steps: []cypher.LogicalPlan{nodeA, nodeB, rel},
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(seq, scope)
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	// Three write statements: INSERT nodes (a), INSERT nodes (b), INSERT edges (a→b).
+	if len(result.Statements) != 3 {
+		t.Fatalf("expected 3 statements, got %d", len(result.Statements))
+	}
+	// First two are node inserts.
+	containsAllStmt(t, result.Statements[0], "INSERT INTO nodes")
+	containsAllStmt(t, result.Statements[1], "INSERT INTO nodes")
+	// Third is the relationship insert. Type is a bind arg (not inlined in SQL).
+	containsAllStmt(t, result.Statements[2], "INSERT INTO edges")
+	if result.Statements[2].Args[0] != "WORKS_AT" {
+		t.Errorf("expected relationship type 'WORKS_AT' as first arg, got %v", result.Statements[2].Args[0])
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 32: Existing read tests produce single-element Statements slice
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestTranslate_ReadResult_HasOneStatement(t *testing.T) {
+	result := translateCypher(t, `MATCH (n:Person) RETURN n.name`)
+	if len(result.Statements) != 1 {
+		t.Errorf("expected 1 Statement for read query, got %d", len(result.Statements))
+	}
+	if result.Statements[0].SQL != result.SQL {
+		t.Errorf("Statements[0].SQL should match top-level SQL\n got: %s\n want: %s",
+			result.Statements[0].SQL, result.SQL)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 33: SET on relationship variable targets edges table
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestTranslate_SetProp_RelationshipVar(t *testing.T) {
+	scope := cypher.NewScope()
+	scope.Bind("r", cypher.Binding{Alias: "r0", IsRel: true})
+
+	setPlan := &cypher.SetPropPlan{
+		Variable: "r",
+		Property: "weight",
+		Value:    &cypher.LiteralExpr{Value: float64(1.5)},
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(setPlan, scope)
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	stmt := result.Statements[0]
+	containsAllStmt(t, stmt, "UPDATE edges", "SET props =", "WHERE id = ?")
+}

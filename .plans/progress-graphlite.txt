@@ -416,3 +416,42 @@ Key Decisions:
   noted in AGENTS.md for future multi-prop test authors.
 
 Next Task: task-014 (SQL Translator: CREATE, SET, DELETE write operations)
+
+================================================================================
+TASK-014: SQL Translator: CREATE, SET, DELETE write operations
+Date: 2026-05-19T23:00:00Z
+================================================================================
+
+Summary:
+Extended the SQL translator to handle all write-operation plan nodes. Added the
+Statement type (SQL + Args pair) and updated Result to carry a Statements []Statement
+slice for multi-statement write operations (e.g. DETACH DELETE requires two
+statements; compound CREATE produces one per node/rel). Read queries still produce
+exactly one Statement mirroring the existing SQL/Args fields. Write-plan translation
+is attempted first in Translate(); read-plan translation is the fallback.
+
+Files Changed:
+- sql/translator.go (modified — added Statement type, Result.Statements field,
+  translateWritePlan dispatcher, translateCreateNode, translateCreateRel,
+  translateSetProp, translateDeleteNode, translateDeleteRel, translateSequenceWrite,
+  buildPropsJSON, idSentinel type)
+- sql/translator_test.go (modified — 13 new tests 21-33 covering all write operations,
+  translateWrite helper, containsAllStmt helper)
+
+Key Decisions:
+- Result.Statements []Statement is backward-compatible: read queries always produce
+  len(Statements)==1, so existing callers using .SQL/.Args continue to work.
+- idSentinel{VarName, Alias} in Args defers int64 ID resolution to the execution
+  layer (task-016), which retrieves values via last-insert-rowid or scope lookup.
+- paramSentinel (read queries) and idSentinel (write queries) are both unexported
+  sentinel types — callers in the test package detect them by type-asserting that
+  an arg is NOT a plain string.
+- Non-detach DELETE emits a guard SELECT COUNT(*) as Statement[0] followed by
+  DELETE FROM nodes as Statement[1]; the execution layer aborts if count > 0.
+- buildPropsJSON sorts property keys before generating SQL for deterministic output.
+- translateCreateRel validates that start/end scope bindings are nodes (not rels)
+  to catch programmer errors early.
+- translateSequenceWrite uses continue (not empty else) to skip read steps in a
+  mixed-sequence plan — cleaner and passes go vet.
+
+Next Task: task-015 (Named query parameter binding)
