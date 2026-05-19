@@ -337,3 +337,42 @@ Key Decisions:
   by the ANTLR grammar.
 
 Next Task: task-012 (SQL Dialect interface and SQLite dialect implementation)
+
+================================================================================
+TASK-012: SQL Dialect interface and SQLite dialect implementation
+Date: 2026-05-19T21:00:00Z
+================================================================================
+
+Summary:
+Defined the sql.Dialect interface in sql/dialect.go and implemented SQLiteDialect
+as the sole concrete dialect at v1.0. The interface covers QuoteIdentifier,
+JSONExtract, JSONSet, JSONRemove, LabelContains, and Placeholder. JSONSet and
+JSONRemove were added proactively (beyond the acceptance criteria) because
+task-014 needs them for UPDATE/REMOVE SQL emission. LabelContains emits four
+LIKE-based OR branches matching the existing store/sqlite.go pattern exactly.
+A compile-time assertion (var _ Dialect = SQLiteDialect{}) guards against drift.
+11 unit tests in sql/dialect_test.go cover all methods including exact SQL fixture
+assertions for LabelContains and JSONExtract.
+
+Files Changed:
+- sql/dialect.go (implemented — Dialect interface + SQLiteDialect with all methods)
+- sql/dialect_test.go (created — 11 unit tests covering all dialect methods)
+- sql/translator.go (unchanged — package doc comment only, still a stub for task-013)
+
+Key Decisions:
+- Added JSONSet and JSONRemove to the Dialect interface beyond the acceptance
+  criteria because task-014 requires them for SET and REMOVE SQL emission;
+  including them now keeps the interface stable and avoids a breaking change later.
+- QuoteIdentifier uses strings.Builder (not string concatenation) for O(n)
+  performance; embedded double-quotes are escaped by doubling them per SQL standard.
+- LabelContains mirrors the four-OR-branch pattern already established in
+  store/sqlite.go (listNodesByLabel) for consistency; returns args []any with
+  four copies of labelName to bind to the four "?" placeholders.
+- Dialect implementations are stateless (value receivers on struct{}) — safe for
+  concurrent use and zero-value constructible.
+- Test file uses package sql_test (black-box) with import alias sqldialect to
+  avoid collision with the standard library "sql" package name.
+- A dialects registry slice in the test file makes it trivial to add future
+  dialect implementations to the conformance test.
+
+Next Task: task-013 (SQL Translator: MATCH/WHERE/RETURN read queries)

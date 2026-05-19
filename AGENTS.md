@@ -130,3 +130,8 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - In compound MATCH+WHERE+DELETE plans the SequencePlan layout is `[FilterPlan{Source: MatchNodePlan}, ..., DeleteNodePlan]`. Test against `seq.Steps[0]` being a `*FilterPlan` and `seq.Steps[len-1]` being a `*DeleteNodePlan`.
 - When writing MATCH+CREATE tests, search for plan nodes by type in the SequencePlan steps (loop + type-assert) rather than hard-coding step indices — the exact sequence shape can be flat or nested depending on how many MATCH clauses precede the CREATE.
 - `ErrUnsupportedCypher` lives in the root package; the `cypher/` package cannot import it (circular dep) — use `fmt.Errorf` for unsupported-construct errors in `cypher/`.
+- `sql.Dialect` is the extension point for future backends; `SQLiteDialect` is the only implementation at v1.0. It is stateless (value receiver on `struct{}`) and zero-value constructible.
+- `sql.Dialect` includes `JSONSet` and `JSONRemove` beyond the task-012 acceptance criteria — they are needed by task-014 for `SET n.prop = val` and future `REMOVE n.prop` SQL emission.
+- `sql.SQLiteDialect.LabelContains` emits four OR LIKE branches — the same pattern as `store.listNodesByLabel`. Returns `[]any` with four copies of the label value; the caller appends them to the SQL args slice in order.
+- Test files in the `sql/` package use `package sql_test` (black-box) with import alias `sqldialect` to avoid collision with the stdlib `"database/sql"` package name.
+- Use `strings.Builder` (not string concatenation `+=`) when building SQL fragments character-by-character — avoids O(n²) allocations.

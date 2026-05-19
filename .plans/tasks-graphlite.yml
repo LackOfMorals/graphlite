@@ -215,7 +215,7 @@ tasks:
       JSONExtract (for props->>'$.key' patterns), LabelContains (for comma-separated label lookup),
       and Placeholder (? vs $N). Implement SQLiteDialect as the sole concrete dialect at v1.0.
       This is the extension point for future DuckDB/Postgres backends.
-    status: pending
+    status: completed
     dependencies:
       - task-006
     acceptance_criteria:
@@ -224,7 +224,7 @@ tasks:
       - "SQLiteDialect.LabelContains emits an instr/like-based label check against the comma-separated labels column"
       - "SQLiteDialect.Placeholder always returns '?' (SQLite positional)"
       - "Unit tests verify each dialect method produces the expected SQL fragment"
-    completed_at: null
+    completed_at: "2026-05-19T21:00:00Z"
 
   - id: task-013
     title: "SQL Translator: MATCH/WHERE/RETURN read queries"
