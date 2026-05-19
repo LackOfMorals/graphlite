@@ -276,7 +276,7 @@ tasks:
       in WHERE predicates and property maps, the translator maps them to positional ? placeholders
       in the correct order, and the execution layer looks up values from the caller-supplied
       map[string]any. Missing parameters must return a structured error, not a nil deref.
-    status: pending
+    status: completed
     dependencies:
       - task-014
     acceptance_criteria:
@@ -285,7 +285,7 @@ tasks:
       - "A missing parameter key returns ErrMissingParameter with the parameter name"
       - "Parameters work in WHERE predicates, CREATE property maps, and SET value positions"
       - "Unit and integration tests cover multi-parameter queries and error cases"
-    completed_at: null
+    completed_at: "2026-05-19T23:30:00Z"
 
   - id: task-016
     title: "Native API: graphlite.Open, query execution, and transaction primitives"

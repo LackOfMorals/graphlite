@@ -616,14 +616,80 @@ func (t *Translator) literalToSQL(e *cypher.LiteralExpr) (string, error) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Parameter sentinel type
+// Parameter sentinel type and named parameter binding
 // ─────────────────────────────────────────────────────────────────────────────
 
 // paramSentinel is a placeholder value stored in the args slice to identify
-// named Cypher parameters. Task-015 (parameter binding) replaces these
-// sentinels with actual values from the caller-supplied map[string]any.
+// named Cypher parameters. BindParams replaces these sentinels with actual
+// values from the caller-supplied map[string]any.
 type paramSentinel struct {
 	Name string
+}
+
+// ErrMissingParam is returned by BindParams when a parameterised query
+// references a $paramName that is not present in the caller-supplied params map.
+type ErrMissingParam struct {
+	// Name is the parameter name that was expected but not provided.
+	Name string
+}
+
+// Error implements the error interface.
+func (e *ErrMissingParam) Error() string {
+	return fmt.Sprintf("sql: missing query parameter $%s", e.Name)
+}
+
+// BindParams resolves all named parameter sentinels in result's Statements
+// against the provided params map and returns a new Result with concrete values
+// in every Args slice. The idSentinel values (write-operation node/rel IDs) are
+// left untouched — they are resolved by the execution layer at runtime.
+//
+// If any $paramName referenced by the query is absent from params, BindParams
+// returns a *ErrMissingParam error and leaves result unchanged.
+//
+// params may be nil or empty, in which case any paramSentinel in result causes
+// an error.
+func BindParams(result Result, params map[string]any) (Result, error) {
+	// Fast path: nothing to do when params is empty and there are no sentinels.
+	// We still do a full scan to catch any undeclared sentinel references.
+	newStmts := make([]Statement, len(result.Statements))
+	for i, stmt := range result.Statements {
+		resolvedArgs, err := resolveArgs(stmt.Args, params)
+		if err != nil {
+			return result, err
+		}
+		newStmts[i] = Statement{SQL: stmt.SQL, Args: resolvedArgs}
+	}
+	out := Result{
+		Statements: newStmts,
+	}
+	if len(newStmts) > 0 {
+		out.SQL = newStmts[0].SQL
+		out.Args = newStmts[0].Args
+	}
+	return out, nil
+}
+
+// resolveArgs walks an args slice and replaces every paramSentinel with the
+// corresponding value from params. idSentinel values are preserved unchanged.
+func resolveArgs(args []any, params map[string]any) ([]any, error) {
+	if len(args) == 0 {
+		return args, nil
+	}
+	// Allocate a new slice so the original Result is not mutated.
+	out := make([]any, len(args))
+	for i, a := range args {
+		if ps, ok := a.(paramSentinel); ok {
+			val, found := params[ps.Name]
+			if !found {
+				return nil, &ErrMissingParam{Name: ps.Name}
+			}
+			out[i] = val
+		} else {
+			// Preserve plain values and idSentinel values unchanged.
+			out[i] = a
+		}
+	}
+	return out, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -455,3 +455,39 @@ Key Decisions:
   mixed-sequence plan — cleaner and passes go vet.
 
 Next Task: task-015 (Named query parameter binding)
+
+================================================================================
+TASK-015: Named query parameter binding ($param syntax)
+Date: 2026-05-19T23:30:00Z
+================================================================================
+
+Summary:
+Implemented end-to-end named parameter binding in the sql package. Added the
+exported BindParams(result Result, params map[string]any) (Result, error)
+function that resolves all paramSentinel values in a Result's Statements to
+concrete values from the caller-supplied map. Also added the exported
+ErrMissingParam type (with a Name field) returned when a required $paramName
+is absent from the params map. idSentinel values (write-operation node/rel IDs)
+are left untouched for the execution layer (task-016) to resolve. The original
+Result is never mutated — BindParams always allocates fresh slices.
+10 new unit tests (34–43) cover all acceptance criteria.
+
+Files Changed:
+- sql/translator.go (modified — added ErrMissingParam type, BindParams function,
+  resolveArgs helper; updated paramSentinel doc comment)
+- sql/translator_test.go (modified — added "errors" import; 10 new BindParams
+  tests covering WHERE/CREATE/SET params, missing param error, nil params,
+  multi-statement resolution, idSentinel preservation, and mutation safety)
+
+Key Decisions:
+- BindParams lives in the sql package (not the root package) because paramSentinel
+  is unexported there; only the sql package can detect and replace sentinels.
+- ErrMissingParam is a separate type from the root package's ErrMissingParameter —
+  the execution layer (task-016) should wrap *sql.ErrMissingParam as
+  *graphlite.ErrMissingParameter when surfacing errors to callers via the public API.
+- resolveArgs returns the original empty slice unchanged when len(args)==0 (no alloc).
+- nil params map is safe: map lookup on nil map returns (nil, false), so any sentinel
+  triggers ErrMissingParam rather than a nil dereference panic.
+- BindParams returns the original Result unchanged on error (not a partial result).
+
+Next Task: task-016 (Native API: graphlite.Open, query execution, transactions)

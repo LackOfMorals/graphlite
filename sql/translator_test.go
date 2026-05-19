@@ -1,6 +1,7 @@
 package sql_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -818,4 +819,286 @@ func TestTranslate_SetProp_RelationshipVar(t *testing.T) {
 	}
 	stmt := result.Statements[0]
 	containsAllStmt(t, stmt, "UPDATE edges", "SET props =", "WHERE id = ?")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BindParams tests (task-015)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Test 34: BindParams resolves a single $param in a WHERE clause.
+func TestBindParams_WhereParam_Resolved(t *testing.T) {
+	result := translateCypher(t, `MATCH (n:Person) WHERE n.name = $name RETURN n.name`)
+	bound, err := sqldialect.BindParams(result, map[string]any{"name": "Alice"})
+	if err != nil {
+		t.Fatalf("BindParams: %v", err)
+	}
+	// After binding, every arg must be a plain Go value (string, int64, etc.) —
+	// no param sentinel should remain.
+	for i, a := range bound.Args {
+		switch a.(type) {
+		case string, int64, float64, bool, nil:
+			// ok
+		default:
+			t.Errorf("args[%d] is still a sentinel after BindParams: %T %v", i, a, a)
+		}
+	}
+	// The resolved value "Alice" must appear somewhere in bound.Args.
+	found := false
+	for _, a := range bound.Args {
+		if a == "Alice" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'Alice' in bound args, got %v", bound.Args)
+	}
+}
+
+// Test 35: BindParams resolves multiple $params in correct positional order.
+func TestBindParams_MultipleParams_CorrectOrder(t *testing.T) {
+	// Two parameters: $name in an inline prop constraint, $minAge in WHERE.
+	// MATCH (n:Person {name: $name}) WHERE n.age > $minAge RETURN n.name
+	result := translateCypher(t,
+		`MATCH (n:Person {name: $name}) WHERE n.age > $minAge RETURN n.name`)
+
+	params := map[string]any{
+		"name":   "Alice",
+		"minAge": int64(30),
+	}
+	bound, err := sqldialect.BindParams(result, params)
+	if err != nil {
+		t.Fatalf("BindParams: %v", err)
+	}
+
+	// Verify "Alice" and int64(30) both appear in the resolved args.
+	foundName, foundAge := false, false
+	for _, a := range bound.Args {
+		if a == "Alice" {
+			foundName = true
+		}
+		if a == int64(30) {
+			foundAge = true
+		}
+	}
+	if !foundName {
+		t.Errorf("expected 'Alice' in bound args: %v", bound.Args)
+	}
+	if !foundAge {
+		t.Errorf("expected int64(30) in bound args: %v", bound.Args)
+	}
+}
+
+// Test 36: BindParams returns ErrMissingParam when a required parameter is absent.
+func TestBindParams_MissingParam_ReturnsError(t *testing.T) {
+	result := translateCypher(t,
+		`MATCH (n:Person) WHERE n.age > $minAge RETURN n.name`)
+
+	// Provide an empty params map — $minAge is missing.
+	_, err := sqldialect.BindParams(result, map[string]any{})
+	if err == nil {
+		t.Fatal("expected error for missing parameter, got nil")
+	}
+	var missingErr *sqldialect.ErrMissingParam
+	if !errors.As(err, &missingErr) {
+		t.Fatalf("expected *ErrMissingParam, got %T: %v", err, err)
+	}
+	if missingErr.Name != "minAge" {
+		t.Errorf("ErrMissingParam.Name = %q; want %q", missingErr.Name, "minAge")
+	}
+}
+
+// Test 37: BindParams with nil params returns ErrMissingParam for any sentinel.
+func TestBindParams_NilParams_ReturnsError(t *testing.T) {
+	result := translateCypher(t,
+		`MATCH (n:Person) WHERE n.name = $name RETURN n.name`)
+	_, err := sqldialect.BindParams(result, nil)
+	if err == nil {
+		t.Fatal("expected error for nil params when query has $param, got nil")
+	}
+	var missingErr *sqldialect.ErrMissingParam
+	if !errors.As(err, &missingErr) {
+		t.Fatalf("expected *ErrMissingParam, got %T: %v", err, err)
+	}
+}
+
+// Test 38: BindParams on a query with no params is a no-op (succeeds with empty map).
+func TestBindParams_NoParams_NoOp(t *testing.T) {
+	result := translateCypher(t, `MATCH (n:Person) RETURN n.name`)
+	bound, err := sqldialect.BindParams(result, map[string]any{})
+	if err != nil {
+		t.Fatalf("BindParams on param-free query: %v", err)
+	}
+	// SQL must be unchanged.
+	if bound.SQL != result.SQL {
+		t.Errorf("SQL changed unexpectedly\n got:  %s\n want: %s", bound.SQL, result.SQL)
+	}
+}
+
+// Test 39: BindParams resolves $param inside a CREATE property map.
+func TestBindParams_CreateNodeParam_Resolved(t *testing.T) {
+	result := translateWrite(t, `CREATE (n:Person {name: $name})`)
+	bound, err := sqldialect.BindParams(result, map[string]any{"name": "Bob"})
+	if err != nil {
+		t.Fatalf("BindParams: %v", err)
+	}
+	found := false
+	for _, a := range bound.Args {
+		if a == "Bob" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'Bob' in bound args after CREATE param binding: %v", bound.Args)
+	}
+}
+
+// Test 40: BindParams resolves $param inside a SET value position.
+func TestBindParams_SetPropParam_Resolved(t *testing.T) {
+	scope := cypher.NewScope()
+	scope.Bind("n", cypher.Binding{Alias: "n0", IsNode: true})
+
+	setPlan := &cypher.SetPropPlan{
+		Variable: "n",
+		Property: "name",
+		Value:    &cypher.ParamRef{Name: "newName"},
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(setPlan, scope)
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+
+	bound, err := sqldialect.BindParams(result, map[string]any{"newName": "Charlie"})
+	if err != nil {
+		t.Fatalf("BindParams: %v", err)
+	}
+	found := false
+	for _, a := range bound.Args {
+		if a == "Charlie" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'Charlie' in bound args after SET param binding: %v", bound.Args)
+	}
+}
+
+// Test 41: BindParams preserves idSentinel values in write-operation args.
+func TestBindParams_PreservesIdSentinel(t *testing.T) {
+	scope := cypher.NewScope()
+	scope.Bind("a", cypher.Binding{Alias: "n0", IsNode: true})
+	scope.Bind("b", cypher.Binding{Alias: "n1", IsNode: true})
+
+	relPlan := &cypher.CreateRelPlan{
+		Type:     "KNOWS",
+		StartVar: "a",
+		EndVar:   "b",
+		Props:    map[string]cypher.Expr{},
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(relPlan, scope)
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+
+	// No params needed for this query; BindParams should succeed without
+	// touching the idSentinel values.
+	bound, err := sqldialect.BindParams(result, map[string]any{})
+	if err != nil {
+		t.Fatalf("BindParams should not fail when no paramSentinels present: %v", err)
+	}
+
+	// The bound result should have the same number of args as the original.
+	if len(bound.Args) != len(result.Args) {
+		t.Errorf("arg count changed: got %d, want %d", len(bound.Args), len(result.Args))
+	}
+}
+
+// Test 42: BindParams resolves params across multiple statements (write sequence).
+func TestBindParams_MultiStatement_AllResolved(t *testing.T) {
+	// A compound CREATE with two nodes, each having a $param property.
+	scope := cypher.NewScope()
+
+	nodeA := &cypher.CreateNodePlan{
+		Variable: "a",
+		Labels:   []string{"Person"},
+		Props:    map[string]cypher.Expr{"name": &cypher.ParamRef{Name: "nameA"}},
+	}
+	scope.Bind("a", cypher.Binding{Alias: "n0", IsNode: true})
+
+	nodeB := &cypher.CreateNodePlan{
+		Variable: "b",
+		Labels:   []string{"Person"},
+		Props:    map[string]cypher.Expr{"name": &cypher.ParamRef{Name: "nameB"}},
+	}
+	scope.Bind("b", cypher.Binding{Alias: "n1", IsNode: true})
+
+	seq := &cypher.SequencePlan{
+		Steps: []cypher.LogicalPlan{nodeA, nodeB},
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(seq, scope)
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	if len(result.Statements) != 2 {
+		t.Fatalf("expected 2 statements, got %d", len(result.Statements))
+	}
+
+	bound, err := sqldialect.BindParams(result, map[string]any{
+		"nameA": "Alice",
+		"nameB": "Bob",
+	})
+	if err != nil {
+		t.Fatalf("BindParams: %v", err)
+	}
+
+	// Each statement should have its param resolved.
+	foundAlice := false
+	for _, a := range bound.Statements[0].Args {
+		if a == "Alice" {
+			foundAlice = true
+		}
+	}
+	if !foundAlice {
+		t.Errorf("expected 'Alice' in statement[0] args: %v", bound.Statements[0].Args)
+	}
+
+	foundBob := false
+	for _, a := range bound.Statements[1].Args {
+		if a == "Bob" {
+			foundBob = true
+		}
+	}
+	if !foundBob {
+		t.Errorf("expected 'Bob' in statement[1] args: %v", bound.Statements[1].Args)
+	}
+}
+
+// Test 43: BindParams does not mutate the original Result's args slices.
+func TestBindParams_DoesNotMutateOriginal(t *testing.T) {
+	result := translateCypher(t,
+		`MATCH (n:Person) WHERE n.name = $name RETURN n.name`)
+
+	// Capture the original args content.
+	origArgs := make([]any, len(result.Args))
+	copy(origArgs, result.Args)
+
+	_, err := sqldialect.BindParams(result, map[string]any{"name": "Alice"})
+	if err != nil {
+		t.Fatalf("BindParams: %v", err)
+	}
+
+	// The original result.Args must be unchanged.
+	if len(result.Args) != len(origArgs) {
+		t.Fatalf("original args length changed: %d → %d", len(origArgs), len(result.Args))
+	}
+	for i, a := range result.Args {
+		if a != origArgs[i] {
+			t.Errorf("original args[%d] mutated: was %v, now %v", i, origArgs[i], a)
+		}
+	}
 }
