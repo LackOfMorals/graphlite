@@ -746,7 +746,6 @@ func TestPlanner_WHERE_AllComparisonOperators(t *testing.T) {
 		{"MATCH (n:T) WHERE n.x >= 1 RETURN n", ">="},
 	}
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.op, func(t *testing.T) {
 			pred := getFilterPredicate(t, tc.query)
 			cmp := asComparison(t, pred)
