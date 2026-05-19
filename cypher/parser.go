@@ -48,7 +48,7 @@ type errorCollector struct {
 
 func (e *errorCollector) SyntaxError(
 	_ antlr.Recognizer,
-	_ interface{},
+	_ any,
 	line, col int,
 	msg string,
 	_ antlr.RecognitionException,
@@ -122,7 +122,7 @@ func buildSinglePartQuery(ctx *parser.OC_SinglePartQueryContext) (*Query, error)
 	return q, nil
 }
 
-func buildMultiPartQuery(ctx *parser.OC_MultiPartQueryContext) (*Query, error) {
+func buildMultiPartQuery(_ *parser.OC_MultiPartQueryContext) (*Query, error) {
 	// v0.1 does not support multi-part queries (WITH pipelines).
 	// Task-024 adds WITH support. For now, surface a useful error.
 	return nil, fmt.Errorf("cypher: multi-part queries (WITH pipelines) are not supported in v0.1")
