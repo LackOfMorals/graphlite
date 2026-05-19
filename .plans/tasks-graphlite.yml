@@ -104,7 +104,7 @@ tasks:
       BindingScope — the map from Cypher variable names to SQL table alias and column expression —
       and its merge/shadow semantics for WITH pipelines. The planner and translator are both
       consumers; BindingScope is the central shared data structure for query correctness.
-    status: pending
+    status: completed
     dependencies:
       - task-002
       - task-005
@@ -114,7 +114,7 @@ tasks:
       - "BindingScope handles shadowing correctly: a WITH clause creates a child scope; resolving in child first, then parent"
       - "Unit tests cover scope shadowing, multi-hop variable tracking, and WITH pipeline scoping"
       - "Plan types carry enough information for the translator to emit SQL without re-inspecting the AST"
-    completed_at: null
+    completed_at: "2026-05-19T15:30:00Z"
 
   - id: task-007
     title: "Planner: MATCH patterns (node, label, property, single-hop, multi-hop)"

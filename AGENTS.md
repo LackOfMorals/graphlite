@@ -111,3 +111,9 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - `MATCH (a), (b)` is one `MatchClause` with two `PatternPart` entries, not two separate `MatchClause` nodes. The comma-separated patterns are parsed inside a single `OC_Pattern`.
 - `OC_PatternElement` can nest inside itself for parenthesized patterns; loop `for elemCtx.OC_PatternElement() != nil { elemCtx = ... }` to unwrap.
 - The `"$"` sentinel key in `NodePattern.Props` encodes a whole-properties parameter reference (`{$param}`). Cypher identifiers cannot start with `$` so this key never collides with a real property name.
+- `BindingScope.Bind` takes a `Binding` struct (not separate alias/column args) — the struct carries IsNode, IsRel, IsNullable flags needed by the translator and optional-match planner.
+- `LogicalPlan` and `Expr` both use sealed interfaces (unexported `planNode()`/`exprNode()` methods) — type switches are the dispatch mechanism; never use reflect.
+- `MatchRelPlan.EndNode` is an embedded `MatchNodePlan` (not just `EndVar string`) so the translator can apply destination node label/property constraints without rescanning the scope.
+- WITH pipeline scoping: use a fresh `NewScope()` for the next stage (not `Child()`) — only projected variables are re-bound. `Child()` inherits everything from the parent; WITH explicitly limits visibility.
+- `RawExpr{Text}` is a fallback for deferred expression parsing; task-008 replaces raw WHERE strings with typed `ComparisonExpr`/`BoolExpr`/`NotExpr` trees.
+- Only one file in a package should have a package-level doc comment (the `package foo` comment with a `//` block above it); duplicating it in other files causes `go doc` to show it twice.

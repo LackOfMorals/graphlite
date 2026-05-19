@@ -129,3 +129,41 @@ Key Decisions:
 - REMOVE, MERGE, UNION, WITH-pipeline, standalone CALL all return clear errors.
 
 Next Task: task-006 (Logical plan types and BindingScope tracker)
+
+================================================================================
+TASK-006: Logical plan types and BindingScope tracker
+Date: 2026-05-19T15:30:00Z
+================================================================================
+
+Summary:
+Implemented all LogicalPlan concrete node types in cypher/plan.go and the
+BindingScope tracker in cypher/scope.go. The Expr interface and its subtypes
+(LiteralExpr, ParamRef, PropExpr, VarExpr, ComparisonExpr, BoolExpr, NotExpr,
+RawExpr) were also defined since they are shared between FilterPlan predicates
+and CreateNodePlan/SetPropPlan property value expressions. Full unit test suites
+added for both the plan types (interface conformance + field tests) and BindingScope
+(binding, resolution, shadowing, WITH pipeline scoping, multi-hop tracking).
+
+Files Changed:
+- cypher/plan.go (implemented — LogicalPlan interface + 10 concrete plan types + Expr interface + 8 expression types)
+- cypher/scope.go (implemented — Binding struct, BindingScope with Child/Bind/Resolve/MustResolve/Names/Local)
+- cypher/plan_test.go (created — interface conformance checks + field tests for all plan and expr types)
+- cypher/scope_test.go (created — 14 tests covering binding, shadowing, multi-hop, WITH pipeline, deep chains)
+
+Key Decisions:
+- BindingScope.Bind takes a full Binding struct rather than separate (varName, alias, column) args
+  as the acceptance criteria described. The struct approach is more extensible (IsNode, IsRel,
+  IsNullable flags) and avoids a large parameter list; the acceptance criteria was describing
+  the concept, not the exact signature.
+- LogicalPlan and Expr use sealed interfaces (unexported planNode()/exprNode() methods) following
+  the pattern established by the AST Clause interface in ast.go.
+- RawExpr included as a fallback expression type for deferred parsing (WHERE clause raw text
+  from the parser is wrapped here until task-008 adds full typed predicate parsing).
+- MatchRelPlan carries an embedded EndNode MatchNodePlan (not just EndVar) so the translator
+  can apply label and property constraints on the destination node without re-querying the scope.
+- SequencePlan provides ordered plan composition for compound statements (MATCH + SET/DELETE,
+  multi-node CREATE).
+- WITH pipeline test uses a fresh NewScope() (not a child) to model correct WITH scoping semantics
+  (only projected variables are visible in the next stage).
+
+Next Task: task-007 (Planner: MATCH patterns)
