@@ -25,12 +25,6 @@ type QueryResult struct {
 	counters queryCounters
 }
 
-// newQueryResult wraps a *sql.Rows and a slice of column names in a QueryResult.
-// The column names are used to build the Record keys for each row.
-func newQueryResult(rows *sql.Rows, keys []string) *QueryResult {
-	return &QueryResult{rows: rows, keys: keys}
-}
-
 // NewQueryResultFromRows constructs a QueryResult, deriving column names from
 // the *sql.Rows itself. Returns an error if column names cannot be read.
 func NewQueryResultFromRows(rows *sql.Rows) (*QueryResult, error) {
@@ -131,13 +125,6 @@ func (r *QueryResult) Collect(ctx context.Context) ([]*Record, error) {
 	}
 	r.consumed = true
 	return recs, nil
-}
-
-// withCounters attaches write-operation counters to this result. Used by the
-// execution layer after CREATE / SET / DELETE statements.
-func (r *QueryResult) withCounters(c queryCounters) *QueryResult {
-	r.counters = c
-	return r
 }
 
 // QueryCounters is the exported form of write-operation statistics, used by
