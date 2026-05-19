@@ -1469,3 +1469,265 @@ func TestPlanner_CreateRelWithParamProps(t *testing.T) {
 		t.Errorf("ParamRef.Name: want %q got %q", "since", pr.Name)
 	}
 }
+
+// ─── task-011: Planner SET property, DELETE, and DETACH DELETE ───────────────
+
+// asSetProp unwraps a plan as *SetPropPlan; fails otherwise.
+func asSetProp(t *testing.T, plan cypher.LogicalPlan) *cypher.SetPropPlan {
+	t.Helper()
+	sp, ok := plan.(*cypher.SetPropPlan)
+	if !ok {
+		t.Fatalf("expected *SetPropPlan, got %T", plan)
+	}
+	return sp
+}
+
+// asDeleteNode unwraps a plan as *DeleteNodePlan; fails otherwise.
+func asDeleteNode(t *testing.T, plan cypher.LogicalPlan) *cypher.DeleteNodePlan {
+	t.Helper()
+	dn, ok := plan.(*cypher.DeleteNodePlan)
+	if !ok {
+		t.Fatalf("expected *DeleteNodePlan, got %T", plan)
+	}
+	return dn
+}
+
+// asDeleteRel unwraps a plan as *DeleteRelPlan; fails otherwise.
+func asDeleteRel(t *testing.T, plan cypher.LogicalPlan) *cypher.DeleteRelPlan {
+	t.Helper()
+	dr, ok := plan.(*cypher.DeleteRelPlan)
+	if !ok {
+		t.Fatalf("expected *DeleteRelPlan, got %T", plan)
+	}
+	return dr
+}
+
+// ─── test 54: SET n.prop = literal value ─────────────────────────────────────
+
+func TestPlanner_SetPropertyLiteral(t *testing.T) {
+	plan, _ := mustPlan(t, "MATCH (n:Person) SET n.name = 'Alice'")
+
+	// The overall plan is a SequencePlan: [matchPlan, setPropPlan]
+	seq := asSequence(t, plan)
+
+	var setPlan *cypher.SetPropPlan
+	for _, step := range seq.Steps {
+		if sp, ok := step.(*cypher.SetPropPlan); ok {
+			setPlan = sp
+			break
+		}
+	}
+	if setPlan == nil {
+		t.Fatal("expected *SetPropPlan in plan sequence")
+	}
+
+	if setPlan.Variable != "n" {
+		t.Errorf("Variable: want %q got %q", "n", setPlan.Variable)
+	}
+	if setPlan.Property != "name" {
+		t.Errorf("Property: want %q got %q", "name", setPlan.Property)
+	}
+
+	lit, ok := setPlan.Value.(*cypher.LiteralExpr)
+	if !ok {
+		t.Fatalf("Value: expected *LiteralExpr, got %T", setPlan.Value)
+	}
+	if lit.Value != "Alice" {
+		t.Errorf("LiteralExpr.Value: want %q got %v", "Alice", lit.Value)
+	}
+}
+
+// ─── test 55: SET n.prop = $param ────────────────────────────────────────────
+
+func TestPlanner_SetPropertyParam(t *testing.T) {
+	plan, _ := mustPlan(t, "MATCH (n:Person) SET n.age = $age")
+
+	seq := asSequence(t, plan)
+
+	var setPlan *cypher.SetPropPlan
+	for _, step := range seq.Steps {
+		if sp, ok := step.(*cypher.SetPropPlan); ok {
+			setPlan = sp
+			break
+		}
+	}
+	if setPlan == nil {
+		t.Fatal("expected *SetPropPlan in plan sequence")
+	}
+
+	if setPlan.Variable != "n" {
+		t.Errorf("Variable: want %q got %q", "n", setPlan.Variable)
+	}
+	if setPlan.Property != "age" {
+		t.Errorf("Property: want %q got %q", "age", setPlan.Property)
+	}
+
+	pr, ok := setPlan.Value.(*cypher.ParamRef)
+	if !ok {
+		t.Fatalf("Value: expected *ParamRef, got %T", setPlan.Value)
+	}
+	if pr.Name != "age" {
+		t.Errorf("ParamRef.Name: want %q got %q", "age", pr.Name)
+	}
+}
+
+// ─── test 56: SET multiple properties in one clause ──────────────────────────
+
+func TestPlanner_SetMultipleProperties(t *testing.T) {
+	plan, _ := mustPlan(t, "MATCH (n:Person) SET n.name = 'Bob', n.active = true")
+
+	seq := asSequence(t, plan)
+
+	var setPlans []*cypher.SetPropPlan
+	for _, step := range seq.Steps {
+		if sp, ok := step.(*cypher.SetPropPlan); ok {
+			setPlans = append(setPlans, sp)
+		}
+	}
+
+	if len(setPlans) != 2 {
+		t.Fatalf("expected 2 *SetPropPlan steps, got %d", len(setPlans))
+	}
+
+	// First SET: n.name = 'Bob'
+	if setPlans[0].Property != "name" {
+		t.Errorf("setPlans[0].Property: want %q got %q", "name", setPlans[0].Property)
+	}
+	lit0, ok := setPlans[0].Value.(*cypher.LiteralExpr)
+	if !ok {
+		t.Fatalf("setPlans[0].Value: expected *LiteralExpr, got %T", setPlans[0].Value)
+	}
+	if lit0.Value != "Bob" {
+		t.Errorf("setPlans[0].Value: want %q got %v", "Bob", lit0.Value)
+	}
+
+	// Second SET: n.active = true
+	if setPlans[1].Property != "active" {
+		t.Errorf("setPlans[1].Property: want %q got %q", "active", setPlans[1].Property)
+	}
+	lit1, ok := setPlans[1].Value.(*cypher.LiteralExpr)
+	if !ok {
+		t.Fatalf("setPlans[1].Value: expected *LiteralExpr, got %T", setPlans[1].Value)
+	}
+	if lit1.Value != true {
+		t.Errorf("setPlans[1].Value: want true got %v", lit1.Value)
+	}
+}
+
+// ─── test 57: DELETE n — emits DeleteNodePlan with Detach=false ──────────────
+
+func TestPlanner_DeleteNode_NonDetach(t *testing.T) {
+	plan, _ := mustPlan(t, "MATCH (n:Person) DELETE n")
+
+	seq := asSequence(t, plan)
+
+	var delPlan *cypher.DeleteNodePlan
+	for _, step := range seq.Steps {
+		if dn, ok := step.(*cypher.DeleteNodePlan); ok {
+			delPlan = dn
+			break
+		}
+	}
+	if delPlan == nil {
+		t.Fatal("expected *DeleteNodePlan in plan sequence")
+	}
+
+	if delPlan.Variable != "n" {
+		t.Errorf("Variable: want %q got %q", "n", delPlan.Variable)
+	}
+	if delPlan.Detach {
+		t.Error("Detach: expected false for DELETE (not DETACH DELETE)")
+	}
+}
+
+// ─── test 58: DETACH DELETE n — emits DeleteNodePlan with Detach=true ────────
+
+func TestPlanner_DetachDeleteNode(t *testing.T) {
+	plan, _ := mustPlan(t, "MATCH (n:Person) DETACH DELETE n")
+
+	seq := asSequence(t, plan)
+
+	var delPlan *cypher.DeleteNodePlan
+	for _, step := range seq.Steps {
+		if dn, ok := step.(*cypher.DeleteNodePlan); ok {
+			delPlan = dn
+			break
+		}
+	}
+	if delPlan == nil {
+		t.Fatal("expected *DeleteNodePlan in plan sequence")
+	}
+
+	if delPlan.Variable != "n" {
+		t.Errorf("Variable: want %q got %q", "n", delPlan.Variable)
+	}
+	if !delPlan.Detach {
+		t.Error("Detach: expected true for DETACH DELETE")
+	}
+}
+
+// ─── test 59: DELETE r — emits DeleteRelPlan ─────────────────────────────────
+
+func TestPlanner_DeleteRelationship(t *testing.T) {
+	plan, _ := mustPlan(t, "MATCH (a)-[r:KNOWS]->(b) DELETE r")
+
+	seq := asSequence(t, plan)
+
+	var delPlan *cypher.DeleteRelPlan
+	for _, step := range seq.Steps {
+		if dr, ok := step.(*cypher.DeleteRelPlan); ok {
+			delPlan = dr
+			break
+		}
+	}
+	if delPlan == nil {
+		t.Fatal("expected *DeleteRelPlan in plan sequence")
+	}
+
+	if delPlan.Variable != "r" {
+		t.Errorf("Variable: want %q got %q", "r", delPlan.Variable)
+	}
+}
+
+// ─── test 60: MATCH + DELETE compound plan links subtrees correctly ───────────
+
+func TestPlanner_MatchDeleteCompound(t *testing.T) {
+	plan, scope := mustPlan(t, "MATCH (n:Person) WHERE n.age > 18 DELETE n")
+
+	// The plan should be a SequencePlan whose first step contains the MATCH+WHERE
+	// subtree (a FilterPlan wrapping MatchNodePlan), followed by DeleteNodePlan.
+	seq := asSequence(t, plan)
+
+	if len(seq.Steps) < 2 {
+		t.Fatalf("expected at least 2 steps in MATCH+DELETE compound plan, got %d", len(seq.Steps))
+	}
+
+	// First step: should be a FilterPlan (WHERE wrapping the MATCH).
+	fp, ok := seq.Steps[0].(*cypher.FilterPlan)
+	if !ok {
+		t.Fatalf("step[0]: expected *FilterPlan, got %T", seq.Steps[0])
+	}
+	// Source of FilterPlan should be a MatchNodePlan.
+	if _, ok := fp.Source.(*cypher.MatchNodePlan); !ok {
+		t.Fatalf("FilterPlan.Source: expected *MatchNodePlan, got %T", fp.Source)
+	}
+
+	// Last step: should be a DeleteNodePlan.
+	lastStep := seq.Steps[len(seq.Steps)-1]
+	dn, ok := lastStep.(*cypher.DeleteNodePlan)
+	if !ok {
+		t.Fatalf("last step: expected *DeleteNodePlan, got %T", lastStep)
+	}
+	if dn.Variable != "n" {
+		t.Errorf("DeleteNodePlan.Variable: want %q got %q", "n", dn.Variable)
+	}
+
+	// Scope must contain 'n' as a node binding.
+	b, ok := scope.Resolve("n")
+	if !ok {
+		t.Fatal("expected 'n' in scope after MATCH")
+	}
+	if !b.IsNode {
+		t.Error("expected 'n' to be a node binding")
+	}
+}

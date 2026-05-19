@@ -307,3 +307,33 @@ Key Decisions:
 - Test 52 verifies anonymous node (no variable) leaves scope empty.
 
 Next Task: task-011 (Planner: SET property, DELETE, and DETACH DELETE)
+
+================================================================================
+TASK-011: Planner: SET property, DELETE, and DETACH DELETE
+Date: 2026-05-19T20:00:00Z
+================================================================================
+
+Summary:
+The planSetClause and planDeleteClause implementations in cypher/planner.go were
+already complete from task-007. This task added 7 targeted unit tests (tests 54-60)
+covering all acceptance criteria: SET with literal value, SET with $param, SET
+multiple properties, DELETE node (Detach=false), DETACH DELETE (Detach=true),
+DELETE relationship, and MATCH+WHERE+DELETE compound plan structure.
+
+Files Changed:
+- cypher/planner_test.go (modified — 7 new tests 54-60 covering all SET/DELETE
+  plan forms; added asSetProp, asDeleteNode, asDeleteRel helper unwrappers)
+
+Key Decisions:
+- planSetClause and planDeleteClause already handled all acceptance criteria;
+  no new production code was needed.
+- asSetProp, asDeleteNode, asDeleteRel helpers follow the established pattern
+  (asMatchNode, asCreateNode, etc.) and are available for future tests even
+  though current tests use inline loop type-assertions for searching plan steps.
+- Test 60 (MATCH+WHERE+DELETE compound) verifies the FilterPlan wraps MatchNodePlan
+  as step[0], and DeleteNodePlan is the last step — robust to exact sequence length.
+- planDeleteClause dispatches on scope binding: if IsRel=true it emits DeleteRelPlan;
+  otherwise DeleteNodePlan. The Detach flag comes from DeleteClause.Detach parsed
+  by the ANTLR grammar.
+
+Next Task: task-012 (SQL Dialect interface and SQLite dialect implementation)

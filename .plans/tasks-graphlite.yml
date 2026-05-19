@@ -197,7 +197,7 @@ tasks:
       The planner emits SetPropPlan, DeleteNodePlan (detach bool), and DeleteRelPlan nodes.
       MATCH + SET and MATCH + DELETE compound statements must produce a plan with both a
       match subtree and a mutation root.
-    status: pending
+    status: completed
     dependencies:
       - task-007
     acceptance_criteria:
@@ -206,7 +206,7 @@ tasks:
       - "DELETE r emits a DeleteRelPlan"
       - "MATCH + DELETE compound plans correctly link the match subtree to the delete root"
       - "Unit tests cover SET with literal, SET with param, DELETE node, DETACH DELETE, and DELETE relationship"
-    completed_at: null
+    completed_at: "2026-05-19T20:00:00Z"
 
   - id: task-012
     title: "SQL Dialect interface and SQLite dialect implementation"
