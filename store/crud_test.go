@@ -233,7 +233,7 @@ func TestListNodesByLabelIndexHint(t *testing.T) {
 	ctx := context.Background()
 
 	// Insert a few nodes so the index is non-trivially used.
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		if _, err := s.InsertNode(ctx, "Person", `{}`); err != nil {
 			t.Fatalf("InsertNode: %v", err)
 		}
@@ -476,7 +476,7 @@ func TestListEdgesByType(t *testing.T) {
 	n1, n2 := insertTestNodes(t, s)
 
 	// Insert 2 KNOWS and 1 LIKES edge.
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if _, err := s.InsertEdge(ctx, "KNOWS", n1, n2, `{}`); err != nil {
 			t.Fatalf("InsertEdge KNOWS: %v", err)
 		}
@@ -749,7 +749,7 @@ func TestTxMultipleMutationsRollback(t *testing.T) {
 
 	// Insert several new nodes inside the tx.
 	var newIDs []int64
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		id, err := tx.InsertNode(ctx, "Tx", `{}`)
 		if err != nil {
 			t.Fatalf("tx.InsertNode: %v", err)
