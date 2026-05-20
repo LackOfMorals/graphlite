@@ -412,9 +412,16 @@ func planWithClause(wc *WithClause, scope *BindingScope) (*WithPlan, error) {
 				if b, found := scope.Resolve(ve.Name); found {
 					scope.Bind(item.Alias, b)
 				}
+			} else {
+				// Other non-aggregate expressions (e.g. n.name AS author): bind the
+				// alias so downstream RETURN clauses can reference it. We reuse
+				// AggExpr as an "expand me" pointer — the translator calls exprToSQL
+				// on the stored expression to produce the SQL column reference.
+				scope.Bind(item.Alias, Binding{
+					Column:  item.Alias,
+					AggExpr: proj.Expr,
+				})
 			}
-			// Other non-aggregate aliases (e.g. n.name AS nm) are left unbound for now;
-			// they are handled by the translator via ExprText fallback.
 		}
 	}
 

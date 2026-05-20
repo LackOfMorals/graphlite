@@ -1658,3 +1658,263 @@ func TestIntegration_With_CountAndReturn(t *testing.T) {
 		t.Errorf("Rowling count: expected 1, got %d", counts["Rowling"])
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task-025: COLLECT(), DISTINCT, advanced WHERE predicates
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestIntegration_Collect_ReturnsJSONArray verifies that COLLECT(n.name)
+// returns a JSON array string containing all matched values.
+func TestIntegration_Collect_ReturnsJSONArray(t *testing.T) {
+	db := openDB(t)
+	setup(t, db,
+		`CREATE (n:Person {name: "Alice"})`,
+		`CREATE (n:Person {name: "Bob"})`,
+		`CREATE (n:Person {name: "Carol"})`,
+	)
+
+	cypher := `MATCH (n:Person) RETURN collect(n.name) AS names`
+	result := query(t, db, cypher, nil)
+	assertCount(t, cypher, result, 1)
+
+	namesVal, ok := result.Records[0].Get("names")
+	if !ok {
+		t.Fatalf("query %q: key 'names' not found in record", cypher)
+	}
+	namesStr, ok := namesVal.(string)
+	if !ok {
+		t.Fatalf("query %q: names is not a string, got %T %v", cypher, namesVal, namesVal)
+	}
+	// The result is a JSON array like ["Alice","Bob","Carol"] (order may vary).
+	for _, name := range []string{"Alice", "Bob", "Carol"} {
+		if !strings.Contains(namesStr, name) {
+			t.Errorf("query %q: expected %q in collect result %q", cypher, name, namesStr)
+		}
+	}
+}
+
+// TestIntegration_Collect_InWithPipeline verifies COLLECT in a WITH pipeline.
+func TestIntegration_Collect_InWithPipeline(t *testing.T) {
+	db := openDB(t)
+	setup(t, db,
+		`CREATE (a:Author {name: "Tolkien"})-[:WROTE]->(b:Book {title: "LOTR"})`,
+		`CREATE (a:Author {name: "Tolkien"})-[:WROTE]->(b:Book {title: "Silmarillion"})`,
+	)
+
+	cypher := `MATCH (a:Author)-[:WROTE]->(b:Book) WITH a.name AS author, collect(b.title) AS books RETURN author, books`
+	result := query(t, db, cypher, nil)
+	assertCount(t, cypher, result, 1)
+
+	books, ok := result.Records[0].Get("books")
+	if !ok {
+		t.Fatalf("query %q: key 'books' not found", cypher)
+	}
+	booksStr, ok := books.(string)
+	if !ok {
+		t.Fatalf("query %q: books is not a string, got %T %v", cypher, books, books)
+	}
+	for _, title := range []string{"LOTR", "Silmarillion"} {
+		if !strings.Contains(booksStr, title) {
+			t.Errorf("query %q: expected %q in books result %q", cypher, title, booksStr)
+		}
+	}
+}
+
+// TestIntegration_ReturnDistinct_Deduplicates verifies that RETURN DISTINCT
+// removes duplicate values from query results.
+func TestIntegration_ReturnDistinct_Deduplicates(t *testing.T) {
+	db := openDB(t)
+	setup(t, db,
+		`CREATE (n:Person {city: "London"})`,
+		`CREATE (n:Person {city: "London"})`,
+		`CREATE (n:Person {city: "Paris"})`,
+	)
+
+	cypher := `MATCH (n:Person) RETURN DISTINCT n.city AS city`
+	result := query(t, db, cypher, nil)
+	// Should return 2 distinct cities, not 3 rows.
+	assertCount(t, cypher, result, 2)
+}
+
+// TestIntegration_ExistsPredicate_FiltersNullProps verifies that
+// WHERE exists(n.prop) returns only nodes that have the property set.
+func TestIntegration_ExistsPredicate_FiltersNullProps(t *testing.T) {
+	db := openDB(t)
+	setup(t, db,
+		`CREATE (n:Person {name: "Alice", email: "alice@example.com"})`,
+		`CREATE (n:Person {name: "Bob"})`,
+		`CREATE (n:Person {name: "Carol", email: "carol@example.com"})`,
+	)
+
+	cypher := `MATCH (n:Person) WHERE exists(n.email) RETURN n.name AS name`
+	result := query(t, db, cypher, nil)
+	assertCount(t, cypher, result, 2)
+
+	names := make(map[string]bool)
+	for _, rec := range result.Records {
+		if v, ok := rec.Get("name"); ok {
+			if s, ok := v.(string); ok {
+				names[s] = true
+			}
+		}
+	}
+	if !names["Alice"] {
+		t.Errorf("query %q: expected Alice in results", cypher)
+	}
+	if !names["Carol"] {
+		t.Errorf("query %q: expected Carol in results", cypher)
+	}
+	if names["Bob"] {
+		t.Errorf("query %q: Bob should be excluded (no email)", cypher)
+	}
+}
+
+// TestIntegration_InListPredicate_StringValues verifies that
+// n.prop IN ['a','b'] returns only matching nodes.
+func TestIntegration_InListPredicate_StringValues(t *testing.T) {
+	db := openDB(t)
+	setup(t, db,
+		`CREATE (n:Person {name: "Alice", status: "active"})`,
+		`CREATE (n:Person {name: "Bob", status: "inactive"})`,
+		`CREATE (n:Person {name: "Carol", status: "pending"})`,
+		`CREATE (n:Person {name: "Dave", status: "active"})`,
+	)
+
+	cypher := `MATCH (n:Person) WHERE n.status IN ['active', 'pending'] RETURN n.name AS name`
+	result := query(t, db, cypher, nil)
+	assertCount(t, cypher, result, 3) // Alice, Carol, Dave
+
+	names := make(map[string]bool)
+	for _, rec := range result.Records {
+		if v, ok := rec.Get("name"); ok {
+			if s, ok := v.(string); ok {
+				names[s] = true
+			}
+		}
+	}
+	if !names["Alice"] || !names["Carol"] || !names["Dave"] {
+		t.Errorf("query %q: expected Alice, Carol, Dave in results, got %v", cypher, names)
+	}
+	if names["Bob"] {
+		t.Errorf("query %q: Bob (inactive) should be excluded", cypher)
+	}
+}
+
+// TestIntegration_StartsWithPredicate verifies STARTS WITH filtering.
+func TestIntegration_StartsWithPredicate(t *testing.T) {
+	db := openDB(t)
+	setup(t, db,
+		`CREATE (n:Person {name: "Alice"})`,
+		`CREATE (n:Person {name: "Albert"})`,
+		`CREATE (n:Person {name: "Bob"})`,
+	)
+
+	cypher := `MATCH (n:Person) WHERE n.name STARTS WITH 'Al' RETURN n.name AS name`
+	result := query(t, db, cypher, nil)
+	assertCount(t, cypher, result, 2)
+
+	names := make(map[string]bool)
+	for _, rec := range result.Records {
+		if v, ok := rec.Get("name"); ok {
+			if s, ok := v.(string); ok {
+				names[s] = true
+			}
+		}
+	}
+	if !names["Alice"] || !names["Albert"] {
+		t.Errorf("query %q: expected Alice and Albert, got %v", cypher, names)
+	}
+	if names["Bob"] {
+		t.Errorf("query %q: Bob should be excluded", cypher)
+	}
+}
+
+// TestIntegration_EndsWithPredicate verifies ENDS WITH filtering.
+func TestIntegration_EndsWithPredicate(t *testing.T) {
+	db := openDB(t)
+	setup(t, db,
+		`CREATE (n:Person {name: "Johnson"})`,
+		`CREATE (n:Person {name: "Anderson"})`,
+		`CREATE (n:Person {name: "Smith"})`,
+	)
+
+	cypher := `MATCH (n:Person) WHERE n.name ENDS WITH 'son' RETURN n.name AS name`
+	result := query(t, db, cypher, nil)
+	assertCount(t, cypher, result, 2)
+
+	names := make(map[string]bool)
+	for _, rec := range result.Records {
+		if v, ok := rec.Get("name"); ok {
+			if s, ok := v.(string); ok {
+				names[s] = true
+			}
+		}
+	}
+	if !names["Johnson"] || !names["Anderson"] {
+		t.Errorf("query %q: expected Johnson and Anderson, got %v", cypher, names)
+	}
+	if names["Smith"] {
+		t.Errorf("query %q: Smith should be excluded", cypher)
+	}
+}
+
+// TestIntegration_ContainsPredicate verifies CONTAINS filtering.
+func TestIntegration_ContainsPredicate(t *testing.T) {
+	db := openDB(t)
+	setup(t, db,
+		`CREATE (n:Person {name: "Alexander"})`,
+		`CREATE (n:Person {name: "Alexandra"})`,
+		`CREATE (n:Person {name: "Bob"})`,
+	)
+
+	cypher := `MATCH (n:Person) WHERE n.name CONTAINS 'xan' RETURN n.name AS name`
+	result := query(t, db, cypher, nil)
+	assertCount(t, cypher, result, 2)
+
+	names := make(map[string]bool)
+	for _, rec := range result.Records {
+		if v, ok := rec.Get("name"); ok {
+			if s, ok := v.(string); ok {
+				names[s] = true
+			}
+		}
+	}
+	if !names["Alexander"] || !names["Alexandra"] {
+		t.Errorf("query %q: expected Alexander and Alexandra, got %v", cypher, names)
+	}
+	if names["Bob"] {
+		t.Errorf("query %q: Bob should be excluded", cypher)
+	}
+}
+
+// TestIntegration_PropIsNull_FiltersNullProps verifies that
+// WHERE n.prop IS NULL returns only nodes without the property.
+func TestIntegration_PropIsNull_FiltersNullProps(t *testing.T) {
+	db := openDB(t)
+	setup(t, db,
+		`CREATE (n:Person {name: "Alice", email: "alice@example.com"})`,
+		`CREATE (n:Person {name: "Bob"})`,
+	)
+
+	cypher := `MATCH (n:Person) WHERE n.email IS NULL RETURN n.name AS name`
+	result := query(t, db, cypher, nil)
+	assertCount(t, cypher, result, 1)
+	got, _ := result.Records[0].Get("name")
+	assertString(t, cypher, "name", got, "Bob")
+}
+
+// TestIntegration_PropIsNotNull_FiltersNullProps verifies that
+// WHERE n.prop IS NOT NULL returns only nodes with the property.
+func TestIntegration_PropIsNotNull_FiltersNullProps(t *testing.T) {
+	db := openDB(t)
+	setup(t, db,
+		`CREATE (n:Person {name: "Alice", email: "alice@example.com"})`,
+		`CREATE (n:Person {name: "Bob"})`,
+	)
+
+	cypher := `MATCH (n:Person) WHERE n.email IS NOT NULL RETURN n.name AS name`
+	result := query(t, db, cypher, nil)
+	assertCount(t, cypher, result, 1)
+	got, _ := result.Records[0].Get("name")
+	assertString(t, cypher, "name", got, "Alice")
+}

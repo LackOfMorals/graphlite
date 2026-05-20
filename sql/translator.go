@@ -931,6 +931,20 @@ func (t *Translator) exprToSQL(expr cypher.Expr, scope *cypher.BindingScope) (st
 		return fmt.Sprintf("(NOT %s)", innerSQL), nil
 
 	case *cypher.AggCallExpr:
+		if e.Func == "collect" {
+			// COLLECT(expr) → json_group_array(expr)
+			if e.CountStar || e.Arg == nil {
+				return "json_group_array(*)", nil
+			}
+			argSQL, err := t.aggArgToSQL(e.Arg, scope)
+			if err != nil {
+				return "", fmt.Errorf("sql: collect() argument: %w", err)
+			}
+			if e.Distinct {
+				return fmt.Sprintf("json_group_array(DISTINCT %s)", argSQL), nil
+			}
+			return fmt.Sprintf("json_group_array(%s)", argSQL), nil
+		}
 		funcName := strings.ToUpper(e.Func)
 		if e.CountStar || e.Arg == nil {
 			return funcName + "(*)", nil
@@ -946,6 +960,96 @@ func (t *Translator) exprToSQL(expr cypher.Expr, scope *cypher.BindingScope) (st
 		}
 		return fmt.Sprintf("%s(%s)", funcName, argSQL), nil
 
+	case *cypher.ExistsExpr:
+		// exists(n.prop) → json_extract(<alias>.props, '$.prop') IS NOT NULL
+		binding, ok := scope.Resolve(e.Prop.Variable)
+		if !ok {
+			return "", fmt.Errorf("sql: variable %q not in scope for exists()", e.Prop.Variable)
+		}
+		jsonExpr := t.dialect.JSONExtract(binding.Alias+".props", "$."+e.Prop.Property)
+		return fmt.Sprintf("(%s IS NOT NULL)", jsonExpr), nil
+
+	case *cypher.InListExpr:
+		// n.prop IN ['a','b','c'] → json_extract(...) IN (?, ?, ?)
+		lhsSQL, err := t.exprToSQL(e.Expr, scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: IN lhs: %w", err)
+		}
+		if len(e.List) == 0 {
+			// Empty IN list — always false.
+			if e.Not {
+				return "1", nil
+			}
+			return "0", nil
+		}
+		placeholders := make([]string, len(e.List))
+		for i, item := range e.List {
+			ph, err := t.exprToSQL(item, scope)
+			if err != nil {
+				return "", fmt.Errorf("sql: IN list item %d: %w", i, err)
+			}
+			placeholders[i] = ph
+		}
+		op := "IN"
+		if e.Not {
+			op = "NOT IN"
+		}
+		return fmt.Sprintf("%s %s (%s)", lhsSQL, op, strings.Join(placeholders, ", ")), nil
+
+	case *cypher.StringMatchExpr:
+		// STARTS WITH → lhs LIKE 'pattern%'
+		// ENDS WITH   → lhs LIKE '%pattern'
+		// CONTAINS    → lhs LIKE '%pattern%'
+		lhsSQL, err := t.exprToSQL(e.Expr, scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: string match lhs: %w", err)
+		}
+		// Pattern must be a literal string for LIKE; for non-literal RHS we emit a
+		// LIKE with bind parameter using SQLite's LIKE pattern.
+		patternSQL, patternLiteral, ok := t.stringMatchPattern(e.Pattern, e.Op)
+		if ok {
+			// Pattern is a string literal — inline the LIKE pattern directly.
+			t.args = append(t.args, patternLiteral)
+			if e.Not {
+				return fmt.Sprintf("(%s NOT LIKE ?)", lhsSQL), nil
+			}
+			return fmt.Sprintf("(%s LIKE ?)", lhsSQL), nil
+		}
+		// Non-literal RHS: use SQLite string concatenation to build the LIKE pattern.
+		_ = patternSQL
+		// Fallback: just emit a parameterised LIKE with the pattern SQL.
+		// Build prefix/suffix using CASE / || operators.
+		switch e.Op {
+		case "STARTS WITH":
+			// lhs LIKE (rhs || '%')
+			rhsSQL, err := t.exprToSQL(e.Pattern, scope)
+			if err != nil {
+				return "", err
+			}
+			if e.Not {
+				return fmt.Sprintf("(%s NOT LIKE (%s || '%%'))", lhsSQL, rhsSQL), nil
+			}
+			return fmt.Sprintf("(%s LIKE (%s || '%%'))", lhsSQL, rhsSQL), nil
+		case "ENDS WITH":
+			rhsSQL, err := t.exprToSQL(e.Pattern, scope)
+			if err != nil {
+				return "", err
+			}
+			if e.Not {
+				return fmt.Sprintf("(%s NOT LIKE ('%%' || %s))", lhsSQL, rhsSQL), nil
+			}
+			return fmt.Sprintf("(%s LIKE ('%%' || %s))", lhsSQL, rhsSQL), nil
+		default: // CONTAINS
+			rhsSQL, err := t.exprToSQL(e.Pattern, scope)
+			if err != nil {
+				return "", err
+			}
+			if e.Not {
+				return fmt.Sprintf("(%s NOT LIKE ('%%' || %s || '%%'))", lhsSQL, rhsSQL), nil
+			}
+			return fmt.Sprintf("(%s LIKE ('%%' || %s || '%%'))", lhsSQL, rhsSQL), nil
+		}
+
 	case *cypher.RawExpr:
 		// RawExpr: unsupported sub-expression; return as-is (best effort).
 		// The translator cannot produce correct SQL for this but should not crash.
@@ -954,6 +1058,37 @@ func (t *Translator) exprToSQL(expr cypher.Expr, scope *cypher.BindingScope) (st
 	default:
 		return "", fmt.Errorf("sql: unsupported expression type %T", expr)
 	}
+}
+
+// stringMatchPattern returns the LIKE pattern string for a string match
+// expression where the pattern is a literal string value. It returns
+// (pattern, literal, true) when the RHS is a literal string, or
+// ("", "", false) when it is not (e.g. a property reference or parameter).
+// The caller is responsible for appending the returned literal to t.args.
+func (t *Translator) stringMatchPattern(pattern cypher.Expr, op string) (string, string, bool) {
+	lit, ok := pattern.(*cypher.LiteralExpr)
+	if !ok {
+		return "", "", false
+	}
+	strVal, ok := lit.Value.(string)
+	if !ok {
+		return "", "", false
+	}
+	// Escape any existing '%' or '_' wildcards in the literal value so they
+	// are treated as plain characters in the LIKE pattern.
+	escaped := strings.ReplaceAll(strVal, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, "%", `\%`)
+	escaped = strings.ReplaceAll(escaped, "_", `\_`)
+	var likePattern string
+	switch op {
+	case "STARTS WITH":
+		likePattern = escaped + "%"
+	case "ENDS WITH":
+		likePattern = "%" + escaped
+	default: // CONTAINS
+		likePattern = "%" + escaped + "%"
+	}
+	return likePattern, likePattern, true
 }
 
 // aggArgToSQL converts an expression to SQL for use as an aggregate function

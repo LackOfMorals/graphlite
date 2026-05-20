@@ -1573,3 +1573,202 @@ func TestTranslate_OptionalMatch_PropIsNull(t *testing.T) {
 		"MATCH (n:Person) OPTIONAL MATCH (n)-[r:KNOWS]->(m) WHERE m.name IS NULL RETURN n.name AS name")
 	containsAll(t, result, "json_extract", "$.name", "IS NULL")
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task-025 tests: COLLECT(), DISTINCT, advanced WHERE predicates
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestTranslate_Collect_AggregateFunction verifies that COLLECT(n.name) emits
+// json_group_array(json_extract(...)) in the SQL output.
+func TestTranslate_Collect_AggregateFunction(t *testing.T) {
+	result := translateCypher(t,
+		"MATCH (n:Person) RETURN collect(n.name) AS names")
+	containsAll(t, result,
+		"json_group_array",
+		"json_extract",
+		"$.name",
+		"AS names",
+	)
+}
+
+// TestTranslate_Collect_InWithPipeline verifies COLLECT in a WITH clause.
+func TestTranslate_Collect_InWithPipeline(t *testing.T) {
+	result := translateCypher(t,
+		"MATCH (n:Person) WITH collect(n.name) AS names RETURN names")
+	containsAll(t, result,
+		"json_group_array",
+		"json_extract",
+		"$.name",
+	)
+}
+
+// TestTranslate_ReturnDistinct_025 verifies that RETURN DISTINCT emits SELECT DISTINCT
+// and deduplicates (SQL-level check only; runtime dedup is an integration concern).
+func TestTranslate_ReturnDistinct_025(t *testing.T) {
+	result := translateCypher(t,
+		"MATCH (n:Person) RETURN DISTINCT n.name")
+	containsAll(t, result, "SELECT DISTINCT", "json_extract", "$.name")
+}
+
+// TestTranslate_ExistsPredicate verifies that exists(n.prop) emits
+// json_extract(...) IS NOT NULL.
+func TestTranslate_ExistsPredicate(t *testing.T) {
+	result := translateCypher(t,
+		"MATCH (n:Person) WHERE exists(n.email) RETURN n.name")
+	containsAll(t, result,
+		"json_extract",
+		"$.email",
+		"IS NOT NULL",
+	)
+}
+
+// TestTranslate_InListPredicate_StringLiterals verifies that
+// n.prop IN ['a','b','c'] emits json_extract(...) IN (?, ?, ?).
+func TestTranslate_InListPredicate_StringLiterals(t *testing.T) {
+	result := translateCypher(t,
+		`MATCH (n:Person) WHERE n.status IN ['active', 'pending'] RETURN n.name`)
+	containsAll(t, result,
+		"json_extract",
+		"$.status",
+		" IN (",
+	)
+	// Two string literals should have been bound as args.
+	foundActive, foundPending := false, false
+	for _, a := range result.Args {
+		if a == "active" {
+			foundActive = true
+		}
+		if a == "pending" {
+			foundPending = true
+		}
+	}
+	if !foundActive {
+		t.Errorf("expected 'active' in args, got %v", result.Args)
+	}
+	if !foundPending {
+		t.Errorf("expected 'pending' in args, got %v", result.Args)
+	}
+}
+
+// TestTranslate_InListPredicate_IntLiterals verifies IN with integer literals.
+func TestTranslate_InListPredicate_IntLiterals(t *testing.T) {
+	result := translateCypher(t,
+		`MATCH (n:Product) WHERE n.category IN [1, 2, 3] RETURN n.name`)
+	containsAll(t, result,
+		"json_extract",
+		"$.category",
+		" IN (",
+		"1, 2, 3",
+	)
+}
+
+// TestTranslate_StartsWithPredicate verifies STARTS WITH emits a LIKE pattern.
+func TestTranslate_StartsWithPredicate(t *testing.T) {
+	result := translateCypher(t,
+		`MATCH (n:Person) WHERE n.name STARTS WITH 'Al' RETURN n.name`)
+	containsAll(t, result,
+		"LIKE",
+		"json_extract",
+		"$.name",
+	)
+	// The LIKE pattern should be 'Al%' — bound as a ? arg.
+	foundPattern := false
+	for _, a := range result.Args {
+		if s, ok := a.(string); ok && s == "Al%" {
+			foundPattern = true
+		}
+	}
+	if !foundPattern {
+		t.Errorf("expected 'Al%%' pattern in args, got %v", result.Args)
+	}
+}
+
+// TestTranslate_EndsWithPredicate verifies ENDS WITH emits a LIKE '%pattern'.
+func TestTranslate_EndsWithPredicate(t *testing.T) {
+	result := translateCypher(t,
+		`MATCH (n:Person) WHERE n.name ENDS WITH 'son' RETURN n.name`)
+	containsAll(t, result, "LIKE", "json_extract", "$.name")
+	foundPattern := false
+	for _, a := range result.Args {
+		if s, ok := a.(string); ok && s == "%son" {
+			foundPattern = true
+		}
+	}
+	if !foundPattern {
+		t.Errorf("expected '%%son' pattern in args, got %v", result.Args)
+	}
+}
+
+// TestTranslate_ContainsPredicate verifies CONTAINS emits a LIKE '%pattern%'.
+func TestTranslate_ContainsPredicate(t *testing.T) {
+	result := translateCypher(t,
+		`MATCH (n:Person) WHERE n.name CONTAINS 'ali' RETURN n.name`)
+	containsAll(t, result, "LIKE", "json_extract", "$.name")
+	foundPattern := false
+	for _, a := range result.Args {
+		if s, ok := a.(string); ok && s == "%ali%" {
+			foundPattern = true
+		}
+	}
+	if !foundPattern {
+		t.Errorf("expected '%%ali%%' pattern in args, got %v", result.Args)
+	}
+}
+
+// TestTranslate_ExistsPredicateDirectPlan verifies ExistsExpr translation
+// when constructed directly (not via Parse).
+func TestTranslate_ExistsPredicateDirectPlan(t *testing.T) {
+	scope := cypher.NewScope()
+	scope.Bind("n", cypher.Binding{Alias: "n0", IsNode: true, Column: "n0.id"})
+
+	existsExpr := &cypher.ExistsExpr{
+		Prop: &cypher.PropExpr{Variable: "n", Property: "email"},
+	}
+	matchPlan := &cypher.MatchNodePlan{
+		Variable: "n",
+		SQLAlias: "n0",
+	}
+	filterPlan := &cypher.FilterPlan{
+		Source:    matchPlan,
+		Predicate: existsExpr,
+	}
+	retPlan := &cypher.ReturnPlan{
+		Source: filterPlan,
+		Projections: []cypher.ProjectionItem{
+			{Expr: &cypher.PropExpr{Variable: "n", Property: "name"}, Alias: "name"},
+		},
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(retPlan, scope)
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	containsAll(t, result, "json_extract", "$.email", "IS NOT NULL")
+}
+
+// TestTranslate_CollectDirectPlan verifies collect() AggCallExpr translation
+// when the plan is constructed directly.
+func TestTranslate_CollectDirectPlan(t *testing.T) {
+	scope := cypher.NewScope()
+	scope.Bind("n", cypher.Binding{Alias: "n0", IsNode: true, Column: "n0.id"})
+
+	collectExpr := &cypher.AggCallExpr{
+		Func: "collect",
+		Arg:  &cypher.PropExpr{Variable: "n", Property: "name"},
+	}
+	matchPlan := &cypher.MatchNodePlan{Variable: "n", SQLAlias: "n0"}
+	retPlan := &cypher.ReturnPlan{
+		Source: matchPlan,
+		Projections: []cypher.ProjectionItem{
+			{Expr: collectExpr, Alias: "names"},
+		},
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(retPlan, scope)
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	containsAll(t, result, "json_group_array", "json_extract", "$.name", "AS names")
+}

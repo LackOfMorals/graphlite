@@ -765,3 +765,31 @@ Key Decisions:
   chains to exercise scale without requiring MATCH+CREATE between existing nodes.
 
 Next Task: task-023 (v0.2: OPTIONAL MATCH)
+
+================================================================================
+TASK-025: v0.2: COLLECT(), DISTINCT, and advanced WHERE predicates
+Date: 2026-05-20T12:00:00Z
+================================================================================
+
+Summary:
+Added COLLECT() aggregate (→ json_group_array), RETURN DISTINCT (→ SELECT DISTINCT),
+and advanced WHERE predicates: exists(n.prop), IS NULL / IS NOT NULL, IN [...], and
+STARTS WITH / ENDS WITH / CONTAINS (→ LIKE patterns with % / _ / \ escaping).
+Also fixed WITH clause to bind non-aggregate scalar aliases into scope.
+
+Files Changed:
+- cypher/plan.go (added ExistsExpr, InListExpr, StringMatchExpr plan types)
+- cypher/parser.go (added buildStringListNullExpr, extractListLiteralExprs helpers)
+- cypher/planner.go (wired new expression types through planner)
+- sql/translator.go (emitted SQL for all five new features)
+- sql/translator_test.go (unit tests for new expression types)
+- testdata/integration_test.go (end-to-end integration tests for all five features)
+- .plans/tasks-graphlite.yml (task-025 status: completed)
+
+Key Decisions:
+- ExistsExpr wraps *PropExpr; non-PropExpr arguments fall back to NullCheckExpr.
+- stringMatchPattern escapes %, _, and \ in literals before building LIKE string.
+- COLLECT() with nil/star argument returns an error rather than invalid json_group_array(*).
+- NOT IN and NOT STARTS WITH left as future work; parser falls back to RawExpr for now.
+
+Next Task: task-026

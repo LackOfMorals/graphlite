@@ -468,7 +468,7 @@ tasks:
       aggregation context (emits SELECT DISTINCT or COUNT(DISTINCT ...)), and the remaining
       advanced WHERE predicates: exists(n.prop), n.prop IS NULL / IS NOT NULL, n.prop IN [...],
       n.prop STARTS WITH / ENDS WITH / CONTAINS string predicates.
-    status: pending
+    status: completed
     dependencies:
       - task-024
     acceptance_criteria:
@@ -477,7 +477,7 @@ tasks:
       - "WHERE exists(n.prop) emits json_extract(props, '$.prop') IS NOT NULL"
       - "WHERE n.prop IN ['a','b','c'] emits json_extract(props, '$.prop') IN ('a','b','c')"
       - "STARTS WITH / ENDS WITH / CONTAINS emit correct LIKE patterns"
-    completed_at: null
+    completed_at: "2026-05-20T12:00:00Z"
 
   - id: task-026
     title: "v0.2: REMOVE property/label and SET n += {map} property merge"

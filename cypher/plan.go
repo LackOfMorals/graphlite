@@ -100,9 +100,9 @@ type NullCheckExpr struct {
 func (*NullCheckExpr) exprNode() {}
 
 // AggCallExpr represents an aggregation function call:
-// count(*), count(expr), sum(expr), avg(expr), min(expr), max(expr).
+// count(*), count(expr), sum(expr), avg(expr), min(expr), max(expr), collect(expr).
 type AggCallExpr struct {
-	// Func is the lowercase function name: "count", "sum", "avg", "min", "max".
+	// Func is the lowercase function name: "count", "sum", "avg", "min", "max", "collect".
 	Func string
 	// Arg is the argument expression. Nil when CountStar is true.
 	Arg Expr
@@ -113,6 +113,41 @@ type AggCallExpr struct {
 }
 
 func (*AggCallExpr) exprNode() {}
+
+// ExistsExpr represents an exists(n.prop) predicate.
+// It emits json_extract(props, '$.prop') IS NOT NULL in SQL.
+type ExistsExpr struct {
+	// Prop is the property expression to test for existence.
+	Prop *PropExpr
+}
+
+func (*ExistsExpr) exprNode() {}
+
+// InListExpr represents an n.prop IN ['a', 'b', 'c'] predicate.
+type InListExpr struct {
+	// Expr is the left-hand side expression.
+	Expr Expr
+	// List is the list of literal values to test membership in.
+	List []Expr
+	// Not is true for NOT IN.
+	Not bool
+}
+
+func (*InListExpr) exprNode() {}
+
+// StringMatchExpr represents STARTS WITH, ENDS WITH, and CONTAINS predicates.
+type StringMatchExpr struct {
+	// Expr is the left-hand side expression (e.g. n.name).
+	Expr Expr
+	// Pattern is the right-hand side string pattern.
+	Pattern Expr
+	// Op is one of "STARTS WITH", "ENDS WITH", "CONTAINS".
+	Op string
+	// Not is true for NOT STARTS WITH / NOT ENDS WITH / NOT CONTAINS.
+	Not bool
+}
+
+func (*StringMatchExpr) exprNode() {}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MATCH plan nodes

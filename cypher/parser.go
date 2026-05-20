@@ -801,8 +801,12 @@ func buildUnaryExpr(ctx *parser.OC_UnaryAddOrSubtractExpressionContext) (Expr, e
 }
 
 // buildStringListNullExpr handles OC_StringListNullOperatorExpression.
-// String and list operator suffixes fall back to RawExpr; IS NULL / IS NOT NULL
-// are parsed into NullCheckExpr.
+// Handles:
+//   - IS NULL / IS NOT NULL → NullCheckExpr
+//   - IN [...] → InListExpr
+//   - STARTS WITH / ENDS WITH / CONTAINS → StringMatchExpr
+//
+// Other suffixes fall back to RawExpr.
 func buildStringListNullExpr(ctx *parser.OC_StringListNullOperatorExpressionContext) (Expr, error) {
 	propLabelsCtx := ctx.OC_PropertyOrLabelsExpression()
 	if propLabelsCtx == nil {
@@ -812,10 +816,70 @@ func buildStringListNullExpr(ctx *parser.OC_StringListNullOperatorExpressionCont
 	if err != nil {
 		return nil, err
 	}
-	// String / list operator suffixes are not supported — fall back.
-	if len(ctx.AllOC_StringOperatorExpression()) > 0 || len(ctx.AllOC_ListOperatorExpression()) > 0 {
+
+	// Handle STARTS WITH / ENDS WITH / CONTAINS.
+	strOps := ctx.AllOC_StringOperatorExpression()
+	if len(strOps) == 1 {
+		strOp := strOps[0].(*parser.OC_StringOperatorExpressionContext)
+		var op string
+		switch {
+		case strOp.STARTS() != nil:
+			op = "STARTS WITH"
+		case strOp.ENDS() != nil:
+			op = "ENDS WITH"
+		case strOp.CONTAINS() != nil:
+			op = "CONTAINS"
+		default:
+			return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+		}
+		// The RHS is OC_PropertyOrLabelsExpression on the StringOperatorExpression.
+		rhsCtx := strOp.OC_PropertyOrLabelsExpression()
+		if rhsCtx == nil {
+			return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+		}
+		rhs, err := buildPropertyOrLabelsExpr(rhsCtx.(*parser.OC_PropertyOrLabelsExpressionContext))
+		if err != nil {
+			return nil, err
+		}
+		return &StringMatchExpr{Expr: base, Pattern: rhs, Op: op}, nil
+	}
+	if len(strOps) > 1 {
 		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
 	}
+
+	// Handle IN list operator.
+	listOps := ctx.AllOC_ListOperatorExpression()
+	if len(listOps) == 1 {
+		listOp := listOps[0].(*parser.OC_ListOperatorExpressionContext)
+		if listOp.IN() != nil {
+			// The RHS is OC_PropertyOrLabelsExpression: should be a list literal.
+			rhsPropCtx := listOp.OC_PropertyOrLabelsExpression()
+			if rhsPropCtx == nil {
+				return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+			}
+			// Unwrap to atom to find the list literal.
+			listExprs, ok := extractListLiteralExprs(rhsPropCtx.(*parser.OC_PropertyOrLabelsExpressionContext))
+			if !ok {
+				// Fallback for variable references to list values.
+				return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+			}
+			var items []Expr
+			for _, exprCtx := range listExprs {
+				item, err := buildExprFromCST(exprCtx)
+				if err != nil {
+					return nil, err
+				}
+				items = append(items, item)
+			}
+			return &InListExpr{Expr: base, List: items}, nil
+		}
+		// Other list operators (subscript access) — fall back.
+		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+	}
+	if len(listOps) > 1 {
+		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+	}
+
 	// Handle IS NULL / IS NOT NULL.
 	nullOps := ctx.AllOC_NullOperatorExpression()
 	if len(nullOps) == 1 {
@@ -826,6 +890,26 @@ func buildStringListNullExpr(ctx *parser.OC_StringListNullOperatorExpressionCont
 		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
 	}
 	return base, nil
+}
+
+// extractListLiteralExprs attempts to extract the expression list from a
+// OC_PropertyOrLabelsExpressionContext that wraps a list literal atom.
+// Returns the list of expressions and true if the atom is a list literal,
+// false otherwise.
+func extractListLiteralExprs(ctx *parser.OC_PropertyOrLabelsExpressionContext) ([]parser.IOC_ExpressionContext, bool) {
+	atomCtx := ctx.OC_Atom()
+	if atomCtx == nil {
+		return nil, false
+	}
+	litCtx := atomCtx.(*parser.OC_AtomContext).OC_Literal()
+	if litCtx == nil {
+		return nil, false
+	}
+	listLit := litCtx.(*parser.OC_LiteralContext).OC_ListLiteral()
+	if listLit == nil {
+		return nil, false
+	}
+	return listLit.(*parser.OC_ListLiteralContext).AllOC_Expression(), true
 }
 
 // buildPropertyOrLabelsExpr handles OC_PropertyOrLabelsExpression:
@@ -868,7 +952,7 @@ func buildFunctionInvocation(ctx *parser.OC_FunctionInvocationContext) (Expr, er
 	args := ctx.AllOC_Expression()
 
 	switch funcName {
-	case "count", "sum", "avg", "min", "max":
+	case "count", "sum", "avg", "min", "max", "collect":
 		if len(args) == 0 {
 			// count() with no arguments → treat as count(*)
 			return &AggCallExpr{Func: funcName, CountStar: funcName == "count", Distinct: distinct}, nil
@@ -878,6 +962,20 @@ func buildFunctionInvocation(ctx *parser.OC_FunctionInvocationContext) (Expr, er
 			return nil, err
 		}
 		return &AggCallExpr{Func: funcName, Arg: arg, Distinct: distinct}, nil
+	case "exists":
+		// exists(n.prop) → ExistsExpr
+		if len(args) == 0 {
+			return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+		}
+		inner, err := buildExprFromCST(args[0])
+		if err != nil {
+			return nil, err
+		}
+		if pe, ok := inner.(*PropExpr); ok {
+			return &ExistsExpr{Prop: pe}, nil
+		}
+		// Fallback: treat as IS NOT NULL predicate on the inner expression.
+		return &NullCheckExpr{Expr: inner, IsNotNull: true}, nil
 	default:
 		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
 	}
