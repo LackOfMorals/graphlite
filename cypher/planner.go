@@ -50,6 +50,7 @@ func planQuery(q *Query, scope *BindingScope) (LogicalPlan, error) {
 	var filterPred Expr            // WHERE predicate accumulated across clauses
 	var returnPlan *ReturnPlan     // RETURN clause (at most one)
 	var writePlans []LogicalPlan   // CREATE / SET / DELETE plans
+	var base LogicalPlan           // assembled base plan (updated when WITH is encountered)
 
 	for _, clause := range q.Clauses {
 		switch c := clause.(type) {
@@ -67,6 +68,34 @@ func planQuery(q *Query, scope *BindingScope) (LogicalPlan, error) {
 					filterPred = &BoolExpr{Left: filterPred, Op: "AND", Right: where}
 				}
 			}
+
+		case *WithClause:
+			// Flush accumulated match plans into the current base.
+			switch len(matchPlans) {
+			case 0:
+				// No match plans yet — base unchanged.
+			case 1:
+				base = matchPlans[0]
+			default:
+				base = &SequencePlan{Steps: matchPlans}
+			}
+			matchPlans = nil
+
+			if filterPred != nil {
+				if base == nil {
+					return nil, fmt.Errorf("cypher: WHERE clause without a preceding MATCH clause")
+				}
+				base = &FilterPlan{Source: base, Predicate: filterPred}
+				filterPred = nil
+			}
+
+			// Build WithPlan from the WITH clause items.
+			wp, err := planWithClause(c, scope)
+			if err != nil {
+				return nil, err
+			}
+			wp.Source = base
+			base = wp
 
 		case *ReturnClause:
 			rp, err := planReturnClause(c, scope)
@@ -103,6 +132,9 @@ func planQuery(q *Query, scope *BindingScope) (LogicalPlan, error) {
 
 	// Assemble the plan tree.
 	//
+	// If base has already been set by a WITH clause, matchPlans/filterPred carry
+	// any clauses that follow the last WITH (not typical, but handle defensively).
+	//
 	// The base plan is:
 	//   1. If there are MATCH plans, compose them (single plan or SequencePlan).
 	//   2. If there is a WHERE predicate, wrap the base plan in FilterPlan.
@@ -110,15 +142,23 @@ func planQuery(q *Query, scope *BindingScope) (LogicalPlan, error) {
 	//   4. If there are write plans, collect everything into a SequencePlan
 	//      (MATCH base / filter first, then each write operation in order).
 
-	var base LogicalPlan
-
-	switch len(matchPlans) {
-	case 0:
-		// No MATCH clause — write-only or pure CREATE.
-	case 1:
-		base = matchPlans[0]
-	default:
-		base = &SequencePlan{Steps: matchPlans}
+	if base == nil {
+		// No WITH clause encountered — assemble from matchPlans as before.
+		switch len(matchPlans) {
+		case 0:
+			// No MATCH clause — write-only or pure CREATE.
+		case 1:
+			base = matchPlans[0]
+		default:
+			base = &SequencePlan{Steps: matchPlans}
+		}
+	} else if len(matchPlans) > 0 {
+		// Trailing MATCH plans after a WITH — should not occur in well-formed queries,
+		// but handle defensively by appending them to the base.
+		extraSteps := make([]LogicalPlan, 0, 1+len(matchPlans))
+		extraSteps = append(extraSteps, base)
+		extraSteps = append(extraSteps, matchPlans...)
+		base = &SequencePlan{Steps: extraSteps}
 	}
 
 	// Wrap in FilterPlan if there is a WHERE predicate.
@@ -333,9 +373,68 @@ func planReturnClause(rc *ReturnClause, scope *BindingScope) (*ReturnPlan, error
 }
 
 func planReturnItem(item ReturnItem, scope *BindingScope) (ProjectionItem, error) {
+	if item.Expr != nil {
+		return ProjectionItem{Expr: item.Expr, Alias: item.Alias}, nil
+	}
 	expr, err := parseExprText(item.ExprText, scope)
 	if err != nil {
 		return ProjectionItem{}, fmt.Errorf("cypher: RETURN item %q: %w", item.ExprText, err)
+	}
+	return ProjectionItem{Expr: expr, Alias: item.Alias}, nil
+}
+
+// ─── WITH clause planning ─────────────────────────────────────────────────────
+
+// planWithClause builds a WithPlan from a *WithClause and updates the scope
+// with aggregate and non-aggregate alias bindings.
+func planWithClause(wc *WithClause, scope *BindingScope) (*WithPlan, error) {
+	wp := &WithPlan{}
+
+	for _, item := range wc.Items {
+		proj, err := planWithItem(item, scope)
+		if err != nil {
+			return nil, err
+		}
+		wp.Projections = append(wp.Projections, proj)
+
+		// If this projection has an alias, bind it in scope so subsequent
+		// RETURN / WHERE clauses can reference it.
+		if item.Alias != "" {
+			if agg, ok := proj.Expr.(*AggCallExpr); ok {
+				// Aggregate alias: bind with AggExpr so the translator can
+				// expand the alias back to the full aggregate expression.
+				scope.Bind(item.Alias, Binding{
+					Column:  item.Alias,
+					AggExpr: agg,
+				})
+			} else if ve, ok := proj.Expr.(*VarExpr); ok {
+				// Non-aggregate alias referencing an existing variable: copy binding.
+				if b, found := scope.Resolve(ve.Name); found {
+					scope.Bind(item.Alias, b)
+				}
+			}
+			// Other non-aggregate aliases (e.g. n.name AS nm) are left unbound for now;
+			// they are handled by the translator via ExprText fallback.
+		}
+	}
+
+	// Post-WITH WHERE becomes HAVING in SQL.
+	if wc.Where != nil {
+		wp.Having = wc.Where
+	}
+
+	return wp, nil
+}
+
+// planWithItem produces a ProjectionItem for a single WITH item.
+func planWithItem(item ReturnItem, scope *BindingScope) (ProjectionItem, error) {
+	if item.Expr != nil {
+		// Typed expression from ANTLR CST path (aggregates, etc.).
+		return ProjectionItem{Expr: item.Expr, Alias: item.Alias}, nil
+	}
+	expr, err := parseExprText(item.ExprText, scope)
+	if err != nil {
+		return ProjectionItem{}, fmt.Errorf("cypher: WITH item %q: %w", item.ExprText, err)
 	}
 	return ProjectionItem{Expr: expr, Alias: item.Alias}, nil
 }

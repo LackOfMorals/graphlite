@@ -200,6 +200,19 @@ func (t *Translator) translateReturnPlan(rp *cypher.ReturnPlan, scope *cypher.Bi
 		b.WriteString(strings.Join(whereFragments, " AND "))
 	}
 
+	// GROUP BY (emitted when a WithPlan with aggregate projections is the source).
+	if len(fc.groupBy) > 0 {
+		b.WriteString(" GROUP BY ")
+		b.WriteString(strings.Join(fc.groupBy, ", "))
+	}
+
+	// HAVING (post-WITH WHERE predicate, after GROUP BY, before ORDER BY).
+	if fc.having != "" {
+		t.args = append(t.args, fc.havingArgs...)
+		b.WriteString(" HAVING ")
+		b.WriteString(fc.having)
+	}
+
 	// ORDER BY.
 	if len(rp.OrderBy) > 0 {
 		b.WriteString(" ORDER BY ")
@@ -289,11 +302,26 @@ type fromClause struct {
 	from string
 	// joins is the accumulated JOIN clauses (e.g. "JOIN edges r0 ON ...").
 	joins string
+	// joinArgs are bind args contributed by JOIN ON conditions.
+	joinArgs []any
 	// whereFragments are WHERE conditions accumulated from label checks and
 	// inline property constraints on match nodes.
 	whereFragments []string
+	// whereArgs are bind args contributed by WHERE fragments.
+	// Note: label args are already appended to t.args directly; this field is
+	// reserved for future use where args need separate tracking.
+	whereArgs []any
 	// extraWhere is a WHERE predicate coming from an explicit FilterPlan.
 	extraWhere string
+	// extraWhereArgs are bind args for extraWhere.
+	extraWhereArgs []any
+	// groupBy holds SQL expressions for the GROUP BY clause (no bind args;
+	// these are column references like "n0.id").
+	groupBy []string
+	// having is a HAVING predicate text (for post-WITH WHERE predicates).
+	having string
+	// havingArgs are bind args for the HAVING predicate.
+	havingArgs []any
 }
 
 // buildFromClause recurses into the source plan and collects the FROM/JOIN/WHERE
@@ -325,6 +353,9 @@ func (t *Translator) buildFromClause(source cypher.LogicalPlan, scope *cypher.Bi
 
 	case *cypher.SequencePlan:
 		return t.buildFromClauseForSequence(s, scope)
+
+	case *cypher.WithPlan:
+		return t.buildFromClauseForWithPlan(s, scope)
 
 	default:
 		return fromClause{}, fmt.Errorf("sql: unsupported source plan %T in FROM clause", source)
@@ -522,6 +553,98 @@ func (t *Translator) buildFromClauseForSequence(sp *cypher.SequencePlan, scope *
 	}, nil
 }
 
+// buildFromClauseForWithPlan handles a WithPlan that acts as the source of a
+// ReturnPlan. It builds the FROM/JOIN/WHERE fragments from the WithPlan's
+// Source, then computes GROUP BY from the non-aggregate projections and
+// (optionally) a HAVING predicate from WithPlan.Having.
+func (t *Translator) buildFromClauseForWithPlan(wp *cypher.WithPlan, scope *cypher.BindingScope) (fromClause, error) {
+	// Build the FROM clause from the underlying source (MATCH/FILTER plans).
+	fc, err := t.buildFromClause(wp.Source, scope)
+	if err != nil {
+		return fromClause{}, err
+	}
+
+	// Determine whether any projection is an aggregate.
+	hasAgg := false
+	for _, proj := range wp.Projections {
+		if isAggExpr(proj.Expr) {
+			hasAgg = true
+			break
+		}
+	}
+
+	if hasAgg {
+		// Non-aggregate projections become GROUP BY columns.
+		for _, proj := range wp.Projections {
+			if isAggExpr(proj.Expr) {
+				continue
+			}
+			groupSQL, err := t.toGroupBySQL(proj.Expr, scope)
+			if err != nil {
+				return fromClause{}, fmt.Errorf("sql: GROUP BY expression: %w", err)
+			}
+			if groupSQL != "" {
+				fc.groupBy = append(fc.groupBy, groupSQL)
+			}
+		}
+	}
+
+	// HAVING predicate (post-WITH WHERE).
+	if wp.Having != nil {
+		sub := &Translator{dialect: t.dialect}
+		havingSQL, err := sub.exprToSQL(wp.Having, scope)
+		if err != nil {
+			return fromClause{}, fmt.Errorf("sql: HAVING predicate: %w", err)
+		}
+		fc.having = havingSQL
+		fc.havingArgs = sub.args
+	}
+
+	return fc, nil
+}
+
+// isAggExpr returns true if expr is an AggCallExpr (top-level aggregate call).
+func isAggExpr(expr cypher.Expr) bool {
+	_, ok := expr.(*cypher.AggCallExpr)
+	return ok
+}
+
+// toGroupBySQL returns the SQL GROUP BY expression for a non-aggregate
+// projection expression. For node/rel variables it uses the .id column
+// (the natural grouping key). For property accesses it emits json_extract.
+// Literals return "" (no GROUP BY column needed).
+func (t *Translator) toGroupBySQL(expr cypher.Expr, scope *cypher.BindingScope) (string, error) {
+	switch e := expr.(type) {
+	case *cypher.VarExpr:
+		b, ok := scope.Resolve(e.Name)
+		if !ok {
+			return "", fmt.Errorf("sql: variable %q not in scope for GROUP BY", e.Name)
+		}
+		if b.AggExpr != nil {
+			// Aggregate alias — not a GROUP BY column.
+			return "", nil
+		}
+		// Group by the node/rel identity column (e.g. "n0.id").
+		return b.Column, nil
+	case *cypher.PropExpr:
+		b, ok := scope.Resolve(e.Variable)
+		if !ok {
+			return "", fmt.Errorf("sql: variable %q not in scope for GROUP BY", e.Variable)
+		}
+		return t.dialect.JSONExtract(b.Alias+".props", "$."+e.Property), nil
+	case *cypher.LiteralExpr:
+		// Literals are constants — no GROUP BY column needed.
+		return "", nil
+	default:
+		// Fallback: translate and include in GROUP BY.
+		sql, err := t.exprToSQL(expr, scope)
+		if err != nil {
+			return "", err
+		}
+		return sql, nil
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SELECT list builder
 // ─────────────────────────────────────────────────────────────────────────────
@@ -593,10 +716,16 @@ func (t *Translator) exprToSQL(expr cypher.Expr, scope *cypher.BindingScope) (st
 
 	case *cypher.VarExpr:
 		// Whole-variable reference: for a node, emit the id/labels/props JSON object;
-		// for a relationship, emit the id.
+		// for a relationship, emit the id. For aggregate aliases, expand to the full
+		// aggregate expression.
 		binding, ok := scope.Resolve(e.Name)
 		if !ok {
 			return "", fmt.Errorf("sql: variable %q not in scope", e.Name)
+		}
+		// Aggregate alias (e.g. cnt from WITH count(r) AS cnt): expand to the
+		// full aggregate expression so it can appear in SELECT and ORDER BY.
+		if binding.AggExpr != nil {
+			return t.exprToSQL(binding.AggExpr, scope)
 		}
 		if binding.IsNode {
 			// Return a JSON object representing the node.
@@ -642,6 +771,22 @@ func (t *Translator) exprToSQL(expr cypher.Expr, scope *cypher.BindingScope) (st
 		}
 		return fmt.Sprintf("(NOT %s)", innerSQL), nil
 
+	case *cypher.AggCallExpr:
+		funcName := strings.ToUpper(e.Func)
+		if e.CountStar || e.Arg == nil {
+			return funcName + "(*)", nil
+		}
+		// For aggregate arguments, node/rel VarExprs should emit their id column
+		// (e.g. r0.id), not the full JSON object representation.
+		argSQL, err := t.aggArgToSQL(e.Arg, scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: %s() argument: %w", e.Func, err)
+		}
+		if e.Distinct {
+			return fmt.Sprintf("%s(DISTINCT %s)", funcName, argSQL), nil
+		}
+		return fmt.Sprintf("%s(%s)", funcName, argSQL), nil
+
 	case *cypher.RawExpr:
 		// RawExpr: unsupported sub-expression; return as-is (best effort).
 		// The translator cannot produce correct SQL for this but should not crash.
@@ -650,6 +795,31 @@ func (t *Translator) exprToSQL(expr cypher.Expr, scope *cypher.BindingScope) (st
 	default:
 		return "", fmt.Errorf("sql: unsupported expression type %T", expr)
 	}
+}
+
+// aggArgToSQL converts an expression to SQL for use as an aggregate function
+// argument. Node and relationship VarExprs emit their id column (e.g. "r0.id")
+// rather than the full JSON object, since aggregating JSON objects is semantically
+// wrong and defeats the purpose of counting/summing identifiers.
+func (t *Translator) aggArgToSQL(expr cypher.Expr, scope *cypher.BindingScope) (string, error) {
+	if ve, ok := expr.(*cypher.VarExpr); ok {
+		binding, found := scope.Resolve(ve.Name)
+		if !found {
+			return "", fmt.Errorf("sql: variable %q not in scope", ve.Name)
+		}
+		// For node/rel variables inside aggregates, use the id column.
+		if binding.IsNode || binding.IsRel {
+			return binding.Column, nil
+		}
+		// Aggregate alias inside another aggregate — shouldn't normally occur,
+		// but expand it anyway.
+		if binding.AggExpr != nil {
+			return t.exprToSQL(binding.AggExpr, scope)
+		}
+		return binding.Column, nil
+	}
+	// Non-variable expressions (properties, literals, etc.) delegate to exprToSQL.
+	return t.exprToSQL(expr, scope)
 }
 
 // literalToSQL converts a LiteralExpr to a SQL value. String literals are

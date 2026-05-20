@@ -123,10 +123,101 @@ func buildSinglePartQuery(ctx *parser.OC_SinglePartQueryContext) (*Query, error)
 	return q, nil
 }
 
-func buildMultiPartQuery(_ *parser.OC_MultiPartQueryContext) (*Query, error) {
-	// v0.1 does not support multi-part queries (WITH pipelines).
-	// Task-024 adds WITH support. For now, surface a useful error.
-	return nil, fmt.Errorf("cypher: multi-part queries (WITH pipelines) are not supported in v0.1")
+func buildMultiPartQuery(ctx *parser.OC_MultiPartQueryContext) (*Query, error) {
+	// Only support single-stage WITH pipelines for now.
+	if len(ctx.AllOC_With()) > 1 {
+		return nil, fmt.Errorf("cypher: multiple WITH stages are not yet supported")
+	}
+
+	q := &Query{}
+
+	// Reading clauses (MATCH) that appear before the WITH.
+	for _, rc := range ctx.AllOC_ReadingClause() {
+		clause, err := buildReadingClause(rc.(*parser.OC_ReadingClauseContext))
+		if err != nil {
+			return nil, err
+		}
+		q.Clauses = append(q.Clauses, clause)
+	}
+
+	// Updating clauses (CREATE, SET, DELETE) before WITH — uncommon but grammar allows it.
+	for _, uc := range ctx.AllOC_UpdatingClause() {
+		clause, err := buildUpdatingClause(uc.(*parser.OC_UpdatingClauseContext))
+		if err != nil {
+			return nil, err
+		}
+		q.Clauses = append(q.Clauses, clause)
+	}
+
+	// WITH clause(s).
+	for _, w := range ctx.AllOC_With() {
+		wc, err := buildWithClause(w.(*parser.OC_WithContext))
+		if err != nil {
+			return nil, err
+		}
+		q.Clauses = append(q.Clauses, wc)
+	}
+
+	// Final single-part query (RETURN, etc.).
+	if sp := ctx.OC_SinglePartQuery(); sp != nil {
+		finalQ, err := buildSinglePartQuery(sp.(*parser.OC_SinglePartQueryContext))
+		if err != nil {
+			return nil, err
+		}
+		q.Clauses = append(q.Clauses, finalQ.Clauses...)
+	}
+
+	return q, nil
+}
+
+// buildWithClause parses an OC_WithContext into a WithClause AST node.
+func buildWithClause(ctx *parser.OC_WithContext) (*WithClause, error) {
+	pb := ctx.OC_ProjectionBody().(*parser.OC_ProjectionBodyContext)
+	wc := &WithClause{
+		Distinct: pb.DISTINCT() != nil,
+	}
+
+	items := pb.OC_ProjectionItems().(*parser.OC_ProjectionItemsContext)
+	for _, pi := range items.AllOC_ProjectionItem() {
+		item, err := buildReturnItem(pi.(*parser.OC_ProjectionItemContext))
+		if err != nil {
+			return nil, err
+		}
+		wc.Items = append(wc.Items, item)
+	}
+
+	if order := pb.OC_Order(); order != nil {
+		for _, si := range order.(*parser.OC_OrderContext).AllOC_SortItem() {
+			wc.OrderBy = append(wc.OrderBy, buildSortItem(si.(*parser.OC_SortItemContext)))
+		}
+	}
+
+	if skip := pb.OC_Skip(); skip != nil {
+		v, err := parseInt64Expr(skip.(*parser.OC_SkipContext).OC_Expression())
+		if err != nil {
+			return nil, fmt.Errorf("cypher: WITH SKIP: %w", err)
+		}
+		wc.Skip = &v
+	}
+
+	if limit := pb.OC_Limit(); limit != nil {
+		v, err := parseInt64Expr(limit.(*parser.OC_LimitContext).OC_Expression())
+		if err != nil {
+			return nil, fmt.Errorf("cypher: WITH LIMIT: %w", err)
+		}
+		wc.Limit = &v
+	}
+
+	// Post-WITH WHERE (becomes HAVING in SQL when aggregates are present).
+	if where := ctx.OC_Where(); where != nil {
+		expr, err := buildExprFromCST(where.(*parser.OC_WhereContext).OC_Expression())
+		if err != nil {
+			return nil, fmt.Errorf("cypher: WITH WHERE: %w", err)
+		}
+		wc.Where = expr
+	}
+
+	return wc, nil
 }
 
 // ─── reading clauses ──────────────────────────────────────────────────────────
@@ -290,6 +381,11 @@ func buildReturnClause(ctx *parser.OC_ReturnContext) (*ReturnClause, error) {
 func buildReturnItem(ctx *parser.OC_ProjectionItemContext) (ReturnItem, error) {
 	ri := ReturnItem{
 		ExprText: exprText(ctx.OC_Expression()),
+	}
+	// Parse typed expression for aggregation and other complex forms.
+	// Errors are silently ignored so legacy fallback (ExprText) is always available.
+	if expr, err := buildExprFromCST(ctx.OC_Expression()); err == nil {
+		ri.Expr = expr
 	}
 	if alias := ctx.OC_Variable(); alias != nil {
 		ri.Alias = trimWhitespace(alias.GetText())
@@ -755,8 +851,34 @@ func buildPropertyOrLabelsExpr(ctx *parser.OC_PropertyOrLabelsExpressionContext)
 	return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
 }
 
+// buildFunctionInvocation parses a function call into an Expr.
+// Aggregation functions (count, sum, avg, min, max) produce AggCallExpr.
+// All other functions fall back to RawExpr.
+func buildFunctionInvocation(ctx *parser.OC_FunctionInvocationContext) (Expr, error) {
+	nameCtx := ctx.OC_FunctionName()
+	funcName := strings.ToLower(trimWhitespace(nameCtx.GetText()))
+	distinct := ctx.DISTINCT() != nil
+	args := ctx.AllOC_Expression()
+
+	switch funcName {
+	case "count", "sum", "avg", "min", "max":
+		if len(args) == 0 {
+			// count() with no arguments → treat as count(*)
+			return &AggCallExpr{Func: funcName, CountStar: funcName == "count", Distinct: distinct}, nil
+		}
+		arg, err := buildExprFromCST(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return &AggCallExpr{Func: funcName, Arg: arg, Distinct: distinct}, nil
+	default:
+		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+	}
+}
+
 // buildAtomExpr converts an OC_AtomContext into an Expr.
-// Handles: literals, $params, variables, and parenthesized sub-expressions.
+// Handles: literals, $params, variables, parenthesized sub-expressions,
+// COUNT(*), and function invocations.
 func buildAtomExpr(ctx *parser.OC_AtomContext) (Expr, error) {
 	// Literal
 	if litCtx := ctx.OC_Literal(); litCtx != nil {
@@ -780,7 +902,15 @@ func buildAtomExpr(ctx *parser.OC_AtomContext) (Expr, error) {
 		}
 		return buildExprFromCST(inner)
 	}
-	// Fallback for unsupported atom types (COUNT, list comprehension, etc.)
+	// COUNT(*) — special atom rule in the grammar (COUNT token followed by (*))
+	if ctx.COUNT() != nil {
+		return &AggCallExpr{Func: "count", CountStar: true}, nil
+	}
+	// Generic function invocation (count(n), sum(n.age), etc.)
+	if fi := ctx.OC_FunctionInvocation(); fi != nil {
+		return buildFunctionInvocation(fi.(*parser.OC_FunctionInvocationContext))
+	}
+	// Fallback for unsupported atom types (list comprehension, CASE, etc.)
 	return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
 }
 

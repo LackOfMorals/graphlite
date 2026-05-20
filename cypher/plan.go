@@ -88,6 +88,21 @@ type RawExpr struct {
 
 func (*RawExpr) exprNode() {}
 
+// AggCallExpr represents an aggregation function call:
+// count(*), count(expr), sum(expr), avg(expr), min(expr), max(expr).
+type AggCallExpr struct {
+	// Func is the lowercase function name: "count", "sum", "avg", "min", "max".
+	Func string
+	// Arg is the argument expression. Nil when CountStar is true.
+	Arg Expr
+	// Distinct requests COUNT(DISTINCT …) / SUM(DISTINCT …) semantics.
+	Distinct bool
+	// CountStar is true for count(*) — no argument, matches all rows.
+	CountStar bool
+}
+
+func (*AggCallExpr) exprNode() {}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MATCH plan nodes
 // ─────────────────────────────────────────────────────────────────────────────
@@ -293,3 +308,22 @@ type SequencePlan struct {
 }
 
 func (*SequencePlan) planNode() {}
+
+// WithPlan represents a WITH clause that acts as an intermediate pipeline stage.
+// The translator uses its Projections to determine GROUP BY columns (non-aggregate
+// projections) and emits the aggregation inline (not as a subquery).
+//
+//	MATCH (n)-[r:KNOWS]->() WITH n, count(r) AS cnt [WHERE having_pred] ...
+type WithPlan struct {
+	// Source is the sub-plan whose rows are being projected (typically a
+	// MatchRelPlan, MatchNodePlan, FilterPlan, or SequencePlan).
+	Source LogicalPlan
+	// Projections is the ordered list of WITH projections. Projections
+	// containing AggCallExpr contribute to GROUP BY determination: non-aggregate
+	// projections become GROUP BY columns.
+	Projections []ProjectionItem
+	// Having is the optional WHERE predicate after WITH (becomes SQL HAVING).
+	Having Expr
+}
+
+func (*WithPlan) planNode() {}

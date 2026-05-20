@@ -147,12 +147,36 @@ type ReturnClause struct {
 
 func (*ReturnClause) clauseNode() {}
 
-// ReturnItem is one projection in a RETURN clause.
+// WithClause represents an intermediate WITH clause in a multi-part query.
+// It acts as a pipeline stage: rows from prior MATCH clauses are aggregated
+// or projected before being passed to the following clauses.
+//
+//	MATCH (n:Person)-[r:KNOWS]->() WITH n, count(r) AS cnt WHERE cnt > 1 RETURN n.name
+type WithClause struct {
+	Distinct bool
+	Items    []ReturnItem
+	OrderBy  []SortItem
+	// Skip is nil when not present.
+	Skip *int64
+	// Limit is nil when not present.
+	Limit *int64
+	// Where is the optional post-WITH WHERE predicate (becomes SQL HAVING when
+	// aggregate functions are present in Items).
+	Where Expr
+}
+
+func (*WithClause) clauseNode() {}
+
+// ReturnItem is one projection in a RETURN or WITH clause.
 type ReturnItem struct {
 	// ExprText is the raw expression text (e.g. "n.name", "n", "count(n)").
+	// Kept for backward compatibility; new code paths also populate Expr.
 	ExprText string
 	// Alias is the AS alias, or "" if none.
 	Alias string
+	// Expr is the typed expression parsed from the ANTLR CST. Nil when the
+	// item was produced by the legacy ExprText path (existing single-part queries).
+	Expr Expr
 }
 
 // SortItem represents one column in an ORDER BY clause.
