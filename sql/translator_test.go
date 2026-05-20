@@ -1888,3 +1888,147 @@ func TestTranslate_Merge_OnCreateOnMatchStmts(t *testing.T) {
 		t.Errorf("stmt[3] CreatedVar: want onmatch: prefix, got %q", result.Statements[3].CreatedVar)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CASE expression tests (task-032)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestTranslate_CaseSearched_InReturn verifies that a searched CASE expression
+// in a RETURN clause produces the correct SQL CASE … END fragment.
+// MATCH (n:Person) RETURN CASE WHEN n.age > 18 THEN 'adult' ELSE 'minor' END AS category
+func TestTranslate_CaseSearched_InReturn(t *testing.T) {
+	result := translateCypher(t,
+		"MATCH (n:Person) RETURN CASE WHEN n.age > 18 THEN 'adult' ELSE 'minor' END AS category")
+	containsAll(t, result,
+		"CASE WHEN",
+		"THEN",
+		"ELSE",
+		"END",
+		"AS category",
+		"json_extract",
+		"$.age",
+	)
+	// SQL must not embed the string 'adult' / 'minor' literally (they are bind params).
+	if strings.Contains(result.SQL, "'adult'") || strings.Contains(result.SQL, "'minor'") {
+		t.Errorf("string literals should be bind params, not inlined: %s", result.SQL)
+	}
+}
+
+// TestTranslate_CaseSimple_InReturn verifies that a simple CASE expression
+// in a RETURN clause emits the correct SQL.
+// MATCH (n) RETURN CASE n.status WHEN 'active' THEN 1 ELSE 0 END AS flag
+func TestTranslate_CaseSimple_InReturn(t *testing.T) {
+	result := translateCypher(t,
+		"MATCH (n) RETURN CASE n.status WHEN 'active' THEN 1 ELSE 0 END AS flag")
+	containsAll(t, result,
+		"CASE",
+		"WHEN",
+		"THEN 1",
+		"ELSE 0",
+		"END",
+		"AS flag",
+		"json_extract",
+		"$.status",
+	)
+}
+
+// TestTranslate_CaseSearched_InWhere verifies that a searched CASE expression
+// can appear inside a WHERE predicate.
+// MATCH (n:Person) WHERE CASE WHEN n.age > 18 THEN 1 ELSE 0 END = 1 RETURN n.name
+func TestTranslate_CaseSearched_InWhere(t *testing.T) {
+	result := translateCypher(t,
+		"MATCH (n:Person) WHERE CASE WHEN n.age > 18 THEN 1 ELSE 0 END = 1 RETURN n.name")
+	containsAll(t, result,
+		"CASE WHEN",
+		"THEN 1",
+		"ELSE 0",
+		"END",
+		"WHERE",
+		"$.name",
+	)
+}
+
+// TestTranslate_CaseNoElse verifies CASE without an ELSE clause.
+// MATCH (n) RETURN CASE WHEN n.active THEN 'yes' END AS maybe
+func TestTranslate_CaseNoElse(t *testing.T) {
+	result := translateCypher(t,
+		"MATCH (n) RETURN CASE WHEN n.active THEN 'yes' END AS maybe")
+	containsAll(t, result,
+		"CASE WHEN",
+		"THEN",
+		"END",
+		"AS maybe",
+	)
+	// No ELSE should appear in the SQL.
+	if strings.Contains(result.SQL, "ELSE") {
+		t.Errorf("unexpected ELSE in no-else CASE: %s", result.SQL)
+	}
+}
+
+// TestTranslate_CaseMultipleWhenClauses verifies CASE with multiple WHEN branches.
+// MATCH (n) RETURN CASE n.score WHEN 1 THEN 'low' WHEN 2 THEN 'mid' ELSE 'high' END AS tier
+func TestTranslate_CaseMultipleWhenClauses(t *testing.T) {
+	result := translateCypher(t,
+		"MATCH (n) RETURN CASE n.score WHEN 1 THEN 'low' WHEN 2 THEN 'mid' ELSE 'high' END AS tier")
+	containsAll(t, result,
+		"CASE",
+		"WHEN 1 THEN",
+		"WHEN 2 THEN",
+		"ELSE",
+		"END",
+		"AS tier",
+	)
+}
+
+// TestTranslate_CaseDirectConstruction verifies that CaseExpr can be constructed
+// directly as plan nodes and translated correctly (exercises caseExprToSQL directly).
+func TestTranslate_CaseDirectConstruction(t *testing.T) {
+	// Build scope with a node variable "n".
+	scope := cypher.NewScope()
+	scope.Bind("n", cypher.Binding{
+		Alias:  "n0",
+		Column: "n0.id",
+		IsNode: true,
+	})
+
+	// Searched CASE: CASE WHEN n.age > 18 THEN 'adult' ELSE 'minor' END
+	caseE := &cypher.CaseExpr{
+		WhenClauses: []cypher.CaseWhenClause{
+			{
+				Condition: &cypher.ComparisonExpr{
+					Left:  &cypher.PropExpr{Variable: "n", Property: "age"},
+					Op:    ">",
+					Right: &cypher.LiteralExpr{Value: int64(18)},
+				},
+				Value: &cypher.LiteralExpr{Value: "adult"},
+			},
+		},
+		Else: &cypher.LiteralExpr{Value: "minor"},
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	// Wrap in a ReturnPlan to exercise the full translation path.
+	matchPlan := &cypher.MatchNodePlan{Variable: "n", SQLAlias: "n0"}
+	returnPlan := &cypher.ReturnPlan{
+		Source: matchPlan,
+		Projections: []cypher.ProjectionItem{
+			{Expr: caseE, Alias: "category"},
+		},
+	}
+	result, err := tr.Translate(returnPlan, scope)
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	containsAll(t, result,
+		"CASE WHEN",
+		"json_extract(n0.props, '$.age') > 18",
+		"THEN ?",
+		"ELSE ?",
+		"END",
+		"AS category",
+	)
+	// Two string literals → two bind args.
+	if len(result.Args) != 2 {
+		t.Errorf("expected 2 args (adult, minor), got %d: %v", len(result.Args), result.Args)
+	}
+}

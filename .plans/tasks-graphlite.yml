@@ -599,7 +599,7 @@ tasks:
       CASE expr WHEN val THEN result ... ELSE default END (simple form). Map to
       SQL CASE WHEN ... END directly. Mark as experimental (🚧) in the compatibility
       table per the PRD.
-    status: pending
+    status: completed
     dependencies:
       - task-031
     acceptance_criteria:
@@ -608,7 +608,7 @@ tasks:
       - "CASE in RETURN clause projects the computed value with correct aliasing"
       - "CASE in WHERE clause filters rows correctly"
       - "Integration tests verify both CASE forms against known datasets"
-    completed_at: null
+    completed_at: "2026-05-21T12:00:00Z"
 
   - id: task-033
     title: "v1.0: Security hardening of import path (JSON bomb, size limits)"

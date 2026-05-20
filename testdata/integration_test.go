@@ -2127,3 +2127,130 @@ func TestIntegration_Merge_Idempotency(t *testing.T) {
 	assertCount(t, `idempotency node count`, result, 1)
 	assertInt64(t, `idempotency count value`, "count", get(t, `MATCH`, result, 0, "count"), 1)
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Feature: CASE expressions — task-032 (🚧 experimental)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestIntegration_Case_Searched_Return verifies that a searched CASE expression
+// in RETURN produces the correct string result for each row.
+func TestIntegration_Case_Searched_Return(t *testing.T) {
+	db := openDB(t)
+	q := `MATCH (n:Person) RETURN CASE WHEN n.age > 18 THEN 'adult' ELSE 'minor' END AS category`
+	setup(t, db,
+		`CREATE (n:Person {name: "Alice", age: 30})`,
+		`CREATE (n:Person {name: "Bob", age: 15})`,
+	)
+	result := query(t, db, q, nil)
+	assertCount(t, q, result, 2)
+	// Collect values; order may vary.
+	categories := map[string]int{}
+	for _, rec := range result.Records {
+		v, _ := rec.Get("category")
+		s, _ := v.(string)
+		categories[s]++
+	}
+	if categories["adult"] != 1 {
+		t.Errorf("%s: expected 1 'adult', got %d", q, categories["adult"])
+	}
+	if categories["minor"] != 1 {
+		t.Errorf("%s: expected 1 'minor', got %d", q, categories["minor"])
+	}
+}
+
+// TestIntegration_Case_Simple_Return verifies that a simple CASE expression
+// (CASE subject WHEN val THEN result …) produces the correct integer result.
+func TestIntegration_Case_Simple_Return(t *testing.T) {
+	db := openDB(t)
+	q := `MATCH (n:Item) RETURN CASE n.status WHEN 'active' THEN 1 ELSE 0 END AS flag`
+	setup(t, db,
+		`CREATE (n:Item {status: "active"})`,
+		`CREATE (n:Item {status: "inactive"})`,
+	)
+	result := query(t, db, q, nil)
+	assertCount(t, q, result, 2)
+	flags := map[int64]int{}
+	for _, rec := range result.Records {
+		v, _ := rec.Get("flag")
+		switch vv := v.(type) {
+		case int64:
+			flags[vv]++
+		case float64:
+			flags[int64(vv)]++
+		default:
+			t.Errorf("%s: unexpected type for flag: %T %v", q, v, v)
+		}
+	}
+	if flags[1] != 1 {
+		t.Errorf("%s: expected 1 row with flag=1, got %d", q, flags[1])
+	}
+	if flags[0] != 1 {
+		t.Errorf("%s: expected 1 row with flag=0, got %d", q, flags[0])
+	}
+}
+
+// TestIntegration_Case_Searched_Return_NoElse verifies a CASE without ELSE
+// returns NULL for rows that do not match any WHEN condition.
+func TestIntegration_Case_Searched_Return_NoElse(t *testing.T) {
+	db := openDB(t)
+	q := `MATCH (n:Widget) RETURN CASE WHEN n.active THEN 'yes' END AS maybe`
+	setup(t, db,
+		`CREATE (n:Widget {active: true})`,
+		`CREATE (n:Widget {active: false})`,
+	)
+	result := query(t, db, q, nil)
+	assertCount(t, q, result, 2)
+	// One should be 'yes', one should be NULL.
+	yesCount := 0
+	nullCount := 0
+	for _, rec := range result.Records {
+		v, _ := rec.Get("maybe")
+		if v == nil {
+			nullCount++
+		} else if s, ok := v.(string); ok && s == "yes" {
+			yesCount++
+		}
+	}
+	if yesCount != 1 {
+		t.Errorf("%s: expected 1 'yes', got %d", q, yesCount)
+	}
+	if nullCount != 1 {
+		t.Errorf("%s: expected 1 NULL, got %d", q, nullCount)
+	}
+}
+
+// TestIntegration_Case_In_Where verifies a CASE expression used inside a WHERE
+// clause correctly filters rows.
+func TestIntegration_Case_In_Where(t *testing.T) {
+	db := openDB(t)
+	q := `MATCH (n:Person) WHERE CASE WHEN n.age > 18 THEN 1 ELSE 0 END = 1 RETURN n.name AS name`
+	setup(t, db,
+		`CREATE (n:Person {name: "Alice", age: 30})`,
+		`CREATE (n:Person {name: "Bob", age: 15})`,
+	)
+	result := query(t, db, q, nil)
+	assertCount(t, q, result, 1)
+	assertString(t, q, "name", get(t, q, result, 0, "name"), "Alice")
+}
+
+// TestIntegration_Case_MultipleWhen verifies CASE with multiple WHEN branches.
+func TestIntegration_Case_MultipleWhen(t *testing.T) {
+	db := openDB(t)
+	q := `MATCH (n:Score) RETURN CASE n.val WHEN 1 THEN 'low' WHEN 2 THEN 'mid' ELSE 'high' END AS tier`
+	setup(t, db,
+		`CREATE (n:Score {val: 1})`,
+		`CREATE (n:Score {val: 2})`,
+		`CREATE (n:Score {val: 3})`,
+	)
+	result := query(t, db, q, nil)
+	assertCount(t, q, result, 3)
+	tiers := map[string]int{}
+	for _, rec := range result.Records {
+		v, _ := rec.Get("tier")
+		s, _ := v.(string)
+		tiers[s]++
+	}
+	if tiers["low"] != 1 || tiers["mid"] != 1 || tiers["high"] != 1 {
+		t.Errorf("%s: unexpected tiers: %v", q, tiers)
+	}
+}

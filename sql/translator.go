@@ -1058,6 +1058,9 @@ func (t *Translator) exprToSQL(expr cypher.Expr, scope *cypher.BindingScope) (st
 			return fmt.Sprintf("(%s LIKE ('%%' || %s || '%%'))", lhsSQL, rhsSQL), nil
 		}
 
+	case *cypher.CaseExpr:
+		return t.caseExprToSQL(e, scope)
+
 	case *cypher.RawExpr:
 		// RawExpr: unsupported sub-expression; return as-is (best effort).
 		// The translator cannot produce correct SQL for this but should not crash.
@@ -1066,6 +1069,79 @@ func (t *Translator) exprToSQL(expr cypher.Expr, scope *cypher.BindingScope) (st
 	default:
 		return "", fmt.Errorf("sql: unsupported expression type %T", expr)
 	}
+}
+
+// caseExprToSQL converts a CaseExpr to a SQL CASE … END fragment.
+//
+// Searched form (Subject == nil):
+//
+//	CASE WHEN <cond1> THEN <val1> [WHEN <cond2> THEN <val2> ...] [ELSE <default>] END
+//
+// Simple form (Subject != nil):
+//
+//	CASE <subject> WHEN <val1> THEN <result1> [WHEN <val2> THEN <result2> ...] [ELSE <default>] END
+func (t *Translator) caseExprToSQL(e *cypher.CaseExpr, scope *cypher.BindingScope) (string, error) {
+	if len(e.WhenClauses) == 0 {
+		return "NULL", nil
+	}
+
+	var b strings.Builder
+	b.WriteString("CASE")
+
+	// Simple form: emit the subject expression after CASE.
+	if e.Subject != nil {
+		subjSQL, err := t.exprToSQL(e.Subject, scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: CASE subject: %w", err)
+		}
+		b.WriteByte(' ')
+		b.WriteString(subjSQL)
+	}
+
+	// Emit each WHEN … THEN … branch.
+	for i, clause := range e.WhenClauses {
+		b.WriteString(" WHEN ")
+		if e.Subject != nil {
+			// Simple form: WHEN <value>
+			if clause.CaseVal == nil {
+				return "", fmt.Errorf("sql: CASE simple form: clause %d missing CaseVal", i)
+			}
+			valSQL, err := t.exprToSQL(clause.CaseVal, scope)
+			if err != nil {
+				return "", fmt.Errorf("sql: CASE WHEN value: %w", err)
+			}
+			b.WriteString(valSQL)
+		} else {
+			// Searched form: WHEN <condition>
+			if clause.Condition == nil {
+				return "", fmt.Errorf("sql: CASE searched form: clause %d missing Condition", i)
+			}
+			condSQL, err := t.exprToSQL(clause.Condition, scope)
+			if err != nil {
+				return "", fmt.Errorf("sql: CASE WHEN condition: %w", err)
+			}
+			b.WriteString(condSQL)
+		}
+		b.WriteString(" THEN ")
+		thenSQL, err := t.exprToSQL(clause.Value, scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: CASE THEN: %w", err)
+		}
+		b.WriteString(thenSQL)
+	}
+
+	// Emit ELSE clause.
+	if e.Else != nil {
+		b.WriteString(" ELSE ")
+		elseSQL, err := t.exprToSQL(e.Else, scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: CASE ELSE: %w", err)
+		}
+		b.WriteString(elseSQL)
+	}
+
+	b.WriteString(" END")
+	return b.String(), nil
 }
 
 // stringMatchPattern returns the LIKE pattern string for a string match

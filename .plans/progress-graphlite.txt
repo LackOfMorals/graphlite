@@ -1014,3 +1014,43 @@ Key Decisions:
   no longer need b.Helper() after the sync.Once error-store refactor.
 
 Next Task: task-032
+
+================================================================================
+TASK-032: v1.0: CASE expressions (basic form)
+Date: 2026-05-21T12:00:00Z
+================================================================================
+
+Summary:
+Implemented basic CASE expression support (both searched and simple forms) across
+the full pipeline: plan types (CaseExpr, CaseWhenClause in cypher/plan.go), ANTLR
+CST parser (buildCaseExpr in cypher/parser.go), SQL translator (caseExprToSQL in
+sql/translator.go). CASE in RETURN produces correctly aliased SQL columns; CASE in
+WHERE filters rows correctly. The implementation required debugging the actual ANTLR
+CST structure: AllOC_Expression() on OC_CaseExpressionContext does NOT include the
+alternatives' expressions — it only contains the subject (simple form) and/or the
+ELSE expression.
+
+Files Changed:
+- cypher/plan.go (added CaseWhenClause and CaseExpr types with full doc comments)
+- cypher/parser.go (added buildCaseExpr; wired into buildAtomExpr via OC_CaseExpression check)
+- sql/translator.go (added caseExprToSQL; wired into exprToSQL via *cypher.CaseExpr case)
+- sql/translator_test.go (6 new unit tests covering searched, simple, WHERE, no-ELSE,
+  multiple WHEN, and direct plan construction)
+- testdata/integration_test.go (5 integration tests covering all acceptance criteria)
+- .plans/tasks-graphlite.yml (task-032 status: completed)
+
+Key Decisions:
+- ANTLR CST disambiguation: searched vs simple form detected by comparing
+  len(AllOC_Expression()) to elseCount (0 or 1). If len > elseCount, the surplus
+  first expression is the subject (simple form). Validated by running a debug probe
+  against the actual ANTLR output.
+- CaseWhenClause has separate Condition (searched) and CaseVal (simple) fields rather
+  than a single overloaded field — makes the type system self-documenting and lets
+  the translator detect misuse at translation time.
+- caseExprToSQL returns "NULL" for empty WhenClauses rather than erroring — defensive
+  handling for malformed plan nodes.
+- SQL CASE syntax is identical between Cypher and SQLite, so no dialect abstraction
+  is needed for CASE expressions; the translator emits SQL directly.
+- AGENTS.md not updated (no new gotchas beyond what is already documented).
+
+Next Task: task-033

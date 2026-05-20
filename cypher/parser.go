@@ -1214,8 +1214,92 @@ func buildAtomExpr(ctx *parser.OC_AtomContext) (Expr, error) {
 	if fi := ctx.OC_FunctionInvocation(); fi != nil {
 		return buildFunctionInvocation(fi.(*parser.OC_FunctionInvocationContext))
 	}
-	// Fallback for unsupported atom types (list comprehension, CASE, etc.)
+	// CASE expression
+	if ce := ctx.OC_CaseExpression(); ce != nil {
+		return buildCaseExpr(ce.(*parser.OC_CaseExpressionContext))
+	}
+	// Fallback for unsupported atom types (list comprehension, etc.)
 	return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+}
+
+// buildCaseExpr converts an OC_CaseExpressionContext into a CaseExpr.
+//
+// The ANTLR grammar produces two forms. In both cases, AllOC_CaseAlternatives()
+// returns the WHEN/THEN pairs, and AllOC_Expression() on the CASE context itself
+// returns only the top-level (non-alternative) expressions:
+//
+//	Searched: CASE WHEN cond THEN val [WHEN...] [ELSE elseExpr] END
+//	  - AllOC_Expression() = [] if no ELSE, [elseExpr] if ELSE present.
+//	  - AllOC_CaseAlternatives() = [alt0, alt1, ...], each with [cond, val].
+//
+//	Simple:   CASE subject WHEN val THEN result [WHEN...] [ELSE elseExpr] END
+//	  - AllOC_Expression() = [subject] if no ELSE, [subject, elseExpr] if ELSE.
+//	  - AllOC_CaseAlternatives() = [alt0, ...], each with [val, result].
+//
+// Disambiguation: if the expression count exceeds the else count (0 or 1), the
+// first expression is the subject (simple form).
+func buildCaseExpr(ctx *parser.OC_CaseExpressionContext) (Expr, error) {
+	alts := ctx.AllOC_CaseAlternatives()
+	allExprs := ctx.AllOC_Expression()
+	hasElse := ctx.ELSE() != nil
+
+	// In simple form: allExprs has subject [+ ELSE], so len > elseCount.
+	// In searched form: allExprs has only ELSE (or nothing).
+	elseCount := 0
+	if hasElse {
+		elseCount = 1
+	}
+	isSimple := len(allExprs) > elseCount
+
+	ce := &CaseExpr{}
+
+	// Extract subject for simple form (always the first expression).
+	if isSimple {
+		if len(allExprs) == 0 {
+			return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+		}
+		subj, err := buildExprFromCST(allExprs[0])
+		if err != nil {
+			return nil, fmt.Errorf("cypher: CASE subject: %w", err)
+		}
+		ce.Subject = subj
+	}
+
+	// Build WHEN … THEN … clauses from each OC_CaseAlternatives child.
+	// Each alternative holds exactly two expressions: [0]=WHEN value/cond, [1]=THEN result.
+	for _, alt := range alts {
+		altCtx := alt.(*parser.OC_CaseAlternativesContext)
+		altExprs := altCtx.AllOC_Expression()
+		if len(altExprs) < 2 {
+			return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+		}
+		whenExpr, err := buildExprFromCST(altExprs[0])
+		if err != nil {
+			return nil, fmt.Errorf("cypher: CASE WHEN: %w", err)
+		}
+		thenExpr, err := buildExprFromCST(altExprs[1])
+		if err != nil {
+			return nil, fmt.Errorf("cypher: CASE THEN: %w", err)
+		}
+		clause := CaseWhenClause{Value: thenExpr}
+		if isSimple {
+			clause.CaseVal = whenExpr
+		} else {
+			clause.Condition = whenExpr
+		}
+		ce.WhenClauses = append(ce.WhenClauses, clause)
+	}
+
+	// Extract ELSE expression (always the last element of allExprs when present).
+	if hasElse && len(allExprs) > 0 {
+		elseExpr, err := buildExprFromCST(allExprs[len(allExprs)-1])
+		if err != nil {
+			return nil, fmt.Errorf("cypher: CASE ELSE: %w", err)
+		}
+		ce.Else = elseExpr
+	}
+
+	return ce, nil
 }
 
 // buildLiteralExpr converts an OC_LiteralContext into a LiteralExpr.

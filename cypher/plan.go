@@ -149,6 +149,43 @@ type StringMatchExpr struct {
 
 func (*StringMatchExpr) exprNode() {}
 
+// CaseWhenClause is a single WHEN … THEN … branch in a CASE expression.
+//
+// For the searched form (CASE WHEN cond THEN val …):
+//   - Condition holds the boolean predicate.
+//   - Value holds the THEN expression.
+//   - CaseVal is nil.
+//
+// For the simple form (CASE subject WHEN val THEN result …):
+//   - CaseVal holds the value to compare against the subject.
+//   - Value holds the THEN expression.
+//   - Condition is nil.
+type CaseWhenClause struct {
+	// Condition is the WHEN predicate for searched CASE (nil for simple CASE).
+	Condition Expr
+	// CaseVal is the WHEN value for simple CASE (nil for searched CASE).
+	CaseVal Expr
+	// Value is the THEN expression.
+	Value Expr
+}
+
+// CaseExpr represents a CASE … END expression (searched and simple forms).
+//
+// Searched form: CASE WHEN cond1 THEN val1 [WHEN cond2 THEN val2 ...] [ELSE default] END
+// Simple form:   CASE subject WHEN v1 THEN r1 [WHEN v2 THEN r2 ...] [ELSE default] END
+//
+// Maps directly to SQL CASE … END syntax, which is identical between Cypher and SQLite.
+type CaseExpr struct {
+	// Subject is the expression to compare in the simple form (nil for searched form).
+	Subject Expr
+	// WhenClauses holds the ordered list of WHEN … THEN … branches.
+	WhenClauses []CaseWhenClause
+	// Else is the ELSE expression (nil if no ELSE clause).
+	Else Expr
+}
+
+func (*CaseExpr) exprNode() {}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MATCH plan nodes
 // ─────────────────────────────────────────────────────────────────────────────
