@@ -543,7 +543,7 @@ tasks:
       edge structures), writes them via CREATE statements or JSON import, and asserts full
       round-trip fidelity via MATCH queries. Focus on JSON encoding, label parsing, and scope
       tracker edge cases.
-    status: pending
+    status: completed
     dependencies:
       - task-028
       - task-022
@@ -553,7 +553,7 @@ tasks:
       - "Round-trip test: generate random graph → CREATE → MATCH all → assert retrieved nodes match input"
       - "Label round-trip: nodes with multiple labels (up to 5) survive a CREATE/MATCH cycle unchanged"
       - "At least 1000 rapid iterations pass without failure in CI (via rapid.Check)"
-    completed_at: null
+    completed_at: "2026-05-21T00:10:00Z"
 
   - id: task-030
     title: "TCK test harness (Godog-based, compat/ package)"

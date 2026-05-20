@@ -9,6 +9,8 @@
 *.test
 *.out
 /bench/results/
+# rapid property-based test fail files (created on test failure for reproduction)
+testdata/rapid/
 
 # Go module cache and vendor
 vendor/

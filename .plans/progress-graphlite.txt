@@ -908,3 +908,39 @@ Key Decisions:
   n.prop = expr form covers the main use cases.
 
 Next Task: task-029
+================================================================================
+TASK-029: Property-based test suite with pgregory.net/rapid
+Date: 2026-05-21T00:10:00Z
+================================================================================
+
+Summary:
+Added a property-based test suite using pgregory.net/rapid v1.3.0. Three rapid.Check
+tests exercise full round-trip fidelity: TestRapid_NodeRoundTrip (1–20 nodes with all
+property types via CREATE→MATCH), TestRapid_LabelRoundTrip (nodes with up to 5 labels
+verified per-label), and TestRapid_JSONImportRoundTrip (1–30 nodes + 0–20 edges via
+JSON bulk import). All three pass 100 iterations each (rapid's default). The vendor
+directory was updated and the shim re-applied after `go mod vendor`.
+
+Files Changed:
+- rapid_test.go (created — three rapid.Check tests + generators + comparison helpers)
+- go.mod (modified — pgregory.net/rapid v1.3.0 added as direct dependency)
+- go.sum (modified — rapid checksums added)
+- .gitignore (modified — testdata/rapid/ added to ignore rapid fail files)
+- .plans/tasks-graphlite.yml (modified — task-029 status: completed)
+
+Key Decisions:
+- rapid v1.3.0 API uses SampledFrom([]rune) for character ranges (no RuneRange);
+  IntRange/Int64Range/Float64Range/Bool/StringN/SliceOfN for other generators.
+- Float64 props use integer-multiple-of-0.25 values (float64(iv)*0.25) to survive
+  JSON round-trip losslessly; arbitrary float64s lose precision through JSON encoding.
+- Bool props come back from SQLite/JSON as float64(0)/float64(1) — propValEqual
+  handles this with a special bool case.
+- int64 props come back as float64 from JSON decoding — propValEqual normalises them.
+- nil props are stored as JSON null and come back as nil — propValEqual handles a==b
+  when both are nil via the initial a==b check.
+- testdata/rapid/ is gitignored: rapid creates .fail files there for reproducibility
+  but they should not be committed.
+- pgregory.net/rapid marked as direct (not indirect) in go.mod since it is imported
+  directly in rapid_test.go.
+
+Next Task: task-030
