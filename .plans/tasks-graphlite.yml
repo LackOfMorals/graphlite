@@ -618,7 +618,7 @@ tasks:
       limits. Verify there is no path traversal in file-backed store open logic. Conduct a review
       of all user-controlled strings that reach SQLite queries to confirm parameterisation is
       complete (no string interpolation).
-    status: pending
+    status: completed
     dependencies:
       - task-032
     acceptance_criteria:
@@ -627,7 +627,7 @@ tasks:
       - "All user-controlled values reach SQLite only via parameterised queries (no fmt.Sprintf into SQL)"
       - "File path inputs to graphlite.Open are validated; relative path traversal (../../etc) returns an error"
       - "Security review findings are documented in a comment block in importer.go"
-    completed_at: null
+    completed_at: "2026-05-21T13:00:00Z"
 
   - id: task-034
     title: "v1.0: GoReleaser pipeline, complete GoDoc, and contribution guide"

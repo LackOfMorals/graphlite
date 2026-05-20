@@ -1054,3 +1054,42 @@ Key Decisions:
 - AGENTS.md not updated (no new gotchas beyond what is already documented).
 
 Next Task: task-033
+
+================================================================================
+TASK-033: v1.0: Security hardening of import path
+Date: 2026-05-21T13:00:00Z
+================================================================================
+
+Summary:
+Hardened the import path and Open function against adversarial inputs. The size
+limit (500 MiB via limitedReader) and JSON nesting depth limit (20 levels via
+checkJSONDepth) were already implemented in importer.go from prior work. This
+task added path traversal protection in graphlite.Open (driver.go), a
+comprehensive SQL parameterisation audit, and documented all findings in a
+security review comment block at the top of importer.go. Tests for depth
+exceeded, size limit, and path traversal were verified to pass.
+
+Files Changed:
+- driver.go (modified — added filepath.Clean + ".." component check in Open;
+  added "path/filepath" import; extended doc comment with traversal protection note)
+- driver_test.go (modified — added TestOpen_PathTraversal with 4 traversal cases;
+  added "strings" import)
+- importer.go (modified — added 4-section security review comment block covering
+  size limit, depth limit, SQL parameterisation audit findings, and path traversal
+  mitigation)
+- .plans/tasks-graphlite.yml (modified — task-033 status: completed)
+
+Key Decisions:
+- Path traversal check uses filepath.Clean + per-component ".." scan rather than
+  strings.Contains on the raw path — this correctly handles multi-hop traversals
+  like "subdir/../../secret.db" that resolve to "../secret.db" after Clean.
+- The check is in graphlite.Open (not store.Open) because store/ must not import
+  path-traversal logic that belongs at the public API boundary.
+- SQL parameterisation audit confirmed: property names (JSON paths like "$.name")
+  are interpolated as structural SQL fragments but originate from the ANTLR Cypher
+  parser which restricts identifiers to alphanumerics/underscores — no SQL
+  metacharacters can appear. All user-supplied VALUES use "?" bind args.
+- limitedReader + checkJSONDepth were already complete from task-020; no new
+  production code was needed for those two acceptance criteria.
+
+Next Task: task-034

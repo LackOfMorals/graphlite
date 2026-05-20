@@ -15,6 +15,7 @@ import (
 	stdsql "database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/LackOfMorals/graphlite/cypher"
@@ -34,7 +35,21 @@ type DB struct {
 // relative) opens (or creates) a persistent SQLite file.
 //
 // Open applies the schema DDL and enables WAL journal mode before returning.
+//
+// Path traversal protection: if path is not ":memory:", Open rejects any path
+// whose filepath.Clean form contains ".." components to prevent directory
+// traversal attacks (e.g. "../../etc/passwd" is rejected).
 func Open(path string) (*DB, error) {
+	if path != ":memory:" {
+		cleaned := filepath.Clean(path)
+		// filepath.Clean resolves ".." components; if the result still contains
+		// a ".." element the original path attempted to escape the working tree.
+		for _, part := range strings.Split(cleaned, string(filepath.Separator)) {
+			if part == ".." {
+				return nil, fmt.Errorf("graphlite: Open: path traversal not allowed: %q", path)
+			}
+		}
+	}
 	st, err := store.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("graphlite: open %q: %w", path, err)

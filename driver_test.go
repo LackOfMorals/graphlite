@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/LackOfMorals/graphlite"
@@ -26,6 +27,27 @@ func openMemDB(t *testing.T) *graphlite.DB {
 // ─────────────────────────────────────────────────────────────────────────────
 // Open tests
 // ─────────────────────────────────────────────────────────────────────────────
+
+// TestOpen_PathTraversal verifies that Open rejects paths containing ".."
+// components to prevent directory traversal attacks.
+func TestOpen_PathTraversal(t *testing.T) {
+	traversalPaths := []string{
+		"../../etc/passwd",
+		"../other.db",
+		"subdir/../../secret.db",
+		"a/b/../../c/../../etc/shadow",
+	}
+	for _, p := range traversalPaths {
+		_, err := graphlite.Open(p)
+		if err == nil {
+			t.Errorf("Open(%q): expected error for path traversal, got nil", p)
+			continue
+		}
+		if !strings.Contains(err.Error(), "path traversal") {
+			t.Errorf("Open(%q): expected 'path traversal' in error, got: %v", p, err)
+		}
+	}
+}
 
 // TestOpen_Memory verifies that Open(":memory:") returns a usable *DB.
 func TestOpen_Memory(t *testing.T) {

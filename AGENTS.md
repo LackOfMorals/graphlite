@@ -194,6 +194,8 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - SQLite requires `LIMIT` before `OFFSET`. When Cypher has only `SKIP` (no `LIMIT`), emit `LIMIT -1 OFFSET n` — bare `OFFSET` without a preceding `LIMIT` is a syntax error in SQLite.
 - The vendor shim (`vendor/github.com/neo4j/neo4j-go-driver/v6/neo4j/graphlite_bridge.go`) exports `EmbeddableSession` and `ManagedTransactionWorkFunc`. The `vendor/` directory is gitignored (228MB). The shim source is tracked at `scripts/graphlite_bridge.go`; after any `go mod vendor` run, restore it with `bash scripts/apply-vendor-shim.sh`. Without the shim, `neo4j.ExecuteQuery` panics.
 - Build and test use `-mod=vendor` implicitly when `vendor/` is present. If `vendor/` is absent, run `go mod vendor && bash scripts/apply-vendor-shim.sh` first.
+- `graphlite.Open` rejects file paths whose `filepath.Clean` form contains a `..` component — this is the path traversal guard. `:memory:` is exempt. The check is in `driver.go`, not `store/`.
+- Security review for the import path (size limit, depth limit, SQL parameterisation audit) is documented in the comment block at the top of `importer.go` (task-033).
 - `neo4j.ExplicitTransaction` has only public methods (`Run`, `Commit`, `Rollback`, `Close`) and can be implemented directly without embedding.
 - `compatExplicitTx.Close` must check `tx.done` before rolling back — calling Rollback on an already-done Tx returns an error. Guard: `if e.tx.done { return nil }`.
 - `neo4j.Node` and `neo4j.Relationship` are type aliases for `dbtype.Node`/`dbtype.Relationship`. Their properties field is `Props map[string]any` (NOT `Properties`). Use `neo4j.Node{ElementId: ..., Labels: ..., Props: ...}`.
