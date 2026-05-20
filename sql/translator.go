@@ -47,6 +47,13 @@ const (
 	KindDeleteNodes
 	// KindExec is any other DML statement.
 	KindExec
+	// KindMergeCheck is a SELECT used by MERGE to test whether the target node
+	// already exists. The execution layer inspects the result to decide whether
+	// to run OnCreate or OnMatch SET statements.
+	KindMergeCheck
+	// KindMergeInsert is the INSERT INTO nodes statement emitted by MERGE when
+	// the node did not previously exist.
+	KindMergeInsert
 )
 
 // Statement is a single parameterised SQL statement together with its bind
@@ -1290,6 +1297,13 @@ func (t *Translator) translateWritePlan(plan cypher.LogicalPlan, scope *cypher.B
 		}
 		return []Statement{stmt}, true, nil
 
+	case *cypher.MergePlan:
+		ss, e := t.translateMerge(p, scope)
+		if e != nil {
+			return nil, true, e
+		}
+		return ss, true, nil
+
 	case *cypher.SequencePlan:
 		ss, handled2, e := t.translateSequenceWrite(p, scope)
 		if e != nil {
@@ -1580,6 +1594,125 @@ func (t *Translator) translateDeleteRel(p *cypher.DeleteRelPlan, scope *cypher.B
 		Args: []any{sentinel},
 		Kind: KindDeleteEdges,
 	}, nil
+}
+
+// translateMerge emits the SQL statements for a MERGE clause.
+//
+// The emitted statement sequence is:
+//
+//	[0]   KindMergeCheck  SELECT <alias>.id FROM nodes <alias> WHERE … LIMIT 1
+//	[1]   KindMergeInsert INSERT INTO nodes (labels, props) VALUES (?, json(?))
+//	[2..] KindUpdate      ON CREATE SET stmts (CreatedVar prefixed "oncreate:")
+//	[n..] KindUpdate      ON MATCH SET stmts  (CreatedVar prefixed "onmatch:")
+//
+// The execution layer (execMergeBatch) decides at runtime which branch to run:
+//   - MergeCheck returns a row  → populate idMap from existingID, run OnMatch SETs only.
+//   - MergeCheck returns no row → INSERT the node, populate idMap from LastInsertId,
+//     then run OnCreate SETs only.
+//
+// All steps are wrapped in a transaction by executeStatements when ex is a *stdsql.DB.
+func (t *Translator) translateMerge(p *cypher.MergePlan, scope *cypher.BindingScope) ([]Statement, error) {
+	// ── 1. Build the existence-check SELECT ──────────────────────────────────
+	// We need a fresh MatchNodePlan to reuse buildFromClauseForMatchNode.
+	// Build label and prop WHERE fragments directly.
+	var whereParts []string
+	var whereArgs []any
+
+	// We need a dummy alias for the check query. Look up scope.
+	binding, hasBound := scope.Resolve(p.Variable)
+	var alias string
+	if hasBound && binding.Alias != "" {
+		alias = binding.Alias
+	} else {
+		alias = "m0"
+	}
+
+	for _, label := range p.Labels {
+		pred, args := t.dialect.LabelContains(alias+".labels", label)
+		whereParts = append(whereParts, pred)
+		whereArgs = append(whereArgs, args...)
+	}
+	// Sort prop keys for deterministic SQL.
+	propKeys := make([]string, 0, len(p.Props))
+	for k := range p.Props {
+		propKeys = append(propKeys, k)
+	}
+	sort.Strings(propKeys)
+	for _, key := range propKeys {
+		expr := p.Props[key]
+		sub := &Translator{dialect: t.dialect}
+		valSQL, err := sub.exprToSQL(expr, scope)
+		if err != nil {
+			return nil, fmt.Errorf("sql: MERGE check prop %q: %w", key, err)
+		}
+		whereParts = append(whereParts, t.dialect.JSONExtract(alias+".props", "$."+key)+" = "+valSQL)
+		whereArgs = append(whereArgs, sub.args...)
+	}
+
+	var checkSQL strings.Builder
+	fmt.Fprintf(&checkSQL, "SELECT %s.id FROM nodes %s", alias, alias)
+	if len(whereParts) > 0 {
+		checkSQL.WriteString(" WHERE ")
+		checkSQL.WriteString(strings.Join(whereParts, " AND "))
+	}
+	checkSQL.WriteString(" LIMIT 1")
+
+	checkStmt := Statement{
+		SQL:        checkSQL.String(),
+		Args:       whereArgs,
+		Kind:       KindMergeCheck,
+		CreatedVar: p.Variable,
+	}
+
+	// ── 2. Build the INSERT statement (used when node does not exist) ────────
+	labels := strings.Join(p.Labels, ",")
+	propsJSON, propsArgs, err := t.buildPropsJSON(p.Props, scope)
+	if err != nil {
+		return nil, fmt.Errorf("sql: MERGE insert props: %w", err)
+	}
+	var insertArgs []any
+	insertArgs = append(insertArgs, labels)
+	insertArgs = append(insertArgs, propsArgs...)
+	insertSQL := fmt.Sprintf("INSERT INTO nodes (labels, props) VALUES (?, json(%s))", propsJSON)
+	insertStmt := Statement{
+		SQL:        insertSQL,
+		Args:       insertArgs,
+		Kind:       KindMergeInsert,
+		CreatedVar: p.Variable,
+	}
+
+	// ── 3. Build ON CREATE SET statements ───────────────────────────────────
+	var onCreateStmts []Statement
+	for i := range p.OnCreate {
+		sp := &p.OnCreate[i]
+		stmt, err := t.translateSetProp(sp, scope)
+		if err != nil {
+			return nil, fmt.Errorf("sql: MERGE ON CREATE SET: %w", err)
+		}
+		// Tag as ON CREATE by prepending "C:" to CreatedVar (checked by executor).
+		stmt.CreatedVar = "oncreate:" + stmt.CreatedVar
+		onCreateStmts = append(onCreateStmts, stmt)
+	}
+
+	// ── 4. Build ON MATCH SET statements ────────────────────────────────────
+	var onMatchStmts []Statement
+	for i := range p.OnMatch {
+		sp := &p.OnMatch[i]
+		stmt, err := t.translateSetProp(sp, scope)
+		if err != nil {
+			return nil, fmt.Errorf("sql: MERGE ON MATCH SET: %w", err)
+		}
+		// Tag as ON MATCH by prepending "M:" to CreatedVar.
+		stmt.CreatedVar = "onmatch:" + stmt.CreatedVar
+		onMatchStmts = append(onMatchStmts, stmt)
+	}
+
+	// Return all statements in order: check, insert, onCreateStmts, onMatchStmts.
+	// The execution layer uses the Kind field to dispatch each statement correctly.
+	stmts := []Statement{checkStmt, insertStmt}
+	stmts = append(stmts, onCreateStmts...)
+	stmts = append(stmts, onMatchStmts...)
+	return stmts, nil
 }
 
 // translateSequenceWrite handles a SequencePlan that contains write operations.

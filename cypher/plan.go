@@ -357,6 +357,35 @@ type RemoveLabelPlan struct {
 func (*RemoveLabelPlan) planNode() {}
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MERGE plan node
+// ─────────────────────────────────────────────────────────────────────────────
+
+// MergePlan represents a MERGE clause — match-or-create semantics.
+//
+// The execution layer runs:
+//  1. A SELECT to check whether a node matching the labels+props exists.
+//  2. If not found: INSERT the new node, then run OnCreate SET operations.
+//  3. If found: run OnMatch SET operations.
+//
+// All steps run inside a single transaction for atomicity.
+//
+//	MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.created = true
+type MergePlan struct {
+	// Variable is the Cypher variable bound to the merged node.
+	Variable string
+	// Labels are the required labels (AND semantics).
+	Labels []string
+	// Props maps property key → Expr for the match/create constraints.
+	Props map[string]Expr
+	// OnCreate holds SET operations to run when the node was just created.
+	OnCreate []SetPropPlan
+	// OnMatch holds SET operations to run when the node already existed.
+	OnMatch []SetPropPlan
+}
+
+func (*MergePlan) planNode() {}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DELETE plan nodes
 // ─────────────────────────────────────────────────────────────────────────────
 

@@ -15,6 +15,7 @@ import (
 	stdsql "database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/LackOfMorals/graphlite/cypher"
 	glsql "github.com/LackOfMorals/graphlite/sql"
@@ -147,6 +148,11 @@ func buildSQLResult(cypherStr string, params map[string]any) (glsql.Result, erro
 // or *stdsql.Tx). For a single KindSelect it returns a lazy QueryResult; for
 // write statements it executes each in order and returns a QueryResult with
 // counters.
+//
+// When the statement list contains a KindMergeCheck and ex is a *stdsql.DB
+// (auto-commit), the execution is wrapped in an implicit transaction so the
+// check+insert is atomic. If ex is already a *stdsql.Tx the caller's
+// transaction is used directly.
 func executeStatements(ctx context.Context, ex execer, sqlResult glsql.Result) (*QueryResult, error) {
 	stmts := sqlResult.Statements
 	if len(stmts) == 0 {
@@ -165,6 +171,34 @@ func executeStatements(ctx context.Context, ex execer, sqlResult glsql.Result) (
 			return nil, err
 		}
 		return qr, nil
+	}
+
+	// If the statement list contains a MERGE check and ex is a plain *stdsql.DB,
+	// wrap the execution in an implicit transaction for atomicity.
+	hasMerge := false
+	for _, s := range stmts {
+		if s.Kind == glsql.KindMergeCheck {
+			hasMerge = true
+			break
+		}
+	}
+	if hasMerge {
+		if db, ok := ex.(*stdsql.DB); ok {
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return nil, fmt.Errorf("graphlite: MERGE begin tx: %w", err)
+			}
+			qr, err := execWriteStatements(ctx, tx, stmts)
+			if err != nil {
+				_ = tx.Rollback()
+				return nil, err
+			}
+			if err := tx.Commit(); err != nil {
+				return nil, fmt.Errorf("graphlite: MERGE commit: %w", err)
+			}
+			return qr, nil
+		}
+		// Already a *stdsql.Tx — use it directly (the caller manages the transaction).
 	}
 
 	// Write (or guard+write) statements: execute in order.
@@ -265,8 +299,25 @@ func collectMatchRows(ctx context.Context, ex execer, stmt *glsql.Statement) ([]
 
 // execWriteBatch runs one "batch" of write statements with the provided idMap.
 // idMap is updated in place as INSERT statements produce new row IDs.
+//
+// MERGE statements (KindMergeCheck + KindMergeInsert + tagged KindUpdate) are
+// handled by execMergeBatch when a KindMergeCheck statement is encountered.
 func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idMap map[string]int64, ctr *QueryCounters) error {
-	for _, stmt := range stmts {
+	i := 0
+	for i < len(stmts) {
+		stmt := stmts[i]
+
+		// Detect the start of a MERGE block: KindMergeCheck is always followed by
+		// KindMergeInsert and then zero or more tagged KindUpdate stmts.
+		if stmt.Kind == glsql.KindMergeCheck {
+			consumed, err := execMergeBatch(ctx, ex, stmts[i:], idMap, ctr)
+			if err != nil {
+				return err
+			}
+			i += consumed
+			continue
+		}
+
 		// Resolve idSentinels from idMap.
 		resolved, err := glsql.ResolveIDs(glsql.Result{Statements: []glsql.Statement{stmt}}, idMap)
 		if err != nil {
@@ -332,6 +383,120 @@ func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 				return fmt.Errorf("graphlite: exec: %w", err)
 			}
 		}
+		i++
 	}
 	return nil
+}
+
+// execMergeBatch handles a MERGE block starting at stmts[0] (KindMergeCheck).
+// It returns the number of statements consumed from the slice.
+//
+// Statement layout produced by translateMerge:
+//
+//	[0] KindMergeCheck  — SELECT id … LIMIT 1 (existence check)
+//	[1] KindMergeInsert — INSERT INTO nodes … (create branch)
+//	[2..n] KindUpdate with CreatedVar="oncreate:…" — ON CREATE SET stmts
+//	[n+1..] KindUpdate with CreatedVar="onmatch:…"  — ON MATCH SET stmts
+//
+// If the check finds a row → run ON MATCH SETs (skip insert and ON CREATE SETs).
+// If the check finds no row → run INSERT + ON CREATE SETs (skip ON MATCH SETs).
+// All actions run within the caller's transaction (ex is already a *stdsql.Tx or
+// *stdsql.DB held by the execer; the BeginTx wrapping is the caller's responsibility).
+func execMergeBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idMap map[string]int64, ctr *QueryCounters) (consumed int, err error) {
+	if len(stmts) == 0 || stmts[0].Kind != glsql.KindMergeCheck {
+		return 0, fmt.Errorf("graphlite: execMergeBatch called on non-MergeCheck statement")
+	}
+
+	checkStmt := stmts[0]
+	consumed = 1 // always consume the check statement
+
+	// Collect the insert statement and the tagged SET statements.
+	var insertStmt *glsql.Statement
+	var onCreateStmts []glsql.Statement
+	var onMatchStmts []glsql.Statement
+
+	for j := 1; j < len(stmts); j++ {
+		s := stmts[j]
+		if s.Kind == glsql.KindMergeInsert {
+			insertStmt = &stmts[j]
+			consumed++
+		} else if s.Kind == glsql.KindUpdate && strings.HasPrefix(s.CreatedVar, "oncreate:") {
+			onCreateStmts = append(onCreateStmts, s)
+			consumed++
+		} else if s.Kind == glsql.KindUpdate && strings.HasPrefix(s.CreatedVar, "onmatch:") {
+			onMatchStmts = append(onMatchStmts, s)
+			consumed++
+		} else {
+			// Not part of this MERGE block.
+			break
+		}
+	}
+
+	// ── Run the existence check ───────────────────────────────────────────────
+	var existingID int64
+	row := ex.QueryRowContext(ctx, checkStmt.SQL, checkStmt.Args...)
+	scanErr := row.Scan(&existingID)
+
+	nodeExists := scanErr == nil
+	if scanErr != nil && !errors.Is(scanErr, stdsql.ErrNoRows) {
+		// A real scan error (not "no rows").
+		return consumed, fmt.Errorf("graphlite: MERGE check: %w", scanErr)
+	}
+
+	varName := checkStmt.CreatedVar // the Cypher variable for the merged node
+
+	if nodeExists {
+		// ── ON MATCH branch ───────────────────────────────────────────────────
+		// The node already exists; record its ID and run ON MATCH SET stmts.
+		if varName != "" {
+			idMap[varName] = existingID
+		}
+		for _, s := range onMatchStmts {
+			// Strip the "onmatch:" tag prefix to get the real variable name for
+			// ID resolution, then resolve and execute.
+			realVar := strings.TrimPrefix(s.CreatedVar, "onmatch:")
+			s.CreatedVar = realVar
+			resolved, err := glsql.ResolveIDs(glsql.Result{Statements: []glsql.Statement{s}}, idMap)
+			if err != nil {
+				return consumed, fmt.Errorf("graphlite: MERGE ON MATCH resolve IDs: %w", err)
+			}
+			if _, err := ex.ExecContext(ctx, resolved.Statements[0].SQL, resolved.Statements[0].Args...); err != nil {
+				return consumed, fmt.Errorf("graphlite: MERGE ON MATCH SET: %w", err)
+			}
+			ctr.PropertiesSet++
+		}
+	} else {
+		// ── ON CREATE branch ──────────────────────────────────────────────────
+		// Node does not exist; insert it and run ON CREATE SET stmts.
+		if insertStmt == nil {
+			return consumed, fmt.Errorf("graphlite: MERGE has no INSERT statement")
+		}
+		res, err := ex.ExecContext(ctx, insertStmt.SQL, insertStmt.Args...)
+		if err != nil {
+			return consumed, fmt.Errorf("graphlite: MERGE insert: %w", err)
+		}
+		lastID, err := res.LastInsertId()
+		if err != nil {
+			return consumed, fmt.Errorf("graphlite: MERGE insert last-id: %w", err)
+		}
+		if varName != "" {
+			idMap[varName] = lastID
+		}
+		ctr.NodesCreated++
+
+		for _, s := range onCreateStmts {
+			realVar := strings.TrimPrefix(s.CreatedVar, "oncreate:")
+			s.CreatedVar = realVar
+			resolved, err := glsql.ResolveIDs(glsql.Result{Statements: []glsql.Statement{s}}, idMap)
+			if err != nil {
+				return consumed, fmt.Errorf("graphlite: MERGE ON CREATE resolve IDs: %w", err)
+			}
+			if _, err := ex.ExecContext(ctx, resolved.Statements[0].SQL, resolved.Statements[0].Args...); err != nil {
+				return consumed, fmt.Errorf("graphlite: MERGE ON CREATE SET: %w", err)
+			}
+			ctr.PropertiesSet++
+		}
+	}
+
+	return consumed, nil
 }

@@ -257,6 +257,9 @@ func buildUpdatingClause(ctx *parser.OC_UpdatingClauseContext) (Clause, error) {
 	if c := ctx.OC_Create(); c != nil {
 		return buildCreateClause(c.(*parser.OC_CreateContext))
 	}
+	if m := ctx.OC_Merge(); m != nil {
+		return buildMergeClause(m.(*parser.OC_MergeContext))
+	}
 	if s := ctx.OC_Set(); s != nil {
 		return buildSetClause(s.(*parser.OC_SetContext))
 	}
@@ -267,6 +270,38 @@ func buildUpdatingClause(ctx *parser.OC_UpdatingClauseContext) (Clause, error) {
 		return buildRemoveClause(r.(*parser.OC_RemoveContext))
 	}
 	return nil, fmt.Errorf("cypher: unsupported updating clause %q in v0.1", ctx.GetText())
+}
+
+// buildMergeClause parses an OC_MergeContext into a MergeClause AST node.
+// Grammar: MERGE OC_PatternPart (ON CREATE OC_Set | ON MATCH OC_Set)*
+func buildMergeClause(ctx *parser.OC_MergeContext) (*MergeClause, error) {
+	part, err := buildPatternPart(ctx.OC_PatternPart().(*parser.OC_PatternPartContext))
+	if err != nil {
+		return nil, fmt.Errorf("cypher: MERGE pattern: %w", err)
+	}
+
+	mc := &MergeClause{Pattern: part}
+
+	for _, action := range ctx.AllOC_MergeAction() {
+		a := action.(*parser.OC_MergeActionContext)
+		setCtx := a.OC_Set()
+		if setCtx == nil {
+			continue
+		}
+		sc, err := buildSetClause(setCtx.(*parser.OC_SetContext))
+		if err != nil {
+			return nil, fmt.Errorf("cypher: MERGE action SET: %w", err)
+		}
+		// Distinguish ON CREATE vs ON MATCH by checking which token is present.
+		if a.CREATE() != nil {
+			mc.OnCreate = append(mc.OnCreate, sc.Items...)
+		} else {
+			// MATCH token → ON MATCH
+			mc.OnMatch = append(mc.OnMatch, sc.Items...)
+		}
+	}
+
+	return mc, nil
 }
 
 func buildCreateClause(ctx *parser.OC_CreateContext) (*CreateClause, error) {

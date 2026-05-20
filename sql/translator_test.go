@@ -1818,3 +1818,73 @@ func TestTranslate_SetMerge_026(t *testing.T) {
 	}
 	containsAll(t, result, "UPDATE nodes", "json_set", "$.score", "WHERE id = ?")
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: MERGE SQL output (task-028)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestTranslate_Merge_BasicForm verifies that a plain MERGE (n:Label {prop:val})
+// emits the correct KindMergeCheck SELECT and KindMergeInsert INSERT statements.
+func TestTranslate_Merge_BasicForm(t *testing.T) {
+	result := translateCypher(t, `MERGE (n:Person {name: "Alice"})`)
+
+	if len(result.Statements) < 2 {
+		t.Fatalf("expected at least 2 statements, got %d", len(result.Statements))
+	}
+
+	check := result.Statements[0]
+	if check.Kind != sqldialect.KindMergeCheck {
+		t.Errorf("stmt[0] kind: want KindMergeCheck, got %v", check.Kind)
+	}
+	if !strings.Contains(check.SQL, "SELECT") || !strings.Contains(check.SQL, "LIMIT 1") {
+		t.Errorf("MergeCheck SQL missing SELECT or LIMIT 1: %s", check.SQL)
+	}
+	// Label constraint must appear.
+	if !strings.Contains(check.SQL, "labels") {
+		t.Errorf("MergeCheck SQL missing labels constraint: %s", check.SQL)
+	}
+	// Name prop constraint must appear.
+	if !strings.Contains(check.SQL, "$.name") {
+		t.Errorf("MergeCheck SQL missing $.name prop constraint: %s", check.SQL)
+	}
+
+	insert := result.Statements[1]
+	if insert.Kind != sqldialect.KindMergeInsert {
+		t.Errorf("stmt[1] kind: want KindMergeInsert, got %v", insert.Kind)
+	}
+	if !strings.Contains(insert.SQL, "INSERT INTO nodes") {
+		t.Errorf("MergeInsert SQL missing INSERT INTO nodes: %s", insert.SQL)
+	}
+	if insert.CreatedVar != "n" {
+		t.Errorf("MergeInsert CreatedVar: want %q, got %q", "n", insert.CreatedVar)
+	}
+}
+
+// TestTranslate_Merge_OnCreateOnMatchStmts verifies that ON CREATE SET and
+// ON MATCH SET items produce correctly tagged KindUpdate statements.
+func TestTranslate_Merge_OnCreateOnMatchStmts(t *testing.T) {
+	result := translateCypher(t, `MERGE (n:Person {name: "Bob"}) ON CREATE SET n.created = "yes" ON MATCH SET n.seen = "yes"`)
+
+	// Expect: [0] check, [1] insert, [2] oncreate UPDATE, [3] onmatch UPDATE
+	if len(result.Statements) != 4 {
+		t.Fatalf("expected 4 statements, got %d", len(result.Statements))
+	}
+	if result.Statements[0].Kind != sqldialect.KindMergeCheck {
+		t.Errorf("stmt[0]: want KindMergeCheck, got %v", result.Statements[0].Kind)
+	}
+	if result.Statements[1].Kind != sqldialect.KindMergeInsert {
+		t.Errorf("stmt[1]: want KindMergeInsert, got %v", result.Statements[1].Kind)
+	}
+	if result.Statements[2].Kind != sqldialect.KindUpdate {
+		t.Errorf("stmt[2]: want KindUpdate (ON CREATE), got %v", result.Statements[2].Kind)
+	}
+	if !strings.HasPrefix(result.Statements[2].CreatedVar, "oncreate:") {
+		t.Errorf("stmt[2] CreatedVar: want oncreate: prefix, got %q", result.Statements[2].CreatedVar)
+	}
+	if result.Statements[3].Kind != sqldialect.KindUpdate {
+		t.Errorf("stmt[3]: want KindUpdate (ON MATCH), got %v", result.Statements[3].Kind)
+	}
+	if !strings.HasPrefix(result.Statements[3].CreatedVar, "onmatch:") {
+		t.Errorf("stmt[3] CreatedVar: want onmatch: prefix, got %q", result.Statements[3].CreatedVar)
+	}
+}

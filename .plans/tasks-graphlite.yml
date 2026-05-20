@@ -524,7 +524,7 @@ tasks:
       IGNORE + SELECT strategy in SQLite. Implement the full MERGE ... ON CREATE SET ... ON MATCH
       SET ... form. MERGE must be atomic (run in a transaction) and must not create duplicates
       under concurrent writes.
-    status: pending
+    status: completed
     dependencies:
       - task-027
     acceptance_criteria:
@@ -533,7 +533,7 @@ tasks:
       - "ON MATCH SET executes only when the node already existed"
       - "MERGE with an existing node does not create a duplicate"
       - "Integration tests verify MERGE idempotency over multiple executions"
-    completed_at: null
+    completed_at: "2026-05-20T15:00:00Z"
 
   - id: task-029
     title: "Property-based test suite with pgregory.net/rapid"

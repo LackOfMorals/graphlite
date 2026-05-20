@@ -1984,3 +1984,146 @@ func TestIntegration_SetMerge_PreservesExistingKeys(t *testing.T) {
 	got, _ := result.Records[0].Get("age")
 	assertInt64(t, `SET += preserves age`, "age", got, 30)
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Feature: MERGE (v0.3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestIntegration_Merge_CreatesOnFirstRun verifies that MERGE creates the node
+// when it does not yet exist.
+func TestIntegration_Merge_CreatesOnFirstRun(t *testing.T) {
+	db := openDB(t)
+
+	cypher := `MERGE (n:Person {name: "Alice"})`
+	qr, err := db.RunQuery(context.Background(), cypher, nil)
+	if err != nil {
+		t.Fatalf("MERGE create: %v", err)
+	}
+	eager, err := graphlite.NewEagerResult(context.Background(), qr)
+	if err != nil {
+		t.Fatalf("MERGE consume: %v", err)
+	}
+	if eager.Summary.Counters().NodesCreated() != 1 {
+		t.Errorf("expected 1 node created, got %d", eager.Summary.Counters().NodesCreated())
+	}
+
+	result := query(t, db, `MATCH (n:Person {name: "Alice"}) RETURN n.name AS name`, nil)
+	assertCount(t, `MATCH after MERGE create`, result, 1)
+	assertString(t, `MATCH after MERGE create`, "name", get(t, `MATCH`, result, 0, "name"), "Alice")
+}
+
+// TestIntegration_Merge_MatchesOnSubsequentRun verifies that MERGE does not
+// create a duplicate when the node already exists.
+func TestIntegration_Merge_MatchesOnSubsequentRun(t *testing.T) {
+	db := openDB(t)
+
+	setup(t, db, `CREATE (n:Person {name: "Alice"})`)
+
+	cypher := `MERGE (n:Person {name: "Alice"})`
+	qr, err := db.RunQuery(context.Background(), cypher, nil)
+	if err != nil {
+		t.Fatalf("MERGE match: %v", err)
+	}
+	eager, err := graphlite.NewEagerResult(context.Background(), qr)
+	if err != nil {
+		t.Fatalf("MERGE consume: %v", err)
+	}
+	if eager.Summary.Counters().NodesCreated() != 0 {
+		t.Errorf("expected 0 nodes created on match, got %d", eager.Summary.Counters().NodesCreated())
+	}
+
+	// Must still be exactly one Alice.
+	result := query(t, db, `MATCH (n:Person {name: "Alice"}) RETURN n.name AS name`, nil)
+	assertCount(t, `MATCH after MERGE match`, result, 1)
+}
+
+// TestIntegration_Merge_NoDuplicates verifies that running MERGE multiple times
+// leaves exactly one node in the database.
+func TestIntegration_Merge_NoDuplicates(t *testing.T) {
+	db := openDB(t)
+
+	for i := 0; i < 5; i++ {
+		setup(t, db, `MERGE (n:Person {name: "Alice"})`)
+	}
+
+	result := query(t, db, `MATCH (n:Person {name: "Alice"}) RETURN n.name AS name`, nil)
+	assertCount(t, `MATCH after 5x MERGE`, result, 1)
+}
+
+// TestIntegration_Merge_OnCreateSet verifies that ON CREATE SET runs only
+// when the node is newly created.
+func TestIntegration_Merge_OnCreateSet(t *testing.T) {
+	db := openDB(t)
+
+	cypher := `MERGE (n:Person {name: "Bob"}) ON CREATE SET n.created = "yes"`
+	setup(t, db, cypher)
+
+	result := query(t, db, `MATCH (n:Person {name: "Bob"}) RETURN n.created AS created`, nil)
+	assertCount(t, `MATCH after MERGE ON CREATE`, result, 1)
+	assertString(t, `MERGE ON CREATE SET`, "created", get(t, `MATCH`, result, 0, "created"), "yes")
+
+	// Run again — ON CREATE SET must NOT overwrite or re-set the property.
+	// We'll change the value with ON MATCH to distinguish branches.
+	setup(t, db, `MERGE (n:Person {name: "Bob"}) ON CREATE SET n.created = "again"`)
+	result2 := query(t, db, `MATCH (n:Person {name: "Bob"}) RETURN n.created AS created`, nil)
+	assertCount(t, `MATCH after second MERGE`, result2, 1)
+	// Value should still be "yes" — ON CREATE did not run on the second MERGE.
+	assertString(t, `MERGE ON CREATE not repeated`, "created", get(t, `MATCH`, result2, 0, "created"), "yes")
+}
+
+// TestIntegration_Merge_OnMatchSet verifies that ON MATCH SET runs only
+// when the node already existed.
+func TestIntegration_Merge_OnMatchSet(t *testing.T) {
+	db := openDB(t)
+
+	// First MERGE: creates the node. ON MATCH SET should NOT execute.
+	setup(t, db, `MERGE (n:Person {name: "Carol"}) ON MATCH SET n.seen = "yes"`)
+
+	result := query(t, db, `MATCH (n:Person {name: "Carol"}) RETURN n.seen AS seen`, nil)
+	assertCount(t, `MATCH after first MERGE`, result, 1)
+	seen, _ := result.Records[0].Get("seen")
+	if seen != nil {
+		t.Errorf("ON MATCH SET should not have run on creation, but got seen=%v", seen)
+	}
+
+	// Second MERGE: node exists. ON MATCH SET should execute.
+	setup(t, db, `MERGE (n:Person {name: "Carol"}) ON MATCH SET n.seen = "yes"`)
+
+	result2 := query(t, db, `MATCH (n:Person {name: "Carol"}) RETURN n.seen AS seen`, nil)
+	assertCount(t, `MATCH after second MERGE`, result2, 1)
+	assertString(t, `MERGE ON MATCH SET`, "seen", get(t, `MATCH`, result2, 0, "seen"), "yes")
+}
+
+// TestIntegration_Merge_OnCreateAndOnMatch verifies both branches work correctly
+// in the same MERGE statement depending on whether the node exists.
+func TestIntegration_Merge_OnCreateAndOnMatch(t *testing.T) {
+	db := openDB(t)
+
+	merge := `MERGE (n:Person {name: "Dave"}) ON CREATE SET n.status = "new" ON MATCH SET n.status = "existing"`
+
+	// First run — creates node, sets status = "new".
+	setup(t, db, merge)
+	result := query(t, db, `MATCH (n:Person {name: "Dave"}) RETURN n.status AS status`, nil)
+	assertCount(t, `MATCH after create`, result, 1)
+	assertString(t, `ON CREATE`, "status", get(t, `MATCH`, result, 0, "status"), "new")
+
+	// Second run — node exists, sets status = "existing".
+	setup(t, db, merge)
+	result2 := query(t, db, `MATCH (n:Person {name: "Dave"}) RETURN n.status AS status`, nil)
+	assertCount(t, `MATCH after match`, result2, 1)
+	assertString(t, `ON MATCH`, "status", get(t, `MATCH`, result2, 0, "status"), "existing")
+}
+
+// TestIntegration_Merge_Idempotency verifies that repeated MERGE executions
+// leave the graph in a stable state (one node, no duplicates).
+func TestIntegration_Merge_Idempotency(t *testing.T) {
+	db := openDB(t)
+
+	for i := 0; i < 10; i++ {
+		setup(t, db, `MERGE (n:Counter {key: "x"}) ON CREATE SET n.count = 1`)
+	}
+
+	result := query(t, db, `MATCH (n:Counter {key: "x"}) RETURN n.count AS count`, nil)
+	assertCount(t, `idempotency node count`, result, 1)
+	assertInt64(t, `idempotency count value`, "count", get(t, `MATCH`, result, 0, "count"), 1)
+}

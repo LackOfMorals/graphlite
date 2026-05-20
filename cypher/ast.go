@@ -131,6 +131,21 @@ type SetItem struct {
 	Props map[string]string
 }
 
+// MergeClause represents a MERGE clause with optional ON CREATE SET and ON MATCH SET actions.
+//
+//	MERGE (n:Person {name: 'Alice'})
+//	MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.created = true ON MATCH SET n.seen = true
+type MergeClause struct {
+	// Pattern is the single pattern part to merge (match-or-create).
+	Pattern PatternPart
+	// OnCreate holds the SET items to apply if the node/relationship was just created.
+	OnCreate []SetItem
+	// OnMatch holds the SET items to apply if the node/relationship already existed.
+	OnMatch []SetItem
+}
+
+func (*MergeClause) clauseNode() {}
+
 // RemoveClause represents a REMOVE clause.
 //
 //	REMOVE n.prop

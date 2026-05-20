@@ -132,6 +132,13 @@ func planQuery(q *Query, scope *BindingScope) (LogicalPlan, error) {
 			}
 			writePlans = append(writePlans, plans...)
 
+		case *MergeClause:
+			mergePlan, err := planMergeClause(c, scope, ac)
+			if err != nil {
+				return nil, err
+			}
+			writePlans = append(writePlans, mergePlan)
+
 		default:
 			return nil, fmt.Errorf("cypher: unsupported clause type %T", clause)
 		}
@@ -590,6 +597,74 @@ func planRemoveClause(rc *RemoveClause) ([]LogicalPlan, error) {
 		}
 	}
 	return plans, nil
+}
+
+// ─── MERGE clause planning ────────────────────────────────────────────────────
+
+// planMergeClause translates a MergeClause into a MergePlan.
+// It allocates an alias for the merged variable and adds it to scope.
+func planMergeClause(mc *MergeClause, scope *BindingScope, ac *aliasCounter) (*MergePlan, error) {
+	np := mc.Pattern.Start
+	if len(mc.Pattern.Chain) > 0 {
+		return nil, fmt.Errorf("cypher: MERGE with relationship patterns is not yet supported")
+	}
+
+	// Allocate an alias and, for named variables, add a scope binding so the
+	// translator can look up the alias via scope.Resolve(variable).
+	if np.Variable != "" {
+		alias := ac.nextNode()
+		scope.Bind(np.Variable, Binding{
+			Alias:  alias,
+			Column: alias + ".id",
+			Table:  "nodes",
+			IsNode: true,
+		})
+	} else {
+		// Anonymous node: allocate an alias to keep the counter monotonic but
+		// do not add a scope entry.
+		_ = ac.nextNode()
+	}
+
+	mp := &MergePlan{
+		Variable: np.Variable,
+		Labels:   np.Labels,
+		Props:    planPropsMap(np.Props),
+	}
+
+	// Plan ON CREATE SET items.
+	for _, item := range mc.OnCreate {
+		if item.Merge {
+			// SET n += {map} in ON CREATE — not yet supported in MERGE context.
+			return nil, fmt.Errorf("cypher: MERGE ON CREATE SET += is not yet supported")
+		}
+		valueExpr, err := parseExprText(item.ExprText, scope)
+		if err != nil {
+			return nil, fmt.Errorf("cypher: MERGE ON CREATE SET %s.%s: %w", item.Variable, item.Property, err)
+		}
+		mp.OnCreate = append(mp.OnCreate, SetPropPlan{
+			Variable: item.Variable,
+			Property: item.Property,
+			Value:    valueExpr,
+		})
+	}
+
+	// Plan ON MATCH SET items.
+	for _, item := range mc.OnMatch {
+		if item.Merge {
+			return nil, fmt.Errorf("cypher: MERGE ON MATCH SET += is not yet supported")
+		}
+		valueExpr, err := parseExprText(item.ExprText, scope)
+		if err != nil {
+			return nil, fmt.Errorf("cypher: MERGE ON MATCH SET %s.%s: %w", item.Variable, item.Property, err)
+		}
+		mp.OnMatch = append(mp.OnMatch, SetPropPlan{
+			Variable: item.Variable,
+			Property: item.Property,
+			Value:    valueExpr,
+		})
+	}
+
+	return mp, nil
 }
 
 // ─── DELETE clause planning ───────────────────────────────────────────────────

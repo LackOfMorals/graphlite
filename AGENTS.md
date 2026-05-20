@@ -191,3 +191,7 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - CSV edge import uses DB integer primary keys as `:START_ID`/`:END_ID` (not file-local strings like JSON import). Export node CSV first (`:ID` = DB integer), then export edge CSV referencing those IDs for a full round-trip.
 - `unmarshalProps` (in `importer.go`) is the inverse of `marshalProps` — use it in all export paths rather than duplicating `json.Unmarshal` inline.
 - `sortedKeys` in `importer.go` collects map keys and sorts with `sort.Strings` — use this wherever deterministic property key ordering is needed (CSV headers, JSON fragments).
+- MERGE emits a `[KindMergeCheck, KindMergeInsert, KindUpdate…]` statement block. The `KindUpdate` statements are tagged via `CreatedVar` prefix (`"oncreate:"` / `"onmatch:"`); `execMergeBatch` strips the prefix before calling `ResolveIDs`. A plain MERGE (no ON CREATE/MATCH) produces exactly 2 statements.
+- MERGE wraps itself in an implicit `BEGIN/COMMIT` in `executeStatements` when `ex` is a `*stdsql.DB` (auto-commit mode): detect `KindMergeCheck` in the statement list and type-assert `ex` to `*stdsql.DB`. Callers already inside a `*stdsql.Tx` pass through unchanged.
+- Use `errors.Is(err, stdsql.ErrNoRows)` (not string matching) to detect the no-rows case when scanning a `QueryRowContext` result — `stdsql.ErrNoRows` is the canonical sentinel.
+- `MergePlan.OnCreate` / `OnMatch` are `[]SetPropPlan` (value slices). Take a pointer with `&slice[i]` when passing to `translateSetProp` since it accepts `*SetPropPlan`.

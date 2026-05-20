@@ -864,3 +864,47 @@ Key Decisions:
   are serialised without decimal point to improve readability.
 
 Next Task: task-028
+
+================================================================================
+TASK-028: v0.3: MERGE basic form and ON CREATE / ON MATCH
+Date: 2026-05-20T15:00:00Z
+================================================================================
+
+Summary:
+Implemented MERGE (n:Label {prop: value}) with full ON CREATE SET / ON MATCH SET
+support across all four layers (AST, parser, plan, translator) plus atomic execution
+in driver.go. MERGE emits a 2-4 statement block: a KindMergeCheck SELECT (existence
+test), a KindMergeInsert INSERT (create branch), and tagged KindUpdate statements for
+ON CREATE and ON MATCH SET items. The executor wraps the block in an implicit
+transaction when running in auto-commit mode so check+insert is atomic.
+
+Files Changed:
+- cypher/ast.go (added MergeClause with Pattern, OnCreate, OnMatch fields)
+- cypher/parser.go (added buildMergeClause; wired OC_Merge in buildUpdatingClause)
+- cypher/plan.go (added MergePlan with Variable, Labels, Props, OnCreate, OnMatch)
+- cypher/planner.go (added planMergeClause; wired *MergeClause in planQuery switch)
+- sql/translator.go (added KindMergeCheck, KindMergeInsert constants; translateMerge;
+  wired *MergePlan in translateWritePlan)
+- driver.go (added "strings" import; MERGE transaction wrapping in executeStatements;
+  execMergeBatch to handle the check/insert/SET branching logic)
+- sql/translator_test.go (2 new unit tests: TestTranslate_Merge_BasicForm,
+  TestTranslate_Merge_OnCreateOnMatchStmts)
+- testdata/integration_test.go (7 integration tests covering all MERGE acceptance criteria)
+
+Key Decisions:
+- Statement tagging via CreatedVar prefix ("oncreate:"/"onmatch:") chosen over a new
+  Statement field — avoids adding a field to the core Statement type; the prefix is
+  stripped by execMergeBatch before ID resolution.
+- Existence check uses SELECT <alias>.id LIMIT 1 (not COUNT(*)): scanning directly
+  into int64 gives us the existing ID for free, needed to populate idMap for ON MATCH
+  SET statements.
+- errors.Is(scanErr, stdsql.ErrNoRows) used instead of string matching to detect the
+  "no rows" case — robust across database driver versions.
+- Auto-commit MERGE wraps in an implicit BEGIN/COMMIT in executeStatements by
+  detecting KindMergeCheck and type-asserting ex to *stdsql.DB; already-transactional
+  callers (Tx.Run) pass straight through.
+- MERGE with relationship patterns returns a clear "not yet supported" error.
+- ON CREATE/MATCH SET += not supported in MERGE context (returns error); plain
+  n.prop = expr form covers the main use cases.
+
+Next Task: task-029
