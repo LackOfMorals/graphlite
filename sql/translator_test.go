@@ -1772,3 +1772,49 @@ func TestTranslate_CollectDirectPlan(t *testing.T) {
 	}
 	containsAll(t, result, "json_group_array", "json_extract", "$.name", "AS names")
 }
+
+// ─── task-026: REMOVE prop, REMOVE label, SET += ─────────────────────────────
+
+func TestTranslate_RemoveProp_026(t *testing.T) {
+	scope := cypher.NewScope()
+	scope.Bind("n", cypher.Binding{Alias: "n0", IsNode: true, Column: "n0.id"})
+
+	plan := &cypher.RemovePropPlan{Variable: "n", Property: "age"}
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(plan, scope)
+	if err != nil {
+		t.Fatalf("Translate RemoveProp: %v", err)
+	}
+	containsAll(t, result, "UPDATE nodes", "json_remove", "$.age", "WHERE id = ?")
+}
+
+func TestTranslate_RemoveLabel_026(t *testing.T) {
+	scope := cypher.NewScope()
+	scope.Bind("n", cypher.Binding{Alias: "n0", IsNode: true, Column: "n0.id"})
+
+	plan := &cypher.RemoveLabelPlan{Variable: "n", Labels: []string{"Admin"}}
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(plan, scope)
+	if err != nil {
+		t.Fatalf("Translate RemoveLabel: %v", err)
+	}
+	containsAll(t, result, "UPDATE nodes", "REPLACE", "labels", "WHERE id = ?")
+}
+
+func TestTranslate_SetMerge_026(t *testing.T) {
+	scope := cypher.NewScope()
+	scope.Bind("n", cypher.Binding{Alias: "n0", IsNode: true, Column: "n0.id"})
+
+	plan := &cypher.SetMergePlan{
+		Variable: "n",
+		Props: map[string]cypher.Expr{
+			"score": &cypher.LiteralExpr{Value: int64(42)},
+		},
+	}
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(plan, scope)
+	if err != nil {
+		t.Fatalf("Translate SetMerge: %v", err)
+	}
+	containsAll(t, result, "UPDATE nodes", "json_set", "$.score", "WHERE id = ?")
+}

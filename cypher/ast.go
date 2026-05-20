@@ -103,21 +103,58 @@ func (*CreateClause) clauseNode() {}
 // SetClause represents a SET clause.
 //
 //	SET n.name = 'Alice', n.age = $age
+//	SET n += {a: 1, b: 2}
 type SetClause struct {
 	Items []SetItem
 }
 
 func (*SetClause) clauseNode() {}
 
-// SetItem represents one assignment in a SET clause: n.prop = expr.
+// SetItem represents one assignment in a SET clause.
+//
+// Two forms:
+//   - n.prop = expr  (Merge=false, Property is set, Props is nil)
+//   - n += {map}     (Merge=true, Property is "", Props holds the map pairs)
 type SetItem struct {
 	// Variable is the Cypher variable name (e.g. "n").
 	Variable string
-	// Property is the property key being set (e.g. "name").
+	// Property is the property key being set (e.g. "name"). Empty for += form.
 	Property string
-	// ExprText is the raw text of the right-hand-side expression.
-	// This may be a literal, a $param reference, or an arithmetic expression.
+	// ExprText is the raw text of the right-hand-side expression for n.prop = expr.
+	// Empty for the += merge form (Props holds the key/value pairs instead).
 	ExprText string
+	// Merge is true for SET n += {map} (property merge without overwriting other keys).
+	Merge bool
+	// Props holds the key/value pairs for the SET n += {map} form.
+	// Each value is the raw expression text (literal or $param).
+	// Nil for the n.prop = expr form.
+	Props map[string]string
+}
+
+// RemoveClause represents a REMOVE clause.
+//
+//	REMOVE n.prop
+//	REMOVE n:Label
+type RemoveClause struct {
+	Items []RemoveItem
+}
+
+func (*RemoveClause) clauseNode() {}
+
+// RemoveItem represents one item in a REMOVE clause.
+//
+// Two forms:
+//   - n.prop   (IsProp=true, Property is the key to remove)
+//   - n:Label  (IsProp=false, Labels holds the labels to remove)
+type RemoveItem struct {
+	// Variable is the Cypher variable name (e.g. "n").
+	Variable string
+	// IsProp is true for REMOVE n.prop, false for REMOVE n:Label.
+	IsProp bool
+	// Property is the property key to remove. Empty for label removal.
+	Property string
+	// Labels is the list of labels to remove. Empty for property removal.
+	Labels []string
 }
 
 // DeleteClause represents a DELETE or DETACH DELETE clause.

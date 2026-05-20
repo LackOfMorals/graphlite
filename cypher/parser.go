@@ -263,6 +263,9 @@ func buildUpdatingClause(ctx *parser.OC_UpdatingClauseContext) (Clause, error) {
 	if d := ctx.OC_Delete(); d != nil {
 		return buildDeleteClause(d.(*parser.OC_DeleteContext))
 	}
+	if r := ctx.OC_Remove(); r != nil {
+		return buildRemoveClause(r.(*parser.OC_RemoveContext))
+	}
 	return nil, fmt.Errorf("cypher: unsupported updating clause %q in v0.1", ctx.GetText())
 }
 
@@ -287,39 +290,200 @@ func buildSetClause(ctx *parser.OC_SetContext) (*SetClause, error) {
 }
 
 func buildSetItem(ctx *parser.OC_SetItemContext) (SetItem, error) {
-	// We only support the form: n.prop = expr
-	propExpr := ctx.OC_PropertyExpression()
-	if propExpr == nil {
-		return SetItem{}, fmt.Errorf("cypher: only 'variable.property = expr' SET items are supported in v0.1 (got %q)", ctx.GetText())
-	}
-	pe := propExpr.(*parser.OC_PropertyExpressionContext)
-	atom := pe.OC_Atom()
-	if atom == nil {
-		return SetItem{}, fmt.Errorf("cypher: SET item has no atom: %q", ctx.GetText())
+	// Form 1: n.prop = expr  (OC_PropertyExpression present)
+	if propExpr := ctx.OC_PropertyExpression(); propExpr != nil {
+		pe := propExpr.(*parser.OC_PropertyExpressionContext)
+		atom := pe.OC_Atom()
+		if atom == nil {
+			return SetItem{}, fmt.Errorf("cypher: SET item has no atom: %q", ctx.GetText())
+		}
+		varName := atom.(*parser.OC_AtomContext).OC_Variable()
+		if varName == nil {
+			return SetItem{}, fmt.Errorf("cypher: SET item atom is not a variable: %q", ctx.GetText())
+		}
+		lookups := pe.AllOC_PropertyLookup()
+		if len(lookups) != 1 {
+			return SetItem{}, fmt.Errorf("cypher: SET item must have exactly one property lookup (got %d): %q", len(lookups), ctx.GetText())
+		}
+		propKey := lookups[0].(*parser.OC_PropertyLookupContext).OC_PropertyKeyName()
+		exprCtx := ctx.OC_Expression()
+		if exprCtx == nil {
+			return SetItem{}, fmt.Errorf("cypher: SET item has no expression: %q", ctx.GetText())
+		}
+		return SetItem{
+			Variable: trimWhitespace(varName.GetText()),
+			Property: trimWhitespace(propKey.GetText()),
+			ExprText: exprText(exprCtx),
+		}, nil
 	}
 
-	varName := atom.(*parser.OC_AtomContext).OC_Variable()
-	if varName == nil {
-		return SetItem{}, fmt.Errorf("cypher: SET item atom is not a variable: %q", ctx.GetText())
+	// Forms 2, 3, 4 all have OC_Variable.
+	varCtx := ctx.OC_Variable()
+	if varCtx == nil {
+		return SetItem{}, fmt.Errorf("cypher: unrecognised SET item form: %q", ctx.GetText())
+	}
+	varName := trimWhitespace(varCtx.GetText())
+
+	// Form 3: n += {map}
+	// The grammar uses T__3 (the "+=" token). We detect it by inspecting the raw
+	// context text: after stripping the variable and surrounding spaces, the
+	// text begins with "+=".
+	fullText := ctx.GetText()
+	afterVar := strings.TrimPrefix(fullText, varName)
+	afterVar = strings.TrimLeft(afterVar, " \t")
+	if strings.HasPrefix(afterVar, "+=") {
+		// Extract the map expression from OC_Expression.
+		exprCtx := ctx.OC_Expression()
+		if exprCtx == nil {
+			return SetItem{}, fmt.Errorf("cypher: SET += item has no expression: %q", fullText)
+		}
+		props := buildPropertiesFromExprText(exprCtx)
+		return SetItem{
+			Variable: varName,
+			Merge:    true,
+			Props:    props,
+		}, nil
 	}
 
-	lookups := pe.AllOC_PropertyLookup()
-	if len(lookups) != 1 {
-		return SetItem{}, fmt.Errorf("cypher: SET item must have exactly one property lookup (got %d): %q", len(lookups), ctx.GetText())
-	}
+	return SetItem{}, fmt.Errorf("cypher: only 'variable.property = expr' and 'variable += {map}' SET items are supported (got %q)", ctx.GetText())
+}
 
-	propKey := lookups[0].(*parser.OC_PropertyLookupContext).OC_PropertyKeyName()
-
-	exprCtx := ctx.OC_Expression()
+// buildPropertiesFromExprText attempts to parse a map-literal expression from
+// an OC_ExpressionContext and return it as a map[string]string. This is used
+// for SET n += {map} where the RHS must be a map literal. If the expression is
+// not a map literal, an empty map is returned (the translator will handle it as
+// a no-op or fall back gracefully).
+func buildPropertiesFromExprText(exprCtx parser.IOC_ExpressionContext) map[string]string {
+	props := make(map[string]string)
 	if exprCtx == nil {
-		return SetItem{}, fmt.Errorf("cypher: SET item has no expression: %q", ctx.GetText())
+		return props
+	}
+	// Drill down the expression hierarchy to find a map literal:
+	// OC_Expression → OC_OrExpression → ... → OC_Atom → OC_MapLiteral
+	orCtx := exprCtx.(*parser.OC_ExpressionContext).OC_OrExpression()
+	if orCtx == nil {
+		return props
+	}
+	xors := orCtx.(*parser.OC_OrExpressionContext).AllOC_XorExpression()
+	if len(xors) != 1 {
+		return props
+	}
+	ands := xors[0].(*parser.OC_XorExpressionContext).AllOC_AndExpression()
+	if len(ands) != 1 {
+		return props
+	}
+	nots := ands[0].(*parser.OC_AndExpressionContext).AllOC_NotExpression()
+	if len(nots) != 1 {
+		return props
+	}
+	cmpCtx := nots[0].(*parser.OC_NotExpressionContext).OC_ComparisonExpression()
+	if cmpCtx == nil {
+		return props
+	}
+	addSub := cmpCtx.(*parser.OC_ComparisonExpressionContext).OC_AddOrSubtractExpression()
+	if addSub == nil {
+		return props
+	}
+	mulDivs := addSub.(*parser.OC_AddOrSubtractExpressionContext).AllOC_MultiplyDivideModuloExpression()
+	if len(mulDivs) != 1 {
+		return props
+	}
+	powers := mulDivs[0].(*parser.OC_MultiplyDivideModuloExpressionContext).AllOC_PowerOfExpression()
+	if len(powers) != 1 {
+		return props
+	}
+	unarys := powers[0].(*parser.OC_PowerOfExpressionContext).AllOC_UnaryAddOrSubtractExpression()
+	if len(unarys) != 1 {
+		return props
+	}
+	slnCtx := unarys[0].(*parser.OC_UnaryAddOrSubtractExpressionContext).OC_StringListNullOperatorExpression()
+	if slnCtx == nil {
+		return props
+	}
+	propLabelsCtx := slnCtx.(*parser.OC_StringListNullOperatorExpressionContext).OC_PropertyOrLabelsExpression()
+	if propLabelsCtx == nil {
+		return props
+	}
+	atomCtx := propLabelsCtx.(*parser.OC_PropertyOrLabelsExpressionContext).OC_Atom()
+	if atomCtx == nil {
+		return props
+	}
+	litCtx := atomCtx.(*parser.OC_AtomContext).OC_Literal()
+	if litCtx == nil {
+		return props
+	}
+	mapLitCtx := litCtx.(*parser.OC_LiteralContext).OC_MapLiteral()
+	if mapLitCtx == nil {
+		return props
+	}
+	ml := mapLitCtx.(*parser.OC_MapLiteralContext)
+	keys := ml.AllOC_PropertyKeyName()
+	exprs := ml.AllOC_Expression()
+	for i, key := range keys {
+		if i < len(exprs) {
+			props[trimWhitespace(key.GetText())] = exprText(exprs[i])
+		}
+	}
+	return props
+}
+
+// buildRemoveClause parses an OC_RemoveContext into a RemoveClause AST node.
+func buildRemoveClause(ctx *parser.OC_RemoveContext) (*RemoveClause, error) {
+	rc := &RemoveClause{}
+	for _, item := range ctx.AllOC_RemoveItem() {
+		ri, err := buildRemoveItem(item.(*parser.OC_RemoveItemContext))
+		if err != nil {
+			return nil, err
+		}
+		rc.Items = append(rc.Items, ri)
+	}
+	return rc, nil
+}
+
+// buildRemoveItem parses a single OC_RemoveItemContext.
+// Two forms:
+//   - variable NodeLabels → REMOVE n:Label
+//   - PropertyExpression  → REMOVE n.prop
+func buildRemoveItem(ctx *parser.OC_RemoveItemContext) (RemoveItem, error) {
+	// Form: variable NodeLabels → REMOVE n:Label
+	if labelsCtx := ctx.OC_NodeLabels(); labelsCtx != nil {
+		varCtx := ctx.OC_Variable()
+		if varCtx == nil {
+			return RemoveItem{}, fmt.Errorf("cypher: REMOVE label item has no variable: %q", ctx.GetText())
+		}
+		varName := trimWhitespace(varCtx.GetText())
+		var labels []string
+		for _, lbl := range labelsCtx.(*parser.OC_NodeLabelsContext).AllOC_NodeLabel() {
+			name := lbl.(*parser.OC_NodeLabelContext).OC_LabelName()
+			labels = append(labels, trimWhitespace(name.GetText()))
+		}
+		return RemoveItem{Variable: varName, IsProp: false, Labels: labels}, nil
 	}
 
-	return SetItem{
-		Variable: trimWhitespace(varName.GetText()),
-		Property: trimWhitespace(propKey.GetText()),
-		ExprText: exprText(exprCtx),
-	}, nil
+	// Form: PropertyExpression → REMOVE n.prop
+	if propExprCtx := ctx.OC_PropertyExpression(); propExprCtx != nil {
+		pe := propExprCtx.(*parser.OC_PropertyExpressionContext)
+		atom := pe.OC_Atom()
+		if atom == nil {
+			return RemoveItem{}, fmt.Errorf("cypher: REMOVE property item has no atom: %q", ctx.GetText())
+		}
+		varCtx := atom.(*parser.OC_AtomContext).OC_Variable()
+		if varCtx == nil {
+			return RemoveItem{}, fmt.Errorf("cypher: REMOVE property item atom is not a variable: %q", ctx.GetText())
+		}
+		lookups := pe.AllOC_PropertyLookup()
+		if len(lookups) != 1 {
+			return RemoveItem{}, fmt.Errorf("cypher: REMOVE property item must have exactly one property lookup (got %d): %q", len(lookups), ctx.GetText())
+		}
+		propKey := lookups[0].(*parser.OC_PropertyLookupContext).OC_PropertyKeyName()
+		return RemoveItem{
+			Variable: trimWhitespace(varCtx.GetText()),
+			IsProp:   true,
+			Property: trimWhitespace(propKey.GetText()),
+		}, nil
+	}
+
+	return RemoveItem{}, fmt.Errorf("cypher: unrecognised REMOVE item: %q", ctx.GetText())
 }
 
 func buildDeleteClause(ctx *parser.OC_DeleteContext) (*DeleteClause, error) {

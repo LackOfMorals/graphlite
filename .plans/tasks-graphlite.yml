@@ -486,7 +486,8 @@ tasks:
       label from the comma-separated labels column), and SET n += {map} which merges a property
       map into the existing props JSON without overwriting unmentioned keys (emits json_patch or
       a json_set loop).
-    status: pending
+    status: completed
+    completed_at: "2026-05-20T13:00:00Z"
     dependencies:
       - task-025
     acceptance_criteria:

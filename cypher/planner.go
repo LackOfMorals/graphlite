@@ -125,6 +125,13 @@ func planQuery(q *Query, scope *BindingScope) (LogicalPlan, error) {
 			}
 			writePlans = append(writePlans, plans...)
 
+		case *RemoveClause:
+			plans, err := planRemoveClause(c)
+			if err != nil {
+				return nil, err
+			}
+			writePlans = append(writePlans, plans...)
+
 		default:
 			return nil, fmt.Errorf("cypher: unsupported clause type %T", clause)
 		}
@@ -539,6 +546,19 @@ func planCreateClause(cc *CreateClause, scope *BindingScope, ac *aliasCounter) (
 func planSetClause(sc *SetClause, scope *BindingScope) ([]LogicalPlan, error) {
 	var plans []LogicalPlan
 	for _, item := range sc.Items {
+		if item.Merge {
+			// SET n += {map} → SetMergePlan
+			props := make(map[string]Expr, len(item.Props))
+			for k, v := range item.Props {
+				expr, err := parseExprText(v, scope)
+				if err != nil {
+					return nil, fmt.Errorf("cypher: SET %s += {%s: ...}: %w", item.Variable, k, err)
+				}
+				props[k] = expr
+			}
+			plans = append(plans, &SetMergePlan{Variable: item.Variable, Props: props})
+			continue
+		}
 		valueExpr, err := parseExprText(item.ExprText, scope)
 		if err != nil {
 			return nil, fmt.Errorf("cypher: SET %s.%s: %w", item.Variable, item.Property, err)
@@ -548,6 +568,26 @@ func planSetClause(sc *SetClause, scope *BindingScope) ([]LogicalPlan, error) {
 			Property: item.Property,
 			Value:    valueExpr,
 		})
+	}
+	return plans, nil
+}
+
+// ─── REMOVE clause planning ──────────────────────────────────────────────────
+
+func planRemoveClause(rc *RemoveClause) ([]LogicalPlan, error) {
+	var plans []LogicalPlan
+	for _, item := range rc.Items {
+		if item.IsProp {
+			plans = append(plans, &RemovePropPlan{
+				Variable: item.Variable,
+				Property: item.Property,
+			})
+		} else {
+			plans = append(plans, &RemoveLabelPlan{
+				Variable: item.Variable,
+				Labels:   item.Labels,
+			})
+		}
 	}
 	return plans, nil
 }

@@ -314,6 +314,48 @@ type SetPropPlan struct {
 
 func (*SetPropPlan) planNode() {}
 
+// SetMergePlan represents SET n += {map} — a property merge operation that
+// adds or updates keys in the existing props JSON without removing other keys.
+//
+//	SET n += {a: 1, b: 2}
+type SetMergePlan struct {
+	// Variable is the Cypher variable whose properties are being merged.
+	Variable string
+	// Props maps property key → Expr for the values to merge in.
+	Props map[string]Expr
+}
+
+func (*SetMergePlan) planNode() {}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REMOVE plan nodes
+// ─────────────────────────────────────────────────────────────────────────────
+
+// RemovePropPlan represents REMOVE n.prop — deletes one key from the props JSON.
+//
+//	REMOVE n.age
+type RemovePropPlan struct {
+	// Variable is the Cypher variable whose property is being removed.
+	Variable string
+	// Property is the property key to remove.
+	Property string
+}
+
+func (*RemovePropPlan) planNode() {}
+
+// RemoveLabelPlan represents REMOVE n:Label — removes one or more labels from
+// the comma-separated labels column.
+//
+//	REMOVE n:Admin
+type RemoveLabelPlan struct {
+	// Variable is the Cypher variable whose label(s) are being removed.
+	Variable string
+	// Labels is the list of labels to remove.
+	Labels []string
+}
+
+func (*RemoveLabelPlan) planNode() {}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // DELETE plan nodes
 // ─────────────────────────────────────────────────────────────────────────────

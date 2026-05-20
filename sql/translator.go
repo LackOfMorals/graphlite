@@ -12,6 +12,7 @@ package sql
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/LackOfMorals/graphlite/cypher"
@@ -1254,6 +1255,27 @@ func (t *Translator) translateWritePlan(plan cypher.LogicalPlan, scope *cypher.B
 		}
 		return []Statement{stmt}, true, nil
 
+	case *cypher.SetMergePlan:
+		stmt, e := t.translateSetMerge(p, scope)
+		if e != nil {
+			return nil, true, e
+		}
+		return []Statement{stmt}, true, nil
+
+	case *cypher.RemovePropPlan:
+		stmt, e := t.translateRemoveProp(p, scope)
+		if e != nil {
+			return nil, true, e
+		}
+		return []Statement{stmt}, true, nil
+
+	case *cypher.RemoveLabelPlan:
+		ss, e := t.translateRemoveLabel(p, scope)
+		if e != nil {
+			return nil, true, e
+		}
+		return ss, true, nil
+
 	case *cypher.DeleteNodePlan:
 		ss, e := t.translateDeleteNode(p, scope)
 		if e != nil {
@@ -1389,6 +1411,106 @@ func (t *Translator) translateSetProp(p *cypher.SetPropPlan, scope *cypher.Bindi
 
 	sql := fmt.Sprintf("UPDATE %s SET props = %s WHERE id = ?", table, jsonSetExpr)
 	return Statement{SQL: sql, Args: args, Kind: KindUpdate}, nil
+}
+
+// translateSetMerge emits:
+//
+//	UPDATE nodes SET props = json_set(props, '$.k1', ?, '$.k2', ?, ...) WHERE id = ?
+//
+// json_set adds/updates each key without removing keys not mentioned in the map,
+// satisfying SET n += {map} merge semantics. Parameters and literals both work
+// since each value is a separate bind argument.
+func (t *Translator) translateSetMerge(p *cypher.SetMergePlan, scope *cypher.BindingScope) (Statement, error) {
+	binding, ok := scope.Resolve(p.Variable)
+	if !ok {
+		return Statement{}, fmt.Errorf("sql: variable %q not in scope for SET +=", p.Variable)
+	}
+	if len(p.Props) == 0 {
+		return Statement{}, fmt.Errorf("sql: SET += requires at least one property")
+	}
+
+	// Build json_set(props, '$.k1', ?, '$.k2', ?, ...) with stable key order.
+	keys := make([]string, 0, len(p.Props))
+	for k := range p.Props {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var jsonSetParts []string
+	var args []any
+	jsonSetParts = append(jsonSetParts, "props")
+	for _, k := range keys {
+		expr := p.Props[k]
+		valT := &Translator{dialect: t.dialect}
+		valSQL, err := valT.exprToSQL(expr, scope)
+		if err != nil {
+			return Statement{}, fmt.Errorf("sql: SET += prop %q: %w", k, err)
+		}
+		jsonSetParts = append(jsonSetParts, fmt.Sprintf("'$.%s'", k), valSQL)
+		args = append(args, valT.args...)
+	}
+
+	table := "nodes"
+	if binding.IsRel {
+		table = "edges"
+	}
+
+	sentinel := idSentinel{VarName: p.Variable, Alias: binding.Alias}
+	jsonSetExpr := fmt.Sprintf("json_set(%s)", strings.Join(jsonSetParts, ", "))
+	sqlStr := fmt.Sprintf("UPDATE %s SET props = %s WHERE id = ?", table, jsonSetExpr)
+	return Statement{
+		SQL:  sqlStr,
+		Args: append(args, sentinel),
+		Kind: KindUpdate,
+	}, nil
+}
+
+// translateRemoveProp emits:
+//
+//	UPDATE nodes SET props = json_remove(props, '$.prop') WHERE id = ?
+func (t *Translator) translateRemoveProp(p *cypher.RemovePropPlan, scope *cypher.BindingScope) (Statement, error) {
+	binding, ok := scope.Resolve(p.Variable)
+	if !ok {
+		return Statement{}, fmt.Errorf("sql: variable %q not in scope for REMOVE prop", p.Variable)
+	}
+
+	removeExpr := t.dialect.JSONRemove("props", "$."+p.Property)
+	table := "nodes"
+	if binding.IsRel {
+		table = "edges"
+	}
+
+	sentinel := idSentinel{VarName: p.Variable, Alias: binding.Alias}
+	sqlStr := fmt.Sprintf("UPDATE %s SET props = %s WHERE id = ?", table, removeExpr)
+	return Statement{SQL: sqlStr, Args: []any{sentinel}, Kind: KindUpdate}, nil
+}
+
+// translateRemoveLabel emits one UPDATE per label to remove, using:
+//
+//	UPDATE nodes SET labels = TRIM(REPLACE(',' || labels || ',', ',' || ? || ',', ','), ',') WHERE id = ?
+//
+// Wrapping with commas before REPLACE ensures correct boundary matching for all
+// positions (first, last, middle, only).
+func (t *Translator) translateRemoveLabel(p *cypher.RemoveLabelPlan, scope *cypher.BindingScope) ([]Statement, error) {
+	binding, ok := scope.Resolve(p.Variable)
+	if !ok {
+		return nil, fmt.Errorf("sql: variable %q not in scope for REMOVE label", p.Variable)
+	}
+	if binding.IsRel {
+		return nil, fmt.Errorf("sql: REMOVE label is not supported for relationships")
+	}
+
+	sentinel := idSentinel{VarName: p.Variable, Alias: binding.Alias}
+	var stmts []Statement
+	for _, label := range p.Labels {
+		sqlStr := "UPDATE nodes SET labels = TRIM(REPLACE(',' || labels || ',', ',' || ? || ',', ','), ',') WHERE id = ?"
+		stmts = append(stmts, Statement{
+			SQL:  sqlStr,
+			Args: []any{label, sentinel},
+			Kind: KindUpdate,
+		})
+	}
+	return stmts, nil
 }
 
 // translateDeleteNode emits the SQL for DELETE / DETACH DELETE of a node.

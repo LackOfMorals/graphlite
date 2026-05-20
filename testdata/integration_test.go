@@ -1918,3 +1918,69 @@ func TestIntegration_PropIsNotNull_FiltersNullProps(t *testing.T) {
 	got, _ := result.Records[0].Get("name")
 	assertString(t, cypher, "name", got, "Alice")
 }
+
+// ─── task-026: REMOVE prop, REMOVE label, SET += ─────────────────────────────
+
+func TestIntegration_RemoveProp_DeletesKey(t *testing.T) {
+	db := openDB(t)
+	setup(t, db, `CREATE (n:Person {name: "Alice", age: 30})`)
+
+	setup(t, db, `MATCH (n:Person {name: "Alice"}) REMOVE n.age`)
+
+	result := query(t, db, `MATCH (n:Person {name: "Alice"}) RETURN n.age AS age`, nil)
+	assertCount(t, `MATCH (n:Person {name: "Alice"}) RETURN n.age AS age`, result, 1)
+	got, _ := result.Records[0].Get("age")
+	if got != nil {
+		t.Errorf("expected age to be nil after REMOVE, got %v", got)
+	}
+}
+
+func TestIntegration_RemoveProp_PreservesOtherProps(t *testing.T) {
+	db := openDB(t)
+	setup(t, db, `CREATE (n:Person {name: "Alice", age: 30, city: "London"})`)
+
+	setup(t, db, `MATCH (n:Person {name: "Alice"}) REMOVE n.age`)
+
+	result := query(t, db, `MATCH (n:Person {name: "Alice"}) RETURN n.city AS city`, nil)
+	assertCount(t, `MATCH (n:Person)`, result, 1)
+	got, _ := result.Records[0].Get("city")
+	assertString(t, `REMOVE n.age preserves city`, "city", got, "London")
+}
+
+func TestIntegration_RemoveLabel_RemovesLabel(t *testing.T) {
+	db := openDB(t)
+	setup(t, db, `CREATE (n:Person:Admin {name: "Alice"})`)
+
+	setup(t, db, `MATCH (n:Admin {name: "Alice"}) REMOVE n:Admin`)
+
+	// Should still match as Person but not as Admin.
+	result := query(t, db, `MATCH (n:Person {name: "Alice"}) RETURN n.name AS name`, nil)
+	assertCount(t, `MATCH (n:Person)`, result, 1)
+
+	result2 := query(t, db, `MATCH (n:Admin {name: "Alice"}) RETURN n.name AS name`, nil)
+	assertCount(t, `MATCH (n:Admin) after REMOVE`, result2, 0)
+}
+
+func TestIntegration_SetMerge_AddsKeys(t *testing.T) {
+	db := openDB(t)
+	setup(t, db, `CREATE (n:Person {name: "Alice"})`)
+
+	setup(t, db, `MATCH (n:Person {name: "Alice"}) SET n += {score: 99}`)
+
+	result := query(t, db, `MATCH (n:Person {name: "Alice"}) RETURN n.score AS score`, nil)
+	assertCount(t, `MATCH (n:Person)`, result, 1)
+	got, _ := result.Records[0].Get("score")
+	assertInt64(t, `SET +=`, "score", got, 99)
+}
+
+func TestIntegration_SetMerge_PreservesExistingKeys(t *testing.T) {
+	db := openDB(t)
+	setup(t, db, `CREATE (n:Person {name: "Alice", age: 30})`)
+
+	setup(t, db, `MATCH (n:Person {name: "Alice"}) SET n += {score: 99}`)
+
+	result := query(t, db, `MATCH (n:Person {name: "Alice"}) RETURN n.age AS age`, nil)
+	assertCount(t, `MATCH (n:Person)`, result, 1)
+	got, _ := result.Records[0].Get("age")
+	assertInt64(t, `SET += preserves age`, "age", got, 30)
+}

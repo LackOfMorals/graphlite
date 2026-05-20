@@ -793,3 +793,32 @@ Key Decisions:
 - NOT IN and NOT STARTS WITH left as future work; parser falls back to RawExpr for now.
 
 Next Task: task-026
+
+================================================================================
+TASK-026: v0.2: REMOVE property/label and SET n += {map} property merge
+Date: 2026-05-20T13:00:00Z
+================================================================================
+
+Summary:
+Added REMOVE n.prop (→ json_remove), REMOVE n:Label (→ TRIM/REPLACE on comma-separated
+labels column), and SET n += {map} (→ json_set with multiple path/value pairs, preserving
+existing keys). Planner wires RemoveClause through planRemoveClause; SetMergePlan now
+handled via planSetClause Merge=true branch.
+
+Files Changed:
+- cypher/planner.go (planSetClause handles Merge=true; added planRemoveClause; wired *RemoveClause in switch)
+- cypher/ast.go (unchanged — RemoveClause/SetItem were already added by earlier partial work)
+- cypher/parser.go (unchanged — buildRemoveClause and SET+= parsing were already added)
+- cypher/plan.go (unchanged — RemovePropPlan, RemoveLabelPlan, SetMergePlan were already added)
+- sql/translator.go (added translateSetMerge, translateRemoveProp, translateRemoveLabel; wired into translateWritePlan)
+- sql/translator_test.go (unit tests for all three new operations)
+- testdata/integration_test.go (5 integration tests for REMOVE prop, REMOVE label, SET +=)
+
+Key Decisions:
+- SET += uses json_set(props, '$.k1', ?, ...) with sorted keys for deterministic SQL; avoids
+  json_patch to keep param binding consistent with other write operations.
+- REMOVE label uses TRIM(REPLACE(',' || labels || ',', ...)) pattern to handle all label
+  positions (first, last, middle, only) correctly.
+- Multiple labels in a single REMOVE n:A:B emit one UPDATE statement per label.
+
+Next Task: task-027
