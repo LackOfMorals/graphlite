@@ -505,7 +505,7 @@ tasks:
       CSV files, with :ID, :LABEL, :START_ID, :END_ID, :TYPE headers). Add bulk export for
       both JSON and CSV formats via graphlite.Export(ctx, w io.Writer, format ExportFormat).
       Imports run inside a single transaction with rollback on error, same as JSON import.
-    status: pending
+    status: completed
     dependencies:
       - task-026
       - task-020
@@ -515,7 +515,7 @@ tasks:
       - "Export JSON produces a file that can be re-imported via Import with FormatJSON"
       - "Export CSV produces node and edge files re-importable via Import with FormatCSV"
       - "Integration test round-trips a 500-node graph through export then import and verifies node/edge counts"
-    completed_at: null
+    completed_at: "2026-05-20T14:00:00Z"
 
   - id: task-028
     title: "v0.3: MERGE basic form and ON CREATE / ON MATCH"

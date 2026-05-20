@@ -822,3 +822,45 @@ Key Decisions:
 - Multiple labels in a single REMOVE n:A:B emit one UPDATE statement per label.
 
 Next Task: task-027
+
+================================================================================
+TASK-027: v0.2: CSV bulk import/export and JSON bulk export
+Date: 2026-05-20T14:00:00Z
+================================================================================
+
+Summary:
+Extended importer.go with FormatCSVNodes and FormatCSVEdges import formats and
+a new Export(ctx, w, format) method supporting ExportFormatJSON, ExportFormatCSVNodes,
+and ExportFormatCSVEdges. CSV node import parses Neo4j-compatible headers (:ID,
+:LABEL, name:type columns) and inserts nodes atomically. CSV edge import resolves
+:START_ID/:END_ID to existing DB integer primary keys and inserts edges atomically.
+JSON export writes {"nodes":[...],"edges":[...]} compatible with FormatJSON re-import.
+CSV exports write sorted property-key headers and value rows re-importable via the
+corresponding CSV import format. A 500-node round-trip integration test verifies
+export-then-import fidelity.
+
+Files Changed:
+- importer.go (extended — FormatCSVNodes, FormatCSVEdges import constants;
+  ExportFormat type with ExportFormatJSON/CSVNodes/CSVEdges; Export method;
+  importCSVNodes, importCSVEdges, exportJSON, exportCSVNodes, exportCSVEdges
+  implementations; parseCSVHeader, parseCSVPropValue, unmarshalProps,
+  splitLabelsExport, anyToString, sortedKeys helpers)
+- exporter_test.go (created — 18 tests covering all CSV/JSON import and export
+  paths including the 500-node round-trip acceptance test)
+
+Key Decisions:
+- CSV edge import uses DB integer primary keys as :START_ID/:END_ID (not file-local
+  strings). This differs from Neo4j admin import but is consistent with the
+  graphlite data model where node IDs are auto-assigned integers. The exported
+  :ID column from ExportFormatCSVNodes carries the DB ID, enabling a full CSV
+  round-trip: export nodes → import nodes → export edges (referencing DB IDs) →
+  import edges.
+- splitLabelsExport returns []string{} (not nil) for empty labels so JSON export
+  emits [] rather than null — required for FormatJSON re-import compatibility.
+- sortedKeys uses sort.Strings (idiomatic Go) for deterministic CSV header order.
+- unmarshalProps is a new internal helper (inverse of marshalProps) used by all
+  export paths; avoids duplicating JSON unmarshal logic.
+- anyToString converts property values to CSV strings; integer-valued float64s
+  are serialised without decimal point to improve readability.
+
+Next Task: task-028

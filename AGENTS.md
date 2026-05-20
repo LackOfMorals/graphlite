@@ -187,3 +187,7 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - `MATCH (a:L1), (b:L2) CREATE (a)-[:R]->(b)` (comma-separated MATCH + CREATE between existing nodes) is a known v0.1 limitation — the translateSequenceWrite path emits `n1.id` which SQLite rejects. Use inline chain CREATE or MATCH single pattern + CREATE instead.
 - `assertInt64` in integration tests must handle both `int64` and `float64` — SQLite returns JSON-decoded numeric values as `float64` through the `encoding/json` path when props are stored as JSON objects.
 - Use `errors.As(err, &target)` to walk wrapped error chains; do not reimplement the unwrapper interface manually.
+- `splitLabels` in `result.go` returns `nil` for empty strings; use `splitLabelsExport` (in `importer.go`) which returns `[]string{}` when JSON export requires `[]` not `null` in the output.
+- CSV edge import uses DB integer primary keys as `:START_ID`/`:END_ID` (not file-local strings like JSON import). Export node CSV first (`:ID` = DB integer), then export edge CSV referencing those IDs for a full round-trip.
+- `unmarshalProps` (in `importer.go`) is the inverse of `marshalProps` — use it in all export paths rather than duplicating `json.Unmarshal` inline.
+- `sortedKeys` in `importer.go` collects map keys and sorts with `sort.Strings` — use this wherever deterministic property key ordering is needed (CSV headers, JSON fragments).
