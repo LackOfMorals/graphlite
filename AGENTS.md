@@ -31,6 +31,19 @@ CGO_ENABLED=0 go test -count=1 ./...
 go vet ./...
 ```
 
+### Benchmarks
+```bash
+CGO_ENABLED=0 go test -bench=. -benchtime=10s ./bench/... | tee bench/results/latest.txt
+```
+Run a single benchmark (fast, 1s):
+```bash
+CGO_ENABLED=0 go test -run=^$ -bench=BenchmarkMatchNodeByID -benchtime=1s ./bench/...
+```
+Enable the 1M-node benchmark (disabled by default — ~30s setup, ~500MB RAM):
+```bash
+CGO_ENABLED=0 go test -bench=BenchmarkSingleHopTraversal_1M -bench-1m -benchtime=10s ./bench/...
+```
+
 ### TCK (Technology Compatibility Kit) — opt-in
 ```bash
 CGO_ENABLED=0 go test -tags=tck ./compat/... -v
@@ -208,4 +221,6 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - Property values round-trip through JSON: `int64` comes back as `float64`, `bool` comes back as `float64(0)`/`float64(1)`, `nil` stays `nil`. Test helpers must normalise for all three.
 - Float64 values lose precision through JSON if they have more than ~15 significant decimal digits. In property-based tests, generate floats as `float64(iv)*0.25` (integer multiples of 0.25) to guarantee exact JSON round-trip.
 - `testdata/rapid/` is auto-created by rapid for `.fail` reproduction files — add it to `.gitignore`.
+- Never call `b.Fatalf` inside `sync.Once` in benchmarks — `b.Fatalf` calls `runtime.Goexit()` which unwinds the goroutine but `sync.Once` marks the operation done, leaving the shared fixture variable nil. Store the error in a package-level `error` variable and call `b.Fatalf` after the `Once` returns.
+- Benchmark fixture databases (100K+ nodes) should be seeded via JSON bulk import (single `db.Import` call), not individual `CREATE` statements — bulk import is orders of magnitude faster and avoids per-statement parse/plan/translate overhead during setup.
 - After `go mod vendor`, rapid's vendor entry is present but the neo4j shim must be manually re-installed: `tail -n +3 scripts/graphlite_bridge.go > vendor/github.com/neo4j/neo4j-go-driver/v6/neo4j/graphlite_bridge.go` (strips the `//go:build ignore` line). The `scripts/apply-vendor-shim.sh` script expects the source at `internal/neo4jshim/graphlite_bridge.go` — that path is wrong; use the manual `tail` command instead.

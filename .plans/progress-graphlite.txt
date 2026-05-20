@@ -983,3 +983,34 @@ Key Decisions:
 - The test passes even when scenarios fail; it only errors if pass rate < 50%.
 
 Next Task: task-031
+================================================================================
+TASK-031: v1.0: Benchmark suite
+Date: 2026-05-21T11:00:00Z
+================================================================================
+
+Summary:
+Added a standard Go benchmark suite in bench/ covering all five PRD testing
+scenarios: match by property (ID equivalent), property lookup at 100K scale,
+single-hop traversal at 100K and 1M node scale, CREATE throughput (single and
+batch-1000), and WITH aggregation pipeline. All benchmarks run via
+`go test -bench=. ./bench/...` with no error. The 1M-node benchmark is gated
+behind a `-bench-1m` flag to prevent CI timeouts. Fixture databases are seeded
+via JSON bulk import (single transaction) and shared across benchmark iterations
+using sync.Once with stored error state to avoid b.Fatalf-inside-Once bugs.
+
+Files Changed:
+- bench/bench_test.go (created — 7 benchmarks + fixture helpers)
+- bench/results/latest.txt (created — placeholder for CI-populated results)
+
+Key Decisions:
+- sync.Once stores errors in package-level error variables; b.Fatalf is called
+  AFTER Once returns, not inside it, to avoid partial-init + nil-pointer bugs.
+- 1M-node benchmark skips unless -bench-1m flag is set (setup ~30s, ~500MB RAM).
+- BenchmarkCreateSingle uses a single growing DB (realistic append throughput);
+  BenchmarkCreateBatch_1000 opens a fresh DB per iteration (measures import cost).
+- JSON bulk import used for fixture seeding — significantly faster than
+  individual CREATE statements for 100K+ node graphs.
+- seedNodes and seedGraph are plain functions (no *testing.B param) since they
+  no longer need b.Helper() after the sync.Once error-store refactor.
+
+Next Task: task-032

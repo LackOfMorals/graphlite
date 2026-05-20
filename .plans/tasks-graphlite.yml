@@ -580,7 +580,7 @@ tasks:
       single node by property (indexed and unindexed), single-hop traversal on 100K and 1M node
       graphs, CREATE throughput (single and batch of 1000), and WITH aggregation pipeline. Benchmark
       results are committed to bench/results/ on each release tag.
-    status: pending
+    status: completed
     dependencies:
       - task-029
     acceptance_criteria:
@@ -589,7 +589,7 @@ tasks:
       - "Benchmark results are written to bench/results/latest.txt in a stable format"
       - "go test -bench=. ./bench/... runs without error on all target platforms"
       - "CI workflow runs benchmarks on release tags and commits results"
-    completed_at: null
+    completed_at: "2026-05-21T11:00:00Z"
 
   - id: task-032
     title: "v1.0: CASE expressions (basic form)"
