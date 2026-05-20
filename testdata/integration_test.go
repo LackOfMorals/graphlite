@@ -1504,3 +1504,157 @@ func TestIntegration_OptionalMatch_WholeNodeNullable(t *testing.T) {
 		}
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Feature: WITH pipelines and aggregation (task-024 / v0.2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestIntegration_With_CountRel verifies count(r) aggregation via WITH.
+// Each CREATE statement creates a new source node, so we create two distinct
+// source nodes each with one outgoing KNOWS edge and verify GROUP BY gives
+// one row per source node with cnt=1.
+func TestIntegration_With_CountRel(t *testing.T) {
+	db := openDB(t)
+	cypher := `MATCH (n:CRPerson)-[r:KNOWS]->() WITH n, count(r) AS cnt RETURN n.name AS name, cnt`
+
+	// Two separate source nodes, each with one KNOWS edge.
+	setup(t, db,
+		`CREATE (a:CRPerson {name: "Alice"})-[:KNOWS]->(b:CRPerson {name: "Bob"})`,
+		`CREATE (d:CRPerson {name: "Dave"})-[:KNOWS]->(e:CRPerson {name: "Eve"})`,
+	)
+
+	// Two source nodes each with cnt=1.
+	result := query(t, db, cypher, nil)
+	assertCount(t, cypher, result, 2)
+	// Each source node must have cnt=1.
+	for i, rec := range result.Records {
+		cntVal, _ := rec.Get("cnt")
+		assertInt64(t, cypher, fmt.Sprintf("cnt[%d]", i), cntVal, 1)
+	}
+}
+
+// TestIntegration_With_CountStar verifies count(*) aggregation via WITH.
+func TestIntegration_With_CountStar(t *testing.T) {
+	db := openDB(t)
+	cypher := `MATCH (n:Thing) WITH count(*) AS total RETURN total`
+
+	setup(t, db,
+		`CREATE (n:Thing {v: 1})`,
+		`CREATE (n:Thing {v: 2})`,
+		`CREATE (n:Thing {v: 3})`,
+	)
+
+	result := query(t, db, cypher, nil)
+	assertCount(t, cypher, result, 1)
+	assertInt64(t, cypher, "total", get(t, cypher, result, 0, "total"), 3)
+}
+
+// TestIntegration_With_SumAggregation verifies sum() aggregation via WITH.
+func TestIntegration_With_SumAggregation(t *testing.T) {
+	db := openDB(t)
+	cypher := `MATCH (n:Score) WITH sum(n.points) AS total RETURN total`
+
+	setup(t, db,
+		`CREATE (n:Score {points: 10})`,
+		`CREATE (n:Score {points: 20})`,
+		`CREATE (n:Score {points: 30})`,
+	)
+
+	result := query(t, db, cypher, nil)
+	assertCount(t, cypher, result, 1)
+	assertInt64(t, cypher, "total", get(t, cypher, result, 0, "total"), 60)
+}
+
+// TestIntegration_With_AvgAggregation verifies avg() aggregation via WITH.
+func TestIntegration_With_AvgAggregation(t *testing.T) {
+	db := openDB(t)
+	cypher := `MATCH (n:Grade) WITH avg(n.score) AS mean RETURN mean`
+
+	setup(t, db,
+		`CREATE (n:Grade {score: 80})`,
+		`CREATE (n:Grade {score: 90})`,
+		`CREATE (n:Grade {score: 100})`,
+	)
+
+	result := query(t, db, cypher, nil)
+	assertCount(t, cypher, result, 1)
+
+	// avg(80,90,100) = 90. SQLite returns a float for AVG.
+	v := get(t, cypher, result, 0, "mean")
+	var actual float64
+	switch n := v.(type) {
+	case float64:
+		actual = n
+	case int64:
+		actual = float64(n)
+	default:
+		t.Fatalf("query %q key %q: expected numeric, got %T %v", cypher, "mean", v, v)
+	}
+	if actual != 90.0 {
+		t.Errorf("query %q key %q: expected 90, got %v", cypher, "mean", actual)
+	}
+}
+
+// TestIntegration_With_MinMaxAggregation verifies min() and max() via WITH.
+func TestIntegration_With_MinMaxAggregation(t *testing.T) {
+	db := openDB(t)
+
+	setup(t, db,
+		`CREATE (n:Val {v: 5})`,
+		`CREATE (n:Val {v: 2})`,
+		`CREATE (n:Val {v: 8})`,
+		`CREATE (n:Val {v: 1})`,
+	)
+
+	minCypher := `MATCH (n:Val) WITH min(n.v) AS lo RETURN lo`
+	minResult := query(t, db, minCypher, nil)
+	assertCount(t, minCypher, minResult, 1)
+	assertInt64(t, minCypher, "lo", get(t, minCypher, minResult, 0, "lo"), 1)
+
+	maxCypher := `MATCH (n:Val) WITH max(n.v) AS hi RETURN hi`
+	maxResult := query(t, db, maxCypher, nil)
+	assertCount(t, maxCypher, maxResult, 1)
+	assertInt64(t, maxCypher, "hi", get(t, maxCypher, maxResult, 0, "hi"), 8)
+}
+
+// TestIntegration_With_CountAndReturn verifies the canonical pattern from
+// the task spec: MATCH ... WITH n, count(r) AS cnt RETURN n.prop AS p, cnt.
+// Each CREATE statement produces a new source node, so we use separate authors
+// each with a distinct number of outgoing WROTE edges and verify count per node.
+func TestIntegration_With_CountAndReturn(t *testing.T) {
+	db := openDB(t)
+	cypher := `MATCH (n:Author)-[r:WROTE]->() WITH n, count(r) AS cnt RETURN n.name AS name, cnt`
+
+	// Two distinct authors: one with one book, one with one book.
+	// Since each CREATE creates a new Author node, we get one Author per CREATE.
+	setup(t, db,
+		`CREATE (a:Author {name: "Tolkien"})-[:WROTE]->(b:Book {title: "LOTR"})`,
+		`CREATE (d:Author {name: "Rowling"})-[:WROTE]->(e:Book {title: "HP1"})`,
+	)
+
+	result := query(t, db, cypher, nil)
+	assertCount(t, cypher, result, 2)
+
+	// Each author has exactly one book, so cnt=1 for both.
+	counts := make(map[string]int64)
+	for _, rec := range result.Records {
+		name, _ := rec.Get("name")
+		cnt, _ := rec.Get("cnt")
+		n, ok := name.(string)
+		if !ok {
+			t.Fatalf("name is not string: %T %v", name, name)
+		}
+		switch c := cnt.(type) {
+		case int64:
+			counts[n] = c
+		case float64:
+			counts[n] = int64(c)
+		}
+	}
+	if counts["Tolkien"] != 1 {
+		t.Errorf("Tolkien count: expected 1, got %d", counts["Tolkien"])
+	}
+	if counts["Rowling"] != 1 {
+		t.Errorf("Rowling count: expected 1, got %d", counts["Rowling"])
+	}
+}

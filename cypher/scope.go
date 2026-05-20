@@ -32,6 +32,10 @@ type Binding struct {
 	// IsNullable is true when the variable was introduced by an OPTIONAL MATCH.
 	// Downstream WHERE and RETURN clauses must handle null values.
 	IsNullable bool
+	// AggExpr is non-nil for aggregate aliases bound in a WITH clause
+	// (e.g. count(r) AS cnt). The translator expands the alias back to the
+	// full aggregate expression when rendering the SELECT or HAVING clause.
+	AggExpr Expr
 }
 
 // BindingScope maps Cypher variable names to their SQL Binding descriptors.
