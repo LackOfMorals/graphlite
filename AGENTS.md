@@ -31,6 +31,15 @@ CGO_ENABLED=0 go test -count=1 ./...
 go vet ./...
 ```
 
+### TCK (Technology Compatibility Kit) — opt-in
+```bash
+CGO_ENABLED=0 go test -tags=tck ./compat/... -v
+```
+The TCK harness uses Godog (Cucumber for Go) and runs inline Gherkin scenarios
+against a real in-memory graphlite database. Scenarios tagged `@skip` are
+excluded; a pass-rate banner is printed at the end of the run. The harness is
+compiled only with `-tags=tck` to avoid slowing the main test suite.
+
 ### Build for all target platforms (cross-compile check)
 ```bash
 GOOS=linux   GOARCH=amd64 CGO_ENABLED=0 go build ./...
