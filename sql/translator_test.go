@@ -1494,3 +1494,82 @@ func TestTranslate_SingleHop_RelPropConstraint(t *testing.T) {
 		t.Errorf("expected '2020' literal in SQL, got: %s", result.SQL)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OPTIONAL MATCH SQL translation tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestTranslate_OptionalMatch_ProducesLeftJoin verifies that OPTIONAL MATCH
+// emits LEFT JOIN for both the edge and the end node tables.
+func TestTranslate_OptionalMatch_ProducesLeftJoin(t *testing.T) {
+	result := translateCypher(t, "MATCH (n:Person) OPTIONAL MATCH (n)-[r:KNOWS]->(m) RETURN n, m")
+	containsAll(t, result, "LEFT JOIN edges", "LEFT JOIN nodes")
+	// The regular MATCH start node must use an inner FROM, not a LEFT JOIN.
+	if strings.Contains(result.SQL, "LEFT JOIN nodes n0") {
+		t.Errorf("start node n0 must not be LEFT JOINed: %s", result.SQL)
+	}
+}
+
+// TestTranslate_OptionalMatch_NullableNodeProjection verifies that a nullable
+// node variable (from OPTIONAL MATCH) uses CASE WHEN so unmatched rows project
+// as SQL NULL rather than a json_object with null fields.
+func TestTranslate_OptionalMatch_NullableNodeProjection(t *testing.T) {
+	result := translateCypher(t, "MATCH (n:Person) OPTIONAL MATCH (n)-[r:KNOWS]->(m) RETURN n, m")
+	// m is nullable — must be wrapped in CASE WHEN.
+	if !strings.Contains(result.SQL, "CASE WHEN") {
+		t.Errorf("nullable node m should use CASE WHEN in SELECT, got: %s", result.SQL)
+	}
+	// n is not nullable — must NOT be wrapped in CASE WHEN.
+	// Count occurrences: there should be exactly one CASE WHEN (for m, not n).
+	caseCount := strings.Count(result.SQL, "CASE WHEN")
+	if caseCount != 1 {
+		t.Errorf("expected exactly 1 CASE WHEN (for m), got %d in: %s", caseCount, result.SQL)
+	}
+}
+
+// TestTranslate_OptionalMatch_NullableRelProjection verifies that a nullable
+// relationship variable uses CASE WHEN in the projection.
+func TestTranslate_OptionalMatch_NullableRelProjection(t *testing.T) {
+	result := translateCypher(t, "MATCH (n:Person) OPTIONAL MATCH (n)-[r:KNOWS]->(m) RETURN r")
+	if !strings.Contains(result.SQL, "CASE WHEN") {
+		t.Errorf("nullable rel r should use CASE WHEN in SELECT, got: %s", result.SQL)
+	}
+}
+
+// TestTranslate_OptionalMatch_IsNull verifies that "WHERE m IS NULL" after an
+// OPTIONAL MATCH translates to "<alias>.id IS NULL" (not a json_object check).
+func TestTranslate_OptionalMatch_IsNull(t *testing.T) {
+	result := translateCypher(t,
+		"MATCH (n:Person) OPTIONAL MATCH (n)-[r:KNOWS]->(m) WHERE m IS NULL RETURN n.name AS name")
+	containsAll(t, result, "IS NULL")
+	// Must reference the alias .id column, not json_object.
+	if strings.Contains(result.SQL, "json_object") && strings.Contains(result.SQL, "IS NULL") {
+		// Ensure the IS NULL is on .id, not on the json_object expression.
+		if strings.Contains(result.SQL, "json_object(") {
+			// Check that IS NULL comes after .id, not after json_object.
+			idIdx := strings.Index(result.SQL, ".id IS NULL")
+			if idIdx < 0 {
+				t.Errorf("IS NULL should be on .id column, got: %s", result.SQL)
+			}
+		}
+	}
+}
+
+// TestTranslate_OptionalMatch_IsNotNull verifies that "WHERE m IS NOT NULL"
+// translates to "<alias>.id IS NOT NULL".
+func TestTranslate_OptionalMatch_IsNotNull(t *testing.T) {
+	result := translateCypher(t,
+		"MATCH (n:Person) OPTIONAL MATCH (n)-[r:KNOWS]->(m) WHERE m IS NOT NULL RETURN n.name AS name")
+	containsAll(t, result, "IS NOT NULL")
+	if !strings.Contains(result.SQL, ".id IS NOT NULL") {
+		t.Errorf("IS NOT NULL should be on .id column, got: %s", result.SQL)
+	}
+}
+
+// TestTranslate_OptionalMatch_PropIsNull verifies that "WHERE m.name IS NULL"
+// translates correctly using json_extract.
+func TestTranslate_OptionalMatch_PropIsNull(t *testing.T) {
+	result := translateCypher(t,
+		"MATCH (n:Person) OPTIONAL MATCH (n)-[r:KNOWS]->(m) WHERE m.name IS NULL RETURN n.name AS name")
+	containsAll(t, result, "json_extract", "$.name", "IS NULL")
+}

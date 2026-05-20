@@ -162,16 +162,29 @@ func (t *Translator) translatePlan(plan cypher.LogicalPlan, scope *cypher.Bindin
 // translateReturnPlan handles RETURN plans, which include the full SELECT statement.
 func (t *Translator) translateReturnPlan(rp *cypher.ReturnPlan, scope *cypher.BindingScope) (string, error) {
 	// Gather FROM / JOIN clauses and WHERE conditions from the source plan.
+	// buildFromClause no longer side-effects t.args; args are carried in fc.
 	fc, err := t.buildFromClause(rp.Source, scope)
 	if err != nil {
 		return "", err
 	}
 
-	// Build SELECT list.
+	// Build SELECT list before assembling FROM/WHERE args so that any
+	// arg-producing expressions in the SELECT position (e.g. literal strings)
+	// are appended to t.args first, matching their position in the SQL text.
 	selectList, err := t.buildSelectList(rp.Projections, scope)
 	if err != nil {
 		return "", err
 	}
+
+	// Assemble bind args in SQL-text order:
+	//   SELECT args (already in t.args from buildSelectList above)
+	//   → JOIN ON args (fc.joinArgs; JOIN appears before WHERE in SQL)
+	//   → WHERE args (fc.whereArgs)
+	//   → extra WHERE args (fc.extraWhereArgs; extraWhere appears after whereFragments)
+	// ORDER BY args are appended later by the exprToSQL calls below.
+	t.args = append(t.args, fc.joinArgs...)
+	t.args = append(t.args, fc.whereArgs...)
+	t.args = append(t.args, fc.extraWhereArgs...)
 
 	var b strings.Builder
 
@@ -242,6 +255,8 @@ func (t *Translator) translateStandaloneMatch(mnp *cypher.MatchNodePlan, scope *
 	if err != nil {
 		return "", err
 	}
+	// Assemble bind args; standalone node match has only WHERE args (no JOINs).
+	t.args = append(t.args, fc.whereArgs...)
 	var b strings.Builder
 	b.WriteString("SELECT " + mnp.SQLAlias + ".id, " + mnp.SQLAlias + ".labels, " + mnp.SQLAlias + ".props")
 	b.WriteString(" FROM " + fc.from)
@@ -258,6 +273,11 @@ func (t *Translator) translateStandaloneFilter(fp *cypher.FilterPlan, scope *cyp
 	if err != nil {
 		return "", err
 	}
+	// Assemble bind args in SQL order before calling exprToSQL for the predicate:
+	//   JOIN ON args → WHERE args → extra WHERE args → predicate args (appended by exprToSQL).
+	t.args = append(t.args, fc.joinArgs...)
+	t.args = append(t.args, fc.whereArgs...)
+	t.args = append(t.args, fc.extraWhereArgs...)
 	predSQL, err := t.exprToSQL(fp.Predicate, scope)
 	if err != nil {
 		return "", fmt.Errorf("sql: WHERE predicate: %w", err)
@@ -289,11 +309,20 @@ type fromClause struct {
 	from string
 	// joins is the accumulated JOIN clauses (e.g. "JOIN edges r0 ON ...").
 	joins string
+	// joinArgs holds bind args for JOIN ON clauses. These must be appended to
+	// the translator's args slice before whereArgs because JOIN ON appears before
+	// WHERE in SQL text.
+	joinArgs []any
 	// whereFragments are WHERE conditions accumulated from label checks and
 	// inline property constraints on match nodes.
 	whereFragments []string
+	// whereArgs holds bind args for WHERE clause fragments.
+	whereArgs []any
 	// extraWhere is a WHERE predicate coming from an explicit FilterPlan.
 	extraWhere string
+	// extraWhereArgs holds bind args for the extraWhere predicate. These are
+	// appended after whereArgs because extraWhere appears after whereFragments.
+	extraWhereArgs []any
 }
 
 // buildFromClause recurses into the source plan and collects the FROM/JOIN/WHERE
@@ -316,11 +345,16 @@ func (t *Translator) buildFromClause(source cypher.LogicalPlan, scope *cypher.Bi
 		if err != nil {
 			return fromClause{}, err
 		}
-		predSQL, err := t.exprToSQL(s.Predicate, scope)
+		// Use a sub-translator so predicate args are captured separately from the
+		// source's join/where args. They must be appended after whereArgs at the
+		// final assembly point (extraWhere appears after whereFragments in SQL).
+		sub := &Translator{dialect: t.dialect}
+		predSQL, err := sub.exprToSQL(s.Predicate, scope)
 		if err != nil {
 			return fromClause{}, fmt.Errorf("sql: WHERE predicate: %w", err)
 		}
 		fc.extraWhere = predSQL
+		fc.extraWhereArgs = sub.args
 		return fc, nil
 
 	case *cypher.SequencePlan:
@@ -338,21 +372,24 @@ func (t *Translator) buildFromClauseForMatchNode(mnp *cypher.MatchNodePlan, scop
 		from: "nodes " + alias,
 	}
 
-	// Label constraints.
+	// Label constraints go to WHERE; args collected into fc.whereArgs so the
+	// caller can assemble t.args in SQL order (JOIN ON args before WHERE args).
 	for _, label := range mnp.Labels {
 		pred, args := t.dialect.LabelContains(alias+".labels", label)
 		fc.whereFragments = append(fc.whereFragments, pred)
-		t.args = append(t.args, args...)
+		fc.whereArgs = append(fc.whereArgs, args...)
 	}
 
 	// Inline property constraints.
 	for key, expr := range mnp.Props {
-		valSQL, err := t.exprToSQL(expr, scope)
+		sub := &Translator{dialect: t.dialect}
+		valSQL, err := sub.exprToSQL(expr, scope)
 		if err != nil {
 			return fromClause{}, fmt.Errorf("sql: node prop constraint %q: %w", key, err)
 		}
 		jsonExpr := t.dialect.JSONExtract(alias+".props", "$."+key)
 		fc.whereFragments = append(fc.whereFragments, jsonExpr+" = "+valSQL)
+		fc.whereArgs = append(fc.whereArgs, sub.args...)
 	}
 
 	return fc, nil
@@ -360,6 +397,16 @@ func (t *Translator) buildFromClauseForMatchNode(mnp *cypher.MatchNodePlan, scop
 
 // buildFromClauseForMatchRel handles a MatchRelPlan (single-hop or part of a
 // multi-hop chain).
+//
+// For OPTIONAL MATCH (mrp.Optional == true) the relationship-type, relationship-
+// property, end-node-label, and end-node-property constraints are placed in the
+// JOIN ON clause rather than the WHERE clause. Putting them in WHERE would turn
+// the LEFT JOIN into an effective INNER JOIN, eliminating rows where the optional
+// pattern did not match.
+//
+// Arg ordering note: bind args must match the positional "?" order in the SQL.
+// For optional match the JOIN ON clauses precede WHERE in SQL, so edge/end-node
+// args are appended to t.args before start-node args.
 func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope *cypher.BindingScope) (fromClause, error) {
 	startAlias := mrp.StartNode.SQLAlias
 	// If StartNode has no alias (e.g. start variable already bound in a prior hop),
@@ -375,106 +422,178 @@ func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope 
 	endAlias := mrp.EndNode.SQLAlias
 	relAlias := mrp.RelSQLAlias
 
-	// Build the primary FROM as "nodes <startAlias>" and JOIN edges + end nodes.
 	from := "nodes " + startAlias
-
 	var joinParts []string
 	var whereParts []string
+	fc := fromClause{from: from}
 
-	// Start node label constraints.
-	for _, label := range mrp.StartNode.Labels {
-		pred, args := t.dialect.LabelContains(startAlias+".labels", label)
-		whereParts = append(whereParts, pred)
-		t.args = append(t.args, args...)
-	}
-
-	// Start node inline property constraints.
-	for key, expr := range mrp.StartNode.Props {
-		valSQL, err := t.exprToSQL(expr, scope)
-		if err != nil {
-			return fromClause{}, fmt.Errorf("sql: start node prop constraint %q: %w", key, err)
-		}
-		jsonExpr := t.dialect.JSONExtract(startAlias+".props", "$."+key)
-		whereParts = append(whereParts, jsonExpr+" = "+valSQL)
-	}
-
-	// JOIN edges table.
-	edgeJoinKind := "JOIN"
 	if mrp.Optional {
-		edgeJoinKind = "LEFT JOIN"
-	}
-	edgeJoin := fmt.Sprintf("%s edges %s ON ", edgeJoinKind, relAlias)
-	if mrp.Undirected {
-		// Undirected: match either direction.
-		edgeJoin += fmt.Sprintf("(%s.start_id = %s.id OR %s.end_id = %s.id)",
-			relAlias, startAlias, relAlias, startAlias)
-	} else if mrp.ToRight {
-		edgeJoin += fmt.Sprintf("%s.start_id = %s.id", relAlias, startAlias)
-	} else {
-		// ToLeft: <-[r]-
-		edgeJoin += fmt.Sprintf("%s.end_id = %s.id", relAlias, startAlias)
-	}
-	joinParts = append(joinParts, edgeJoin)
+		// ── OPTIONAL MATCH path ───────────────────────────────────────────────
+		//
+		// SQL structure:
+		//   FROM nodes n0
+		//   LEFT JOIN edges rN ON <direction> [AND type=?] [AND relProps=?...]
+		//   LEFT JOIN nodes nM ON <direction> [AND labelCheck=?...] [AND props=?...]
+		//   WHERE [startNode label/prop constraints]
+		//
+		// Args must appear in SQL order: JOIN ON args first, then WHERE args.
+		// These are stored in fc.joinArgs and fc.whereArgs respectively so the
+		// caller (buildFromClauseForSequence → translateReturnPlan) can assemble
+		// t.args in the correct order regardless of which step is processed first.
 
-	// JOIN end node.
-	nodeJoinKind := "JOIN"
-	if mrp.Optional {
-		nodeJoinKind = "LEFT JOIN"
-	}
-	nodeJoin := fmt.Sprintf("%s nodes %s ON ", nodeJoinKind, endAlias)
-	if mrp.Undirected {
-		nodeJoin += fmt.Sprintf("(%s.id = CASE WHEN %s.start_id = %s.id THEN %s.end_id ELSE %s.start_id END)",
-			endAlias, relAlias, startAlias, relAlias, relAlias)
-	} else if mrp.ToRight {
-		nodeJoin += fmt.Sprintf("%s.id = %s.end_id", endAlias, relAlias)
-	} else {
-		nodeJoin += fmt.Sprintf("%s.id = %s.start_id", endAlias, relAlias)
-	}
-	joinParts = append(joinParts, nodeJoin)
-
-	// Relationship type constraints.
-	for _, relType := range mrp.Types {
-		whereParts = append(whereParts, relAlias+".type = ?")
-		t.args = append(t.args, relType)
-	}
-
-	// Relationship inline property constraints.
-	for key, expr := range mrp.RelProps {
-		valSQL, err := t.exprToSQL(expr, scope)
-		if err != nil {
-			return fromClause{}, fmt.Errorf("sql: rel prop constraint %q: %w", key, err)
+		// 1. Build edge LEFT JOIN ON clause.
+		edgeOnParts := []string{t.directionCond(mrp, relAlias, startAlias)}
+		for _, relType := range mrp.Types {
+			edgeOnParts = append(edgeOnParts, relAlias+".type = ?")
+			fc.joinArgs = append(fc.joinArgs, relType)
 		}
-		jsonExpr := t.dialect.JSONExtract(relAlias+".props", "$."+key)
-		whereParts = append(whereParts, jsonExpr+" = "+valSQL)
-	}
-
-	// End node label constraints.
-	for _, label := range mrp.EndNode.Labels {
-		pred, args := t.dialect.LabelContains(endAlias+".labels", label)
-		whereParts = append(whereParts, pred)
-		t.args = append(t.args, args...)
-	}
-
-	// End node inline property constraints.
-	for key, expr := range mrp.EndNode.Props {
-		valSQL, err := t.exprToSQL(expr, scope)
-		if err != nil {
-			return fromClause{}, fmt.Errorf("sql: end node prop constraint %q: %w", key, err)
+		for key, expr := range mrp.RelProps {
+			sub := &Translator{dialect: t.dialect}
+			valSQL, err := sub.exprToSQL(expr, scope)
+			if err != nil {
+				return fromClause{}, fmt.Errorf("sql: rel prop constraint %q: %w", key, err)
+			}
+			edgeOnParts = append(edgeOnParts, t.dialect.JSONExtract(relAlias+".props", "$."+key)+" = "+valSQL)
+			fc.joinArgs = append(fc.joinArgs, sub.args...)
 		}
-		jsonExpr := t.dialect.JSONExtract(endAlias+".props", "$."+key)
-		whereParts = append(whereParts, jsonExpr+" = "+valSQL)
+		joinParts = append(joinParts, fmt.Sprintf("LEFT JOIN edges %s ON %s",
+			relAlias, strings.Join(edgeOnParts, " AND ")))
+
+		// 2. Build end-node LEFT JOIN ON clause.
+		nodeOnParts := []string{t.endNodeCond(mrp, relAlias, startAlias, endAlias)}
+		for _, label := range mrp.EndNode.Labels {
+			pred, args := t.dialect.LabelContains(endAlias+".labels", label)
+			nodeOnParts = append(nodeOnParts, pred)
+			fc.joinArgs = append(fc.joinArgs, args...)
+		}
+		for key, expr := range mrp.EndNode.Props {
+			sub := &Translator{dialect: t.dialect}
+			valSQL, err := sub.exprToSQL(expr, scope)
+			if err != nil {
+				return fromClause{}, fmt.Errorf("sql: end node prop constraint %q: %w", key, err)
+			}
+			nodeOnParts = append(nodeOnParts, t.dialect.JSONExtract(endAlias+".props", "$."+key)+" = "+valSQL)
+			fc.joinArgs = append(fc.joinArgs, sub.args...)
+		}
+		joinParts = append(joinParts, fmt.Sprintf("LEFT JOIN nodes %s ON %s",
+			endAlias, strings.Join(nodeOnParts, " AND ")))
+
+		// 3. Start-node constraints go to WHERE. Args stored in fc.whereArgs so
+		//    the caller can append them after fc.joinArgs when assembling t.args.
+		for _, label := range mrp.StartNode.Labels {
+			pred, args := t.dialect.LabelContains(startAlias+".labels", label)
+			whereParts = append(whereParts, pred)
+			fc.whereArgs = append(fc.whereArgs, args...)
+		}
+		for key, expr := range mrp.StartNode.Props {
+			sub := &Translator{dialect: t.dialect}
+			valSQL, err := sub.exprToSQL(expr, scope)
+			if err != nil {
+				return fromClause{}, fmt.Errorf("sql: start node prop constraint %q: %w", key, err)
+			}
+			whereParts = append(whereParts, t.dialect.JSONExtract(startAlias+".props", "$."+key)+" = "+valSQL)
+			fc.whereArgs = append(fc.whereArgs, sub.args...)
+		}
+	} else {
+		// ── Regular MATCH path ────────────────────────────────────────────────
+		//
+		// All constraints go to WHERE; JOIN ON only carries structural conditions.
+		// Args order: start-node → edge → end-node (matches WHERE left-to-right).
+
+		// Start node constraints.
+		for _, label := range mrp.StartNode.Labels {
+			pred, args := t.dialect.LabelContains(startAlias+".labels", label)
+			whereParts = append(whereParts, pred)
+			fc.whereArgs = append(fc.whereArgs, args...)
+		}
+		for key, expr := range mrp.StartNode.Props {
+			sub := &Translator{dialect: t.dialect}
+			valSQL, err := sub.exprToSQL(expr, scope)
+			if err != nil {
+				return fromClause{}, fmt.Errorf("sql: start node prop constraint %q: %w", key, err)
+			}
+			whereParts = append(whereParts, t.dialect.JSONExtract(startAlias+".props", "$."+key)+" = "+valSQL)
+			fc.whereArgs = append(fc.whereArgs, sub.args...)
+		}
+
+		// Edge JOIN (structural condition only; type/prop constraints go to WHERE).
+		joinParts = append(joinParts, fmt.Sprintf("JOIN edges %s ON %s",
+			relAlias, t.directionCond(mrp, relAlias, startAlias)))
+
+		// Edge constraints to WHERE.
+		for _, relType := range mrp.Types {
+			whereParts = append(whereParts, relAlias+".type = ?")
+			fc.whereArgs = append(fc.whereArgs, relType)
+		}
+		for key, expr := range mrp.RelProps {
+			sub := &Translator{dialect: t.dialect}
+			valSQL, err := sub.exprToSQL(expr, scope)
+			if err != nil {
+				return fromClause{}, fmt.Errorf("sql: rel prop constraint %q: %w", key, err)
+			}
+			whereParts = append(whereParts, t.dialect.JSONExtract(relAlias+".props", "$."+key)+" = "+valSQL)
+			fc.whereArgs = append(fc.whereArgs, sub.args...)
+		}
+
+		// End node JOIN (structural condition only).
+		joinParts = append(joinParts, fmt.Sprintf("JOIN nodes %s ON %s",
+			endAlias, t.endNodeCond(mrp, relAlias, startAlias, endAlias)))
+
+		// End node constraints to WHERE.
+		for _, label := range mrp.EndNode.Labels {
+			pred, args := t.dialect.LabelContains(endAlias+".labels", label)
+			whereParts = append(whereParts, pred)
+			fc.whereArgs = append(fc.whereArgs, args...)
+		}
+		for key, expr := range mrp.EndNode.Props {
+			sub := &Translator{dialect: t.dialect}
+			valSQL, err := sub.exprToSQL(expr, scope)
+			if err != nil {
+				return fromClause{}, fmt.Errorf("sql: end node prop constraint %q: %w", key, err)
+			}
+			whereParts = append(whereParts, t.dialect.JSONExtract(endAlias+".props", "$."+key)+" = "+valSQL)
+			fc.whereArgs = append(fc.whereArgs, sub.args...)
+		}
 	}
 
-	fc := fromClause{
-		from:           from,
-		joins:          strings.Join(joinParts, " "),
-		whereFragments: whereParts,
-	}
+	fc.joins = strings.Join(joinParts, " ")
+	fc.whereFragments = whereParts
 	return fc, nil
+}
+
+// directionCond returns the structural ON predicate for the edge join
+// (direction-only, no type or property constraints).
+func (t *Translator) directionCond(mrp *cypher.MatchRelPlan, relAlias, startAlias string) string {
+	if mrp.Undirected {
+		return fmt.Sprintf("(%s.start_id = %s.id OR %s.end_id = %s.id)",
+			relAlias, startAlias, relAlias, startAlias)
+	}
+	if mrp.ToRight {
+		return fmt.Sprintf("%s.start_id = %s.id", relAlias, startAlias)
+	}
+	// ToLeft: <-[r]-
+	return fmt.Sprintf("%s.end_id = %s.id", relAlias, startAlias)
+}
+
+// endNodeCond returns the structural ON predicate for the end-node join.
+func (t *Translator) endNodeCond(mrp *cypher.MatchRelPlan, relAlias, startAlias, endAlias string) string {
+	if mrp.Undirected {
+		return fmt.Sprintf("(%s.id = CASE WHEN %s.start_id = %s.id THEN %s.end_id ELSE %s.start_id END)",
+			endAlias, relAlias, startAlias, relAlias, relAlias)
+	}
+	if mrp.ToRight {
+		return fmt.Sprintf("%s.id = %s.end_id", endAlias, relAlias)
+	}
+	return fmt.Sprintf("%s.id = %s.start_id", endAlias, relAlias)
 }
 
 // buildFromClauseForSequence handles a SequencePlan that appears in the source
 // position (a chain of match plans for multi-hop queries).
+//
+// Arg ordering invariant: JOIN ON args from all steps are accumulated into
+// allJoinArgs; WHERE args from all steps into allWhereArgs. The caller must
+// append allJoinArgs before allWhereArgs when assembling t.args, because SQL
+// places JOIN ON clauses before WHERE.
 func (t *Translator) buildFromClauseForSequence(sp *cypher.SequencePlan, scope *cypher.BindingScope) (fromClause, error) {
 	if len(sp.Steps) == 0 {
 		return fromClause{}, fmt.Errorf("sql: empty SequencePlan")
@@ -489,7 +608,14 @@ func (t *Translator) buildFromClauseForSequence(sp *cypher.SequencePlan, scope *
 	// Promote any extraWhere from the first step so it is surfaced at the top
 	// level (e.g. a FilterPlan wrapping the first hop contributes a WHERE fragment).
 	extraWhere := baseFC.extraWhere
+	extraWhereArgs := baseFC.extraWhereArgs
 	baseFC.extraWhere = ""
+	baseFC.extraWhereArgs = nil
+
+	var allJoinArgs []any
+	var allWhereArgs []any
+	allJoinArgs = append(allJoinArgs, baseFC.joinArgs...)
+	allWhereArgs = append(allWhereArgs, baseFC.whereArgs...)
 
 	allWhere := baseFC.whereFragments
 	allJoins := baseFC.joins
@@ -500,7 +626,8 @@ func (t *Translator) buildFromClauseForSequence(sp *cypher.SequencePlan, scope *
 		if err != nil {
 			return fromClause{}, err
 		}
-		// Each subsequent hop appends JOINs and WHERE conditions.
+		// Accumulate JOIN fragments and args (JOIN ON appears before WHERE in SQL,
+		// so joinArgs must be assembled before whereArgs at the final call site).
 		if fc.joins != "" {
 			if allJoins != "" {
 				allJoins += " " + fc.joins
@@ -508,17 +635,25 @@ func (t *Translator) buildFromClauseForSequence(sp *cypher.SequencePlan, scope *
 				allJoins = fc.joins
 			}
 		}
+		allJoinArgs = append(allJoinArgs, fc.joinArgs...)
 		allWhere = append(allWhere, fc.whereFragments...)
+		allWhereArgs = append(allWhereArgs, fc.whereArgs...)
 		if fc.extraWhere != "" {
+			// An inner FilterPlan: fold its predicate and args into the WHERE
+			// accumulator in position (they follow this step's whereFragments).
 			allWhere = append(allWhere, fc.extraWhere)
+			allWhereArgs = append(allWhereArgs, fc.extraWhereArgs...)
 		}
 	}
 
 	return fromClause{
 		from:           baseFC.from,
 		joins:          allJoins,
+		joinArgs:       allJoinArgs,
 		whereFragments: allWhere,
+		whereArgs:      allWhereArgs,
 		extraWhere:     extraWhere,
+		extraWhereArgs: extraWhereArgs,
 	}, nil
 }
 
@@ -599,19 +734,51 @@ func (t *Translator) exprToSQL(expr cypher.Expr, scope *cypher.BindingScope) (st
 			return "", fmt.Errorf("sql: variable %q not in scope", e.Name)
 		}
 		if binding.IsNode {
-			// Return a JSON object representing the node.
-			return fmt.Sprintf(
+			obj := fmt.Sprintf(
 				"json_object('id', %[1]s.id, 'labels', %[1]s.labels, 'props', json(%[1]s.props))",
 				binding.Alias,
-			), nil
+			)
+			if binding.IsNullable {
+				// Wrap in CASE WHEN so unmatched OPTIONAL MATCH rows project as NULL,
+				// not as a json_object with null fields.
+				return fmt.Sprintf("CASE WHEN %s.id IS NULL THEN NULL ELSE %s END", binding.Alias, obj), nil
+			}
+			return obj, nil
 		}
 		if binding.IsRel {
-			return fmt.Sprintf(
+			obj := fmt.Sprintf(
 				"json_object('id', %[1]s.id, 'type', %[1]s.type, 'start_id', %[1]s.start_id, 'end_id', %[1]s.end_id, 'props', json(%[1]s.props))",
 				binding.Alias,
-			), nil
+			)
+			if binding.IsNullable {
+				return fmt.Sprintf("CASE WHEN %s.id IS NULL THEN NULL ELSE %s END", binding.Alias, obj), nil
+			}
+			return obj, nil
 		}
 		return binding.Column, nil
+
+	case *cypher.NullCheckExpr:
+		// IS NULL / IS NOT NULL: for variable references use the .id column so the
+		// check is meaningful on LEFT JOIN results; for property expressions the
+		// json_extract result is already NULL when the row is unmatched.
+		var innerSQL string
+		if ve, ok := e.Expr.(*cypher.VarExpr); ok {
+			b, ok := scope.Resolve(ve.Name)
+			if !ok {
+				return "", fmt.Errorf("sql: variable %q not in scope", ve.Name)
+			}
+			innerSQL = b.Alias + ".id"
+		} else {
+			var err error
+			innerSQL, err = t.exprToSQL(e.Expr, scope)
+			if err != nil {
+				return "", err
+			}
+		}
+		if e.IsNotNull {
+			return fmt.Sprintf("(%s IS NOT NULL)", innerSQL), nil
+		}
+		return fmt.Sprintf("(%s IS NULL)", innerSQL), nil
 
 	case *cypher.ComparisonExpr:
 		leftSQL, err := t.exprToSQL(e.Left, scope)
@@ -1067,6 +1234,10 @@ func (t *Translator) buildMatchForWriteSelect(readSteps []cypher.LogicalPlan, sc
 	if err != nil {
 		return Statement{}, fmt.Errorf("sql: match-for-write FROM clause: %w", err)
 	}
+	// Assemble matchT.args in SQL order (JOIN ON before WHERE).
+	matchT.args = append(matchT.args, fc.joinArgs...)
+	matchT.args = append(matchT.args, fc.whereArgs...)
+	matchT.args = append(matchT.args, fc.extraWhereArgs...)
 
 	// Build the SELECT list: one "<alias>.id AS <varName>" per named variable.
 	// Sort variable names for deterministic column ordering.

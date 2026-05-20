@@ -1307,3 +1307,200 @@ func TestIntegration_MatchByPropertyInlinePattern(t *testing.T) {
 	assertCount(t, cypher, result, 1)
 	assertString(t, cypher, "host", get(t, cypher, result, 0, "host"), "db1")
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Feature: OPTIONAL MATCH (left-join semantics)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestIntegration_OptionalMatch_Matched verifies that OPTIONAL MATCH returns
+// the optional variable's data when the pattern does match.
+func TestIntegration_OptionalMatch_Matched(t *testing.T) {
+	db := openDB(t)
+	q := `MATCH (n:Person) OPTIONAL MATCH (n)-[r:KNOWS]->(m:Person) RETURN n.name AS name, m.name AS friend`
+
+	// CREATE produces two Person nodes (Alice and Bob).
+	// MATCH (n:Person) returns both; OPTIONAL MATCH finds KNOWS→Bob for Alice
+	// and nothing for Bob — so two rows total.
+	setup(t, db,
+		`CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})`,
+	)
+
+	result := query(t, db, q, nil)
+	assertCount(t, q, result, 2)
+
+	friends := make(map[string]any)
+	for _, rec := range result.Records {
+		n, _ := rec.Get("name")
+		f, _ := rec.Get("friend")
+		if s, ok := n.(string); ok {
+			friends[s] = f
+		}
+	}
+	if friends["Alice"] != "Bob" {
+		t.Errorf("query %q: Alice's friend should be Bob, got %v", q, friends["Alice"])
+	}
+	if friends["Bob"] != nil {
+		t.Errorf("query %q: Bob's friend should be nil (no outgoing KNOWS), got %v", q, friends["Bob"])
+	}
+}
+
+// TestIntegration_OptionalMatch_Unmatched verifies that OPTIONAL MATCH returns
+// NULL for the optional variable when the pattern does not match.
+func TestIntegration_OptionalMatch_Unmatched(t *testing.T) {
+	db := openDB(t)
+	q := `MATCH (n:Person) OPTIONAL MATCH (n)-[r:KNOWS]->(m:Person) RETURN n.name AS name, m.name AS friend`
+
+	// Alice has no outgoing KNOWS relationships.
+	setup(t, db, `CREATE (n:Person {name: "Alice"})`)
+
+	result := query(t, db, q, nil)
+	assertCount(t, q, result, 1)
+	assertString(t, q, "name", get(t, q, result, 0, "name"), "Alice")
+	// m is unmatched — the value must be nil (not a json object with null fields).
+	friend, ok := result.Records[0].Get("friend")
+	if !ok {
+		t.Fatalf("query %q: record[0] missing key 'friend'", q)
+	}
+	if friend != nil {
+		t.Errorf("query %q: unmatched OPTIONAL MATCH variable should be nil, got %T %v", q, friend, friend)
+	}
+}
+
+// TestIntegration_OptionalMatch_MixedRows verifies left-join semantics across
+// multiple base nodes: nodes with a matching optional pattern return data,
+// nodes without a match return null for the optional variable.
+func TestIntegration_OptionalMatch_MixedRows(t *testing.T) {
+	db := openDB(t)
+	q := `MATCH (n:Person) OPTIONAL MATCH (n)-[:KNOWS]->(m:Person) RETURN n.name AS name, m.name AS friend ORDER BY n.name ASC`
+
+	setup(t, db,
+		`CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})`,
+		`CREATE (n:Person {name: "Carol"})`,
+	)
+
+	result := query(t, db, q, nil)
+	// Three Person nodes (Alice, Bob, Carol); Alice has a KNOWS→Bob match;
+	// Bob and Carol have no outgoing KNOWS → their optional rows are null.
+	// Total rows = 3 (one per Person node, left-join style).
+	assertCount(t, q, result, 3)
+
+	// Build a map name→friend for easier assertion.
+	friends := make(map[string]any)
+	for _, rec := range result.Records {
+		n, _ := rec.Get("name")
+		f, _ := rec.Get("friend")
+		if s, ok := n.(string); ok {
+			friends[s] = f
+		}
+	}
+
+	if friends["Alice"] != "Bob" {
+		t.Errorf("Alice should know Bob, got %v", friends["Alice"])
+	}
+	if friends["Bob"] != nil {
+		t.Errorf("Bob has no outgoing KNOWS, friend should be nil, got %v", friends["Bob"])
+	}
+	if friends["Carol"] != nil {
+		t.Errorf("Carol has no outgoing KNOWS, friend should be nil, got %v", friends["Carol"])
+	}
+}
+
+// TestIntegration_OptionalMatch_WhereIsNotNull verifies that WHERE m IS NOT NULL
+// after OPTIONAL MATCH correctly filters out rows where the pattern did not match.
+func TestIntegration_OptionalMatch_WhereIsNotNull(t *testing.T) {
+	db := openDB(t)
+	q := `MATCH (n:Person) OPTIONAL MATCH (n)-[:KNOWS]->(m:Person) WHERE m IS NOT NULL RETURN n.name AS name`
+
+	setup(t, db,
+		`CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})`,
+		`CREATE (n:Person {name: "Carol"})`,
+	)
+
+	result := query(t, db, q, nil)
+	// Only Alice matches the optional pattern; Bob and Carol are filtered out.
+	assertCount(t, q, result, 1)
+	assertString(t, q, "name", get(t, q, result, 0, "name"), "Alice")
+}
+
+// TestIntegration_OptionalMatch_WhereIsNull verifies that WHERE m IS NULL
+// after OPTIONAL MATCH keeps only rows where the optional pattern did not match.
+func TestIntegration_OptionalMatch_WhereIsNull(t *testing.T) {
+	db := openDB(t)
+	q := `MATCH (n:Person) OPTIONAL MATCH (n)-[:KNOWS]->(m:Person) WHERE m IS NULL RETURN n.name AS name`
+
+	setup(t, db,
+		`CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})`,
+		`CREATE (n:Person {name: "Carol"})`,
+	)
+
+	result := query(t, db, q, nil)
+	// Bob (no outgoing KNOWS) and Carol (no outgoing KNOWS) match m IS NULL.
+	// Alice does NOT because her KNOWS→Bob matched the optional pattern.
+	assertCount(t, q, result, 2)
+	names := make(map[string]bool)
+	for _, rec := range result.Records {
+		if v, ok := rec.Get("name"); ok {
+			if s, ok := v.(string); ok {
+				names[s] = true
+			}
+		}
+	}
+	if names["Alice"] {
+		t.Errorf("Alice has a KNOWS match so should not appear in m IS NULL results")
+	}
+	if !names["Bob"] || !names["Carol"] {
+		t.Errorf("Bob and Carol should appear in m IS NULL results, got %v", names)
+	}
+}
+
+// TestIntegration_OptionalMatch_PropIsNotNull verifies that WHERE m.name IS NOT NULL
+// filters using the optional node's property.
+func TestIntegration_OptionalMatch_PropIsNotNull(t *testing.T) {
+	db := openDB(t)
+	q := `MATCH (n:Person) OPTIONAL MATCH (n)-[:KNOWS]->(m:Person) WHERE m.name IS NOT NULL RETURN n.name AS name, m.name AS friend`
+
+	setup(t, db,
+		`CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})`,
+		`CREATE (n:Person {name: "Carol"})`,
+	)
+
+	result := query(t, db, q, nil)
+	assertCount(t, q, result, 1)
+	assertString(t, q, "name", get(t, q, result, 0, "name"), "Alice")
+	assertString(t, q, "friend", get(t, q, result, 0, "friend"), "Bob")
+}
+
+// TestIntegration_OptionalMatch_WholeNodeNullable verifies that projecting the
+// whole nullable node variable returns a *Node for matched rows and nil for
+// unmatched rows.
+func TestIntegration_OptionalMatch_WholeNodeNullable(t *testing.T) {
+	db := openDB(t)
+	q := `MATCH (n:Person) OPTIONAL MATCH (n)-[:KNOWS]->(m:Person) RETURN n.name AS name, m AS friend`
+
+	setup(t, db,
+		`CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})`,
+		`CREATE (n:Person {name: "Carol"})`,
+	)
+
+	result := query(t, db, q, nil)
+	assertCount(t, q, result, 3)
+
+	for _, rec := range result.Records {
+		name, _ := rec.Get("name")
+		friend, _ := rec.Get("friend")
+
+		switch name {
+		case "Alice":
+			node, ok := friend.(*graphlite.Node)
+			if !ok {
+				t.Errorf("Alice's friend should be *Node, got %T %v", friend, friend)
+			} else if node.Props["name"] != "Bob" {
+				t.Errorf("Alice's friend should be Bob, got %v", node.Props["name"])
+			}
+		case "Bob", "Carol":
+			if friend != nil {
+				t.Errorf("%v has no outgoing KNOWS, friend should be nil, got %T %v", name, friend, friend)
+			}
+		}
+	}
+}

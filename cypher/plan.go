@@ -88,6 +88,17 @@ type RawExpr struct {
 
 func (*RawExpr) exprNode() {}
 
+// NullCheckExpr represents an IS NULL or IS NOT NULL predicate.
+// Used for OPTIONAL MATCH patterns where variables may be unbound.
+type NullCheckExpr struct {
+	// Expr is the subject expression (typically a VarExpr or PropExpr).
+	Expr Expr
+	// IsNotNull is true for IS NOT NULL, false for IS NULL.
+	IsNotNull bool
+}
+
+func (*NullCheckExpr) exprNode() {}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MATCH plan nodes
 // ─────────────────────────────────────────────────────────────────────────────

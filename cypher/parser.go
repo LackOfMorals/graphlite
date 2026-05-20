@@ -705,8 +705,8 @@ func buildUnaryExpr(ctx *parser.OC_UnaryAddOrSubtractExpressionContext) (Expr, e
 }
 
 // buildStringListNullExpr handles OC_StringListNullOperatorExpression.
-// For v0.1 we only handle the base property-or-labels form (no string operators,
-// list operators, or IS NULL/IS NOT NULL — those fall back to RawExpr).
+// String and list operator suffixes fall back to RawExpr; IS NULL / IS NOT NULL
+// are parsed into NullCheckExpr.
 func buildStringListNullExpr(ctx *parser.OC_StringListNullOperatorExpressionContext) (Expr, error) {
 	propLabelsCtx := ctx.OC_PropertyOrLabelsExpression()
 	if propLabelsCtx == nil {
@@ -716,10 +716,17 @@ func buildStringListNullExpr(ctx *parser.OC_StringListNullOperatorExpressionCont
 	if err != nil {
 		return nil, err
 	}
-	// If there are string/list/null operator suffixes, fall back to RawExpr.
-	if len(ctx.AllOC_StringOperatorExpression()) > 0 ||
-		len(ctx.AllOC_ListOperatorExpression()) > 0 ||
-		len(ctx.AllOC_NullOperatorExpression()) > 0 {
+	// String / list operator suffixes are not supported — fall back.
+	if len(ctx.AllOC_StringOperatorExpression()) > 0 || len(ctx.AllOC_ListOperatorExpression()) > 0 {
+		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+	}
+	// Handle IS NULL / IS NOT NULL.
+	nullOps := ctx.AllOC_NullOperatorExpression()
+	if len(nullOps) == 1 {
+		nullOp := nullOps[0].(*parser.OC_NullOperatorExpressionContext)
+		return &NullCheckExpr{Expr: base, IsNotNull: nullOp.NOT() != nil}, nil
+	}
+	if len(nullOps) > 1 {
 		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
 	}
 	return base, nil

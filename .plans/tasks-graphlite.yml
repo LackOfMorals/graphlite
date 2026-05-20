@@ -432,7 +432,7 @@ tasks:
       JOIN in SQL rather than an INNER JOIN, meaning unmatched rows return null values for the
       optional pattern's variables. The BindingScope must mark variables introduced by OPTIONAL
       MATCH as nullable so downstream RETURN and WHERE clauses handle nulls correctly.
-    status: pending
+    status: done
     dependencies:
       - task-022
     acceptance_criteria:
@@ -441,7 +441,7 @@ tasks:
       - "RETURN after OPTIONAL MATCH correctly projects null values for unmatched optional variables"
       - "WHERE n.prop IS NOT NULL after OPTIONAL MATCH filters correctly"
       - "Integration tests verify optional-match semantics against known datasets"
-    completed_at: null
+    completed_at: "2026-05-19"
 
   - id: task-024
     title: "v0.2: WITH pipelines and aggregation (count, sum, avg, min, max)"
