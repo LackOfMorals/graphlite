@@ -450,7 +450,6 @@ tasks:
       MATCH+RETURN stage becomes the input of the next. Add aggregation functions count(), sum(),
       avg(), min(), max() usable in WITH and RETURN contexts. The translator must emit SQL
       subqueries or CTEs for WITH stages and GROUP BY for aggregations.
-    status: pending
     dependencies:
       - task-023
     acceptance_criteria:
@@ -459,7 +458,8 @@ tasks:
       - "count(), sum(), avg(), min(), max() all produce correct SQL aggregate functions"
       - "Aggregation with GROUP BY is emitted when aggregation functions are mixed with non-aggregate projections"
       - "Integration tests cover each aggregation function with known expected outputs"
-    completed_at: null
+    status: done
+    completed_at: "2026-05-20"
 
   - id: task-025
     title: "v0.2: COLLECT(), DISTINCT, and advanced WHERE predicates"
