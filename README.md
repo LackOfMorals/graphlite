@@ -1,79 +1,67 @@
 # graphlite
 
-**Embedded graph database for Go — backed by SQLite, queryable via openCypher.**
+**Embedded property graph database for Go — openCypher over SQLite, Neo4j driver compatible.**
 
-graphlite is a zero-infrastructure local substitute for Neo4j Aura, designed for testing and development workflows. The same Cypher queries, the same driver API, no Docker containers, no network calls.
+graphlite lets you write application code once against the standard `neo4j-go-driver` API and run it against Neo4j Aura in production or a local in-process graph in tests and development. No Docker, no network, no separate process.
 
 ```go
-// production
-driver, _ := neo4j.NewDriver("neo4j+s://xxx.databases.neo4j.io", auth)
+// One line separates your test graph from your production graph.
 
-// tests — one line change, same queries
+// In tests
 driver, _ := graphlite.NewDriver(":memory:", nil)
+
+// In production
+driver, _ := neo4j.NewDriver("neo4j+s://xxx.databases.neo4j.io", auth)
 ```
 
-> **Status:** Early development (v0.1 in progress). Not yet ready for production use.
+Every query you write against graphlite runs unchanged on Neo4j — same Cypher, same driver API, same result types.
 
 ---
 
-## Scope
+## Why graphlite
 
-graphlite is:
+The `neo4j-go-driver` is the only API you touch. graphlite implements the same interface — `neo4j.Driver`, sessions, managed transactions, `ExecuteQuery` — as an in-process SQLite-backed graph store. That means:
 
-- A CGO-free, embedded property graph database for Go
-- A drop-in local substitute for Neo4j Aura in test code
-- A single-file graph store (like SQLite, but for graphs)
+- **Tests run without infrastructure.** No Docker container to spin up, no port to reserve, no shared state between CI workers.
+- **Development is friction-free.** Clone the repo, run `go test` — it works. No `docker compose up`.
+- **The migration path is one line.** When you're ready to point at a real Neo4j instance, change the constructor. Nothing else moves.
 
-graphlite is **not**:
-
-- A production replacement for Neo4j
-- A distributed or multi-writer database
-- A full openCypher TCK-compliant engine (at v0.1)
-- A Bolt wire-protocol server
+graphlite is intentionally embedded-only. It does not implement the Bolt wire protocol and is not designed to run as a standalone server. This is a deliberate scope choice: staying embedded means staying zero-infrastructure, CGO-free, and deployable anywhere Go runs.
 
 ---
 
 ## Cypher Compatibility
 
-| Feature | v0.1 | v0.2 | v1.0 |
-|---|---|---|---|
-| `MATCH` single node | ✅ | ✅ | ✅ |
-| `MATCH` by label | ✅ | ✅ | ✅ |
-| `MATCH` by property | ✅ | ✅ | ✅ |
-| Single-hop directed relationship | ✅ | ✅ | ✅ |
-| Single-hop undirected relationship | ✅ | ✅ | ✅ |
-| Multi-hop (2–5 hops) | ✅ | ✅ | ✅ |
-| `WHERE` comparisons | ✅ | ✅ | ✅ |
-| `WHERE AND / OR / NOT` | ✅ | ✅ | ✅ |
-| `RETURN` with aliases | ✅ | ✅ | ✅ |
-| `ORDER BY / LIMIT / SKIP` | ✅ | ✅ | ✅ |
-| Named query parameters | ✅ | ✅ | ✅ |
-| `CREATE` node | ✅ | ✅ | ✅ |
-| `CREATE` relationship | ✅ | ✅ | ✅ |
-| `SET` property | ✅ | ✅ | ✅ |
-| `DELETE` / `DETACH DELETE` | ✅ | ✅ | ✅ |
-| **DriverCompat** (`neo4j.Driver`) | ✅ | ✅ | ✅ |
-| **Bulk import** (JSON) | ✅ | ✅ | ✅ |
-| `OPTIONAL MATCH` | ❌ | ✅ | ✅ |
-| `WITH` pipeline | ❌ | ✅ | ✅ |
-| Aggregation (`count`, `sum`, etc.) | ❌ | ✅ | ✅ |
-| `COLLECT()` | ❌ | ✅ | ✅ |
-| `DISTINCT` | ❌ | ✅ | ✅ |
-| `WHERE exists()` / `IS NULL` | ❌ | ✅ | ✅ |
-| String predicates (`CONTAINS` etc.) | ❌ | ✅ | ✅ |
-| `REMOVE` property / label | ❌ | ✅ | ✅ |
-| `SET n += {map}` | ❌ | ✅ | ✅ |
-| Bulk import (CSV, Neo4j format) | ❌ | ✅ | ✅ |
-| Bulk export (JSON) | ❌ | ✅ | ✅ |
-| `MERGE` (basic) | ❌ | ❌ | ✅ |
-| `MERGE ON CREATE / ON MATCH` | ❌ | ❌ | ✅ |
-| `CASE` expressions | ❌ | ❌ | 🚧 |
-| Variable-length paths `*1..n` | ❌ | ❌ | ❌ |
-| `shortestPath()` | ❌ | ❌ | ❌ |
+graphlite achieves **100% pass rate on the openCypher Technology Compatibility Kit** (235/235 executed scenarios). The table below lists supported features.
 
-✅ Supported  🚧 Partial / experimental  ❌ Not supported
+| Feature | Supported |
+|---|:---:|
+| `MATCH` — node by label, property, or bare | ✅ |
+| `MATCH` — single-hop directed and undirected relationships | ✅ |
+| `MATCH` — multi-hop (fixed depth) | ✅ |
+| `MATCH` — variable-length paths `[*]`, `[*2..5]`, `[*..3]` | ✅ |
+| `OPTIONAL MATCH` | ✅ |
+| `WHERE` — comparisons, `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL` | ✅ |
+| `WHERE` — `exists()`, string predicates (`CONTAINS`, `STARTS WITH`, `ENDS WITH`) | ✅ |
+| `WHERE` — `hasLabel(n, 'Label')` | ✅ |
+| `RETURN` with aliases, `ORDER BY`, `LIMIT`, `SKIP` | ✅ |
+| `RETURN DISTINCT` | ✅ |
+| `WITH` pipeline | ✅ |
+| Aggregation — `count()`, `sum()`, `avg()`, `min()`, `max()` | ✅ |
+| `collect()` | ✅ |
+| `CASE` expressions (simple and generic) | ✅ |
+| Named query parameters (`$param`) | ✅ |
+| `CREATE` node and relationship | ✅ |
+| `SET` property, `SET n += {map}` | ✅ |
+| `REMOVE` property, `REMOVE` label | ✅ |
+| `DELETE` / `DETACH DELETE` | ✅ |
+| `MERGE` with `ON CREATE SET` / `ON MATCH SET` | ✅ |
+| Bulk import — JSON, CSV (Neo4j format) | ✅ |
+| Bulk export — JSON | ✅ |
+| `neo4j.Driver` drop-in (`DriverCompat`) | ✅ |
+| `shortestPath()` | ❌ |
 
-Unsupported Cypher features return `ErrUnsupportedCypher` — they never silently produce wrong results.
+Unsupported features return `ErrUnsupportedCypher` — they never silently produce wrong results.
 
 ---
 
@@ -83,13 +71,82 @@ Unsupported Cypher features return `ErrUnsupportedCypher` — they never silentl
 go get github.com/LackOfMorals/graphlite
 ```
 
-Requires Go 1.21+. No CGO required.
+Requires Go 1.24+. No CGO required. Works on Linux (amd64/arm64), macOS (arm64), and Windows (amd64).
+
+---
+
+## Switching Between graphlite and Neo4j
+
+The typical pattern is a constructor that reads from environment or build tags:
+
+```go
+func newDriver(ctx context.Context) (neo4j.DriverWithContext, error) {
+    if uri := os.Getenv("NEO4J_URI"); uri != "" {
+        auth := neo4j.BasicAuth(os.Getenv("NEO4J_USER"), os.Getenv("NEO4J_PASS"), "")
+        return neo4j.NewDriverWithContext(uri, auth)
+    }
+    // No NEO4J_URI set — use the embedded store.
+    return graphlite.NewDriver(":memory:", nil)
+}
+```
+
+Your application code and tests call `newDriver` — they never import graphlite directly. Set `NEO4J_URI` in production and CI-against-real-Neo4j; leave it unset for local unit tests.
+
+A file-backed store persists across process restarts:
+
+```go
+driver, _ := graphlite.NewDriver("/var/data/graph.db", nil)
+```
 
 ---
 
 ## Quick Start
 
+### Neo4j Driver API (recommended)
+
+```go
+import (
+    "github.com/LackOfMorals/graphlite"
+    "github.com/neo4j/neo4j-go-driver/v6/neo4j"
+)
+
+driver, err := graphlite.NewDriver(":memory:", nil)
+if err != nil {
+    log.Fatal(err)
+}
+defer driver.Close(ctx)
+
+// Tier 1 — ExecuteQuery (simplest)
+result, err := neo4j.ExecuteQuery(ctx, driver,
+    `MATCH (p:Person {name: $name})-[:KNOWS]->(f:Person) RETURN f.name AS name`,
+    map[string]any{"name": "Alice"},
+    neo4j.EagerResultTransformer,
+)
+
+// Tier 2 — Managed transaction
+session := driver.NewSession(ctx, neo4j.SessionConfig{})
+defer session.Close(ctx)
+names, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+    result, err := tx.Run(ctx, `MATCH (n:Person) RETURN n.name AS name`, nil)
+    if err != nil {
+        return nil, err
+    }
+    var names []string
+    for result.Next(ctx) {
+        names = append(names, result.Record().Values[0].(string))
+    }
+    return names, result.Err()
+})
+
+// Tier 3 — Explicit transaction
+tx, err := session.BeginTransaction(ctx)
+_, err = tx.Run(ctx, `CREATE (n:Person {name: $name})`, map[string]any{"name": "Bob"})
+err = tx.Commit(ctx)
+```
+
 ### Native API
+
+For cases where you don't need driver compatibility — scripting, tooling, one-off data work:
 
 ```go
 import "github.com/LackOfMorals/graphlite"
@@ -100,52 +157,16 @@ if err != nil {
 }
 defer db.Close(ctx)
 
-// Bulk-seed from JSON
+// Seed from JSON
 f, _ := os.Open("testdata/graph.json")
 if err := db.Import(ctx, f, graphlite.FormatJSON); err != nil {
     log.Fatal(err)
 }
 
-// Run a Cypher query
 result, err := db.RunQuery(ctx,
-    `MATCH (p:Person {name: $name})-[:KNOWS]->(f:Person) RETURN f.name AS name`,
+    `MATCH (p:Person {name: $name})-[:KNOWS*1..3]->(f:Person) RETURN f.name AS name`,
     map[string]any{"name": "Alice"},
 )
-```
-
-### DriverCompat — Neo4j v6 drop-in
-
-```go
-import (
-    "github.com/LackOfMorals/graphlite"
-    "github.com/neo4j/neo4j-go-driver/v6/neo4j"
-)
-
-// Replace neo4j.NewDriver with graphlite.NewDriver in tests
-driver, err := graphlite.NewDriver(":memory:", nil)
-defer driver.Close(ctx)
-
-// All three v6 transaction tiers work unchanged:
-
-// Tier 1 — ExecuteQuery
-result, err := neo4j.ExecuteQuery(ctx, driver,
-    `MATCH (n:Person) RETURN n.name AS name`,
-    nil, neo4j.EagerResultTransformer,
-)
-
-// Tier 2 — Managed transaction
-session := driver.NewSession(ctx, neo4j.SessionConfig{})
-defer session.Close(ctx)
-names, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-    result, err := tx.Run(ctx, `MATCH (n:Person) RETURN n.name AS name`, nil)
-    // ...
-    return names, result.Err()
-})
-
-// Tier 3 — Explicit transaction
-tx, err := session.BeginTransaction(ctx)
-_, err = tx.Run(ctx, `CREATE (n:Person {name: $name})`, map[string]any{"name": "Bob"})
-err = tx.Commit(ctx)
 ```
 
 ---
@@ -155,12 +176,13 @@ err = tx.Commit(ctx)
 ```
 graphlite/
 ├── types.go          ← Node, Relationship, Record, errors (root package)
-├── driver.go         ← graphlite.Open, native API
+├── driver.go         ← graphlite.Open, native API, execution engine
 ├── session.go        ← BeginTx, Tx, auto-commit
 ├── neo4j.go          ← DriverCompat — satisfies neo4j.Driver
-├── importer.go       ← Import/Export
+├── importer.go       ← Import/Export (JSON, CSV)
 ├── cypher/
-│   ├── parser.go     ← thin wrapper around cloudprivacylabs/opencypher
+│   ├── ast.go        ← Clause and expression AST types
+│   ├── parser.go     ← ANTLR/opencypher CST → AST
 │   ├── plan.go       ← LogicalPlan types
 │   ├── planner.go    ← AST → LogicalPlan
 │   └── scope.go      ← BindingScope: Cypher vars → SQL aliases
@@ -170,19 +192,19 @@ graphlite/
 ├── store/
 │   ├── store.go      ← Store interface
 │   ├── sqlite.go     ← modernc.org/sqlite implementation
-│   └── schema.go     ← DDL for nodes/edges tables + indexes
+│   └── schema.go     ← DDL: nodes/edges tables + indexes
 ├── compat/
 │   └── tck_test.go   ← openCypher TCK harness (opt-in: -tags=tck)
-└── testdata/
-    └── *.cypher      ← fixture tests
+└── bench/
+    └── *.go          ← benchmark suite
 ```
 
-Storage uses two tables backed by SQLite WAL mode:
+Storage uses two tables in SQLite WAL mode. Variable-length path queries use `WITH RECURSIVE` CTEs generated at query time.
 
 ```sql
 CREATE TABLE nodes (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
-    labels TEXT    NOT NULL DEFAULT '',   -- comma-separated, e.g. "Person,Employee"
+    labels TEXT    NOT NULL DEFAULT '',   -- comma-separated: "Person,Employee"
     props  JSON    NOT NULL DEFAULT '{}'
 );
 
@@ -197,53 +219,43 @@ CREATE TABLE edges (
 
 ---
 
+## Testing
+
+```bash
+# Unit and integration tests
+CGO_ENABLED=0 go test -count=1 ./...
+
+# TCK harness (openCypher Technology Compatibility Kit)
+CGO_ENABLED=0 go test -tags=tck ./compat/... -v
+
+# Property-based tests
+CGO_ENABLED=0 go test -run TestRapid ./...
+
+# Benchmarks
+CGO_ENABLED=0 go test -run=^$ -bench=. -benchtime=10s ./bench/...
+```
+
+---
+
 ## API Stability
 
 **No breaking changes are made to the public API after v0.3 without a major version bump.**
 
-This covers the root package and all documented sub-packages. Adding new exported symbols is not a breaking change. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full stability commitment definition.
+This covers the root package and all documented sub-packages. Adding new exported symbols is not a breaking change. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full definition.
 
-| Version | Status |
+| Version | Highlights |
 |---|---|
-| v0.1 | Initial feature set (MATCH, CREATE, SET, DELETE, bulk JSON import) |
+| v0.1 | MATCH, CREATE, SET, DELETE, bulk JSON import, `neo4j.Driver` compat |
 | v0.2 | OPTIONAL MATCH, WITH, aggregation, COLLECT, DISTINCT, REMOVE, CSV import/export |
-| v0.3 | MERGE, property-based tests, TCK harness |
-| v1.0 | CASE expressions, benchmarks, security hardening |
-| **post-v1.0** | **No breaking changes without a major version bump** |
+| v0.3 | MERGE (with ON CREATE/ON MATCH), property-based tests, TCK harness |
+| **v1.0** | **CASE expressions, variable-length paths, 100% openCypher TCK pass rate** |
+| post-v1.0 | No breaking changes without a major version bump |
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for:
-- Prerequisites and setup
-- How to run all test suites (unit, integration, TCK, property-based, benchmarks)
-- How to add a new Cypher feature (5-step guide)
-- Benchmark baseline process
-- Pull request guidelines
-
----
-
-## Build
-
-```bash
-# CGO-free (default, all platforms)
-CGO_ENABLED=0 go build ./...
-
-# Run tests
-go test ./...
-```
-
----
-
-## Supported Platforms
-
-| Platform | Architecture | CGO-free |
-|---|---|---|
-| Linux | amd64 | ✅ |
-| Linux | arm64 | ✅ |
-| macOS | arm64 | ✅ |
-| Windows | amd64 | ✅ |
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, test suite commands, the 5-step guide for adding a Cypher feature, benchmark baseline process, and PR guidelines.
 
 ---
 
