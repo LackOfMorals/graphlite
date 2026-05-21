@@ -100,6 +100,46 @@ driver, _ := graphlite.NewDriver("/var/data/graph.db", nil)
 
 ---
 
+## Data Migration
+
+Move graph data between graphlite and any `neo4j.Driver` — including a real Neo4j instance — using `CopyFrom` and `CopyTo`.
+
+```go
+// Seed a local graphlite instance from a staging Neo4j database.
+staging, _ := neo4j.NewDriverWithContext("neo4j+s://staging.example.com", auth)
+local, _   := graphlite.Open(":memory:")
+
+if err := local.CopyFrom(ctx, staging); err != nil {
+    log.Fatal(err)
+}
+
+// Promote a locally built graph to Neo4j.
+if err := local.CopyTo(ctx, staging); err != nil {
+    log.Fatal(err)
+}
+```
+
+`CopyFrom` runs inside a single graphlite transaction — either everything is imported or nothing is. `CopyTo` issues one `CREATE` per node and one per relationship; it is not atomic on the destination.
+
+### Snapshots
+
+`Snapshot` writes an atomic, consistent copy of the database to a file using SQLite `VACUUM INTO`. Works on both file-backed and in-memory databases.
+
+```go
+db, _ := graphlite.Open(":memory:")
+// ... build or import graph data ...
+
+// Persist the in-memory graph before the process exits.
+if err := db.Snapshot("/var/data/graph-checkpoint.db"); err != nil {
+    log.Fatal(err)
+}
+
+// Reopen the snapshot as a normal database.
+snap, _ := graphlite.Open("/var/data/graph-checkpoint.db")
+```
+
+---
+
 ## Quick Start
 
 ### Neo4j Driver API (recommended)
@@ -176,10 +216,11 @@ result, err := db.RunQuery(ctx,
 ```
 graphlite/
 ├── types.go          ← Node, Relationship, Record, errors (root package)
-├── driver.go         ← graphlite.Open, native API, execution engine
+├── driver.go         ← graphlite.Open, native API, execution engine, Snapshot
 ├── session.go        ← BeginTx, Tx, auto-commit
 ├── neo4j.go          ← DriverCompat — satisfies neo4j.Driver
 ├── importer.go       ← Import/Export (JSON, CSV)
+├── migrate.go        ← CopyFrom, CopyTo
 ├── cypher/
 │   ├── ast.go        ← Clause and expression AST types
 │   ├── parser.go     ← ANTLR/opencypher CST → AST
@@ -249,6 +290,7 @@ This covers the root package and all documented sub-packages. Adding new exporte
 | v0.2 | OPTIONAL MATCH, WITH, aggregation, COLLECT, DISTINCT, REMOVE, CSV import/export |
 | v0.3 | MERGE (with ON CREATE/ON MATCH), property-based tests, TCK harness |
 | **v1.0** | **CASE expressions, variable-length paths, 100% openCypher TCK pass rate** |
+| v1.1 | CopyFrom / CopyTo migration, Snapshot, functional options (WithBusyTimeout, WithReadOnly, NewTestDB) |
 | post-v1.0 | No breaking changes without a major version bump |
 
 ---
