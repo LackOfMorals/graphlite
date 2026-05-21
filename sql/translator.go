@@ -2754,7 +2754,7 @@ func (t *Translator) buildPropsJSON(props map[string]cypher.Expr, scope *cypher.
 		if err != nil {
 			return "", nil, fmt.Errorf("property %q: %w", key, err)
 		}
-		parts = append(parts, "'"+key+"'", valSQL)
+		parts = append(parts, "'"+strings.ReplaceAll(key, "'", "''")+"'", valSQL)
 		args = append(args, sub.args...)
 	}
 

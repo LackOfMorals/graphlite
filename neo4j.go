@@ -248,8 +248,17 @@ func (e *compatExplicitTx) Close(ctx context.Context) error {
 // compatResult wraps a graphlite *QueryResult and satisfies neo4j.Result by
 // embedding neo4j.Result (to inherit the unexported buffer/errorHandler methods)
 // and overriding all public methods.
+//
+// The embedded interface value is nil. The unexported methods buffer() and
+// errorHandler() that neo4j.Result requires are only called by the driver's
+// own transaction implementation (transaction.go:82,151) on results it creates
+// internally — never on results returned by ManagedTransaction.Run(). Since
+// compatSession replaces the driver's transaction layer entirely, these paths
+// are never reached and the nil embed is safe. If a future driver version calls
+// these methods on user-provided results this would panic; review the vendored
+// transaction.go if upgrading the neo4j driver.
 type compatResult struct {
-	neo4j.Result // embed nil interface for unexported methods
+	neo4j.Result // nil — satisfies unexported interface methods; see above
 	qr           *QueryResult
 }
 

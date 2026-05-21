@@ -153,6 +153,9 @@ type sqliteTx struct {
 	tx *sql.Tx
 }
 
+// Compile-time assertion: sqliteTx must satisfy Tx.
+var _ Tx = (*sqliteTx)(nil)
+
 // Commit commits the transaction.
 func (t *sqliteTx) Commit() error { return t.tx.Commit() }
 

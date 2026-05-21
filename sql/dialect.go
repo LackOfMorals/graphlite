@@ -105,21 +105,28 @@ func (SQLiteDialect) QuoteIdentifier(name string) string {
 //
 //	JSONExtract("n0.props", "$.name") → `json_extract(n0.props, '$.name')`
 func (SQLiteDialect) JSONExtract(colExpr, jsonPath string) string {
-	return fmt.Sprintf("json_extract(%s, '%s')", colExpr, jsonPath)
+	return fmt.Sprintf("json_extract(%s, '%s')", colExpr, escapeJSONPath(jsonPath))
 }
 
 // JSONSet emits `json_set(<colExpr>, '<jsonPath>', <valueExpr>)`.
 //
 //	JSONSet("n0.props", "$.age", "?") → `json_set(n0.props, '$.age', ?)`
 func (SQLiteDialect) JSONSet(colExpr, jsonPath, valueExpr string) string {
-	return fmt.Sprintf("json_set(%s, '%s', %s)", colExpr, jsonPath, valueExpr)
+	return fmt.Sprintf("json_set(%s, '%s', %s)", colExpr, escapeJSONPath(jsonPath), valueExpr)
 }
 
 // JSONRemove emits `json_remove(<colExpr>, '<jsonPath>')`.
 //
 //	JSONRemove("n0.props", "$.age") → `json_remove(n0.props, '$.age')`
 func (SQLiteDialect) JSONRemove(colExpr, jsonPath string) string {
-	return fmt.Sprintf("json_remove(%s, '%s')", colExpr, jsonPath)
+	return fmt.Sprintf("json_remove(%s, '%s')", colExpr, escapeJSONPath(jsonPath))
+}
+
+// escapeJSONPath escapes single quotes in a JSON path string by doubling them,
+// preventing SQL injection via backtick-quoted property names that contain
+// single-quote characters (e.g. `it'sKey` → `$.it''sKey`).
+func escapeJSONPath(p string) string {
+	return strings.ReplaceAll(p, "'", "''")
 }
 
 // LabelContains returns a predicate that tests whether the comma-separated

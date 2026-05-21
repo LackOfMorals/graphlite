@@ -359,7 +359,7 @@ func parseCSVPropValue(raw, propType string) (any, error) {
 
 // importCSVNodes imports a node CSV file into the database atomically.
 func (d *DB) importCSVNodes(ctx context.Context, r io.Reader) error {
-	cr := csv.NewReader(r)
+	cr := csv.NewReader(io.LimitReader(r, importMaxBytes+1))
 	cr.TrimLeadingSpace = true
 
 	// Read header row.
@@ -466,7 +466,7 @@ func (d *DB) importCSVNodes(ctx context.Context, r io.Reader) error {
 // The :START_ID and :END_ID values must match node row IDs already in the DB
 // (i.e. the integer primary keys stored as ElementId strings).
 func (d *DB) importCSVEdges(ctx context.Context, r io.Reader) error {
-	cr := csv.NewReader(r)
+	cr := csv.NewReader(io.LimitReader(r, importMaxBytes+1))
 	cr.TrimLeadingSpace = true
 
 	// Read header row.

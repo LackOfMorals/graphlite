@@ -36,14 +36,19 @@ type DB struct {
 //
 // Open applies the schema DDL and enables WAL journal mode before returning.
 //
-// Path traversal protection: if path is not ":memory:", Open rejects any path
-// whose filepath.Clean form contains ".." components to prevent directory
-// traversal attacks (e.g. "../../etc/passwd" is rejected).
+// Path traversal protection: if path is not ":memory:", Open rejects paths
+// whose resolved form contains ".." components and resolves symlinks in the
+// parent directory to prevent directory traversal via both ".." sequences and
+// symlinks (e.g. "../../etc/passwd" and symlinks pointing outside the working
+// tree are both rejected).
 func Open(path string) (*DB, error) {
 	if path != ":memory:" {
 		cleaned := filepath.Clean(path)
-		// filepath.Clean resolves ".." components; if the result still contains
-		// a ".." element the original path attempted to escape the working tree.
+		// Resolve symlinks in the parent directory to catch escapes via
+		// symbolic links before applying the ".." component check.
+		if dir, err := filepath.EvalSymlinks(filepath.Dir(cleaned)); err == nil {
+			cleaned = filepath.Join(dir, filepath.Base(cleaned))
+		}
 		for _, part := range strings.Split(cleaned, string(filepath.Separator)) {
 			if part == ".." {
 				return nil, fmt.Errorf("graphlite: Open: path traversal not allowed: %q", path)
@@ -549,7 +554,10 @@ func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 			if err != nil {
 				return fmt.Errorf("graphlite: delete edges: %w", err)
 			}
-			n, _ := res.RowsAffected()
+			n, err := res.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("graphlite: delete edges rows affected: %w", err)
+			}
 			ctr.RelationshipsDeleted += int(n)
 
 		case glsql.KindDeleteNodes:
@@ -557,7 +565,10 @@ func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 			if err != nil {
 				return fmt.Errorf("graphlite: delete node: %w", err)
 			}
-			n, _ := res.RowsAffected()
+			n, err := res.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("graphlite: delete nodes rows affected: %w", err)
+			}
 			ctr.NodesDeleted += int(n)
 
 		default:
