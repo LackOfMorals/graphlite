@@ -11,7 +11,7 @@ import (
 
 // TestOpenMemory verifies that Open(":memory:") returns a usable store.
 func TestOpenMemory(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", store.Config{})
 	if err != nil {
 		t.Fatalf("Open(:memory:) error: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestOpenFilePath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.db")
 
-	s, err := store.Open(path)
+	s, err := store.Open(path, store.Config{})
 	if err != nil {
 		t.Fatalf("Open(%q) error: %v", path, err)
 	}
@@ -57,7 +57,7 @@ func TestOpenFilePath(t *testing.T) {
 
 // TestWALMode verifies that WAL journal mode is enabled after Open.
 func TestWALMode(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", store.Config{})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestWALModeFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wal.db")
 
-	s, err := store.Open(path)
+	s, err := store.Open(path, store.Config{})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestWALModeFile(t *testing.T) {
 
 // TestSchemaTablesAndIndexes verifies that all four required tables and indexes exist.
 func TestSchemaTablesAndIndexes(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", store.Config{})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestStoreInterfaceCompliance(t *testing.T) {
 
 // TestTransactionBeginCommit verifies basic transaction begin/commit behaviour.
 func TestTransactionBeginCommit(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", store.Config{})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestTransactionBeginCommit(t *testing.T) {
 
 // TestTransactionRollback verifies that rollback reverts inserts.
 func TestTransactionRollback(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", store.Config{})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

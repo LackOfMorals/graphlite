@@ -42,8 +42,9 @@ type DriverCompat struct {
 //
 // uri must be ":memory:" (in-memory) or a file-system path to a SQLite file.
 // auth is accepted and silently ignored (graphlite has no authentication layer).
-func NewDriver(uri string, _ neo4j.AuthToken) (*DriverCompat, error) {
-	gdb, err := Open(uri)
+// Pass Option values to customise behaviour — see WithBusyTimeout and WithReadOnly.
+func NewDriver(uri string, _ neo4j.AuthToken, opts ...Option) (*DriverCompat, error) {
+	gdb, err := Open(uri, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("graphlite: NewDriver: %w", err)
 	}

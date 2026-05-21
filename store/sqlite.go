@@ -4,9 +4,19 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	_ "modernc.org/sqlite" // CGO-free SQLite driver
 )
+
+// Config holds optional SQLite configuration applied at Open time.
+// Zero value is valid and uses SQLite's defaults.
+type Config struct {
+	// BusyTimeout sets PRAGMA busy_timeout (milliseconds). When non-zero,
+	// SQLite will retry locked operations for up to this duration before
+	// returning SQLITE_BUSY. Useful under concurrent write contention.
+	BusyTimeout time.Duration
+}
 
 // SQLiteStore is the SQLite-backed implementation of Store.
 // It uses modernc.org/sqlite so no CGO is required.
@@ -21,7 +31,7 @@ type SQLiteStore struct {
 //   - Any valid modernc.org/sqlite DSN
 //
 // Open applies the schema DDL and enables WAL journal mode before returning.
-func Open(uri string) (*SQLiteStore, error) {
+func Open(uri string, cfg Config) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite", uri)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %q: %w", uri, err)
@@ -36,6 +46,14 @@ func Open(uri string) (*SQLiteStore, error) {
 	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("store: enable WAL mode: %w", err)
+	}
+
+	if cfg.BusyTimeout > 0 {
+		ms := cfg.BusyTimeout.Milliseconds()
+		if _, err := db.Exec(fmt.Sprintf("PRAGMA busy_timeout=%d;", ms)); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("store: set busy_timeout: %w", err)
+		}
 	}
 
 	// Apply schema DDL (idempotent via IF NOT EXISTS guards).

@@ -26,22 +26,30 @@ import (
 // DB is an open graphlite database. All methods are safe for concurrent use
 // from multiple goroutines.
 type DB struct {
-	st store.Store
+	st       store.Store
+	readOnly bool
 }
 
 // Open opens (or creates) a graphlite database at path and returns a *DB.
 //
 // Use ":memory:" for a transient in-memory database. A file path (absolute or
-// relative) opens (or creates) a persistent SQLite file.
+// relative) opens (or creates) a persistent SQLite file. Pass Option values to
+// customise behaviour — see WithBusyTimeout and WithReadOnly.
 //
-// Open applies the schema DDL and enables WAL journal mode before returning.
+// Open applies the schema DDL and enables WAL journal mode before returning
+// (skipped when WithReadOnly is set — the schema must already exist).
 //
 // Path traversal protection: if path is not ":memory:", Open rejects paths
 // whose resolved form contains ".." components and resolves symlinks in the
 // parent directory to prevent directory traversal via both ".." sequences and
 // symlinks (e.g. "../../etc/passwd" and symlinks pointing outside the working
 // tree are both rejected).
-func Open(path string) (*DB, error) {
+func Open(path string, opts ...Option) (*DB, error) {
+	cfg := &dbConfig{}
+	for _, o := range opts {
+		o(cfg)
+	}
+
 	if path != ":memory:" {
 		cleaned := filepath.Clean(path)
 		// Resolve symlinks in the parent directory to catch escapes via
@@ -55,11 +63,14 @@ func Open(path string) (*DB, error) {
 			}
 		}
 	}
-	st, err := store.Open(path)
+
+	st, err := store.Open(path, store.Config{
+		BusyTimeout: cfg.busyTimeout,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("graphlite: open %q: %w", path, err)
 	}
-	return &DB{st: st}, nil
+	return &DB{st: st, readOnly: cfg.readOnly}, nil
 }
 
 // Close releases all resources held by the database. Subsequent calls on a
@@ -76,14 +87,29 @@ func (d *DB) Close() error {
 // underlying resources.
 //
 // params may be nil if the query has no parameters.
+// Returns ErrReadOnly if the database was opened with WithReadOnly and the
+// query contains write statements.
 func (d *DB) RunQuery(ctx context.Context, cypherStr string, params map[string]any) (*QueryResult, error) {
+	if d.readOnly {
+		sqlResult, err := buildSQLResult(cypherStr, params)
+		if err != nil {
+			return nil, err
+		}
+		for _, s := range sqlResult.Statements {
+			if s.Kind != glsql.KindSelect {
+				return nil, ErrReadOnly
+			}
+		}
+		return executeStatements(ctx, d.st.DB(), sqlResult)
+	}
 	return runQuery(ctx, d.st.DB(), cypherStr, params)
 }
 
 // BeginTx starts an explicit transaction and returns a *Tx.
 //
-// readOnly is accepted but ignored — SQLite does not distinguish read-only
-// transactions at the Go driver level.
+// The readOnly parameter is accepted for API compatibility but is not enforced
+// at the transaction level — use WithReadOnly() on Open to enforce read-only
+// access across the entire database connection.
 func (d *DB) BeginTx(ctx context.Context, _ bool) (*Tx, error) {
 	rawTx, err := d.st.DB().BeginTx(ctx, nil)
 	if err != nil {

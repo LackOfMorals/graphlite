@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/LackOfMorals/graphlite"
 )
@@ -78,6 +79,65 @@ func TestOpen_File(t *testing.T) {
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Option tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestWithBusyTimeout verifies that WithBusyTimeout is accepted without error.
+func TestWithBusyTimeout(t *testing.T) {
+	db, err := graphlite.Open(":memory:", graphlite.WithBusyTimeout(5*time.Second))
+	if err != nil {
+		t.Fatalf("Open with WithBusyTimeout: %v", err)
+	}
+	defer db.Close()
+}
+
+// TestWithReadOnly verifies that read queries succeed and write queries return
+// ErrReadOnly when WithReadOnly is set.
+func TestWithReadOnly(t *testing.T) {
+	ctx := context.Background()
+
+	// Seed data in a normal read-write database.
+	rw := graphlite.NewTestDB(t)
+	if _, err := rw.RunQuery(ctx, `CREATE (n:Person {name: "Alice"})`, nil); err != nil {
+		t.Fatalf("CREATE: %v", err)
+	}
+
+	// Open a second in-memory db (fresh) as read-only.
+	ro, err := graphlite.Open(":memory:", graphlite.WithReadOnly())
+	if err != nil {
+		t.Fatalf("Open ro: %v", err)
+	}
+	defer ro.Close()
+
+	// Reads on an empty read-only db must succeed (empty result, no error).
+	if _, err := ro.RunQuery(ctx, `MATCH (n:Person) RETURN n.name AS name`, nil); err != nil {
+		t.Fatalf("MATCH on read-only db: %v", err)
+	}
+
+	// Writes must return ErrReadOnly.
+	_, err = ro.RunQuery(ctx, `CREATE (n:Person {name: "Bob"})`, nil)
+	if err == nil {
+		t.Fatal("expected ErrReadOnly, got nil")
+	}
+	if err != graphlite.ErrReadOnly {
+		t.Fatalf("expected ErrReadOnly, got: %v", err)
+	}
+}
+
+// TestNewTestDB verifies that NewTestDB returns a usable *DB and that cleanup
+// is registered (the test would leak if Close were not called).
+func TestNewTestDB(t *testing.T) {
+	db := graphlite.NewTestDB(t)
+	if db == nil {
+		t.Fatal("expected non-nil *DB")
+	}
+	ctx := context.Background()
+	if _, err := db.RunQuery(ctx, `CREATE (n:Test)`, nil); err != nil {
+		t.Fatalf("RunQuery: %v", err)
 	}
 }
 

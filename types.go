@@ -158,3 +158,7 @@ type ErrImportTooLarge struct {
 func (e *ErrImportTooLarge) Error() string {
 	return fmt.Sprintf("graphlite: import data exceeds maximum size of %d bytes", e.MaxBytes)
 }
+
+// ErrReadOnly is returned when a write query is executed against a database
+// opened with WithReadOnly().
+var ErrReadOnly = fmt.Errorf("graphlite: database is read-only")

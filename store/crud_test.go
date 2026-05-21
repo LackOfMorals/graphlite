@@ -14,7 +14,7 @@ import (
 // helper opens an in-memory store and registers cleanup.
 func openMemory(t *testing.T) *store.SQLiteStore {
 	t.Helper()
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", store.Config{})
 	if err != nil {
 		t.Fatalf("Open(:memory:): %v", err)
 	}
