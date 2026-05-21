@@ -647,3 +647,39 @@ tasks:
       - "README includes the API stability commitment and a link to the compatibility table"
       - "A GitHub release tag triggers the GoReleaser workflow and produces downloadable archives with SHA256 checksums"
     completed_at: "2026-05-21T14:00:00Z"
+
+  - id: task-035
+    title: "Variable-length paths (a)-[*min..max]-(b) via WITH RECURSIVE CTE"
+    description: |
+      Implement variable-length relationship patterns: (a)-[r*1..5]->(b), (a)-[r*]-(b), etc.
+      Extract min/max hop bounds from the ANTLR OC_RangeLiteral context (currently discarded).
+      Add VariableLengthRelPlan to the planner. Emit a WITH RECURSIVE CTE in the translator
+      that tracks depth and enforces direction/type/property constraints at each hop.
+    status: pending
+    dependencies:
+      - task-034
+    acceptance_criteria:
+      - "(a)-[*1..3]->(b) emits a WITH RECURSIVE CTE with depth <= 3 guard"
+      - "(a)-[*]->(b) (unbounded) emits a WITH RECURSIVE CTE with no upper bound"
+      - "Direction is respected: directed -> uses start_id/end_id; undirected checks both"
+      - "Type filter on [r:KNOWS*1..3] is pushed into the CTE base and recursive cases"
+      - "Integration tests verify shortest-path semantics and hop count limits"
+    completed_at: null
+
+  - id: task-036
+    title: "Run real openCypher TCK corpus and report pass rate"
+    description: |
+      Download the official openCypher TCK feature files from the opencypher/openCypher
+      GitHub repository. Update the Godog harness to run against the real .feature files
+      rather than inline Gherkin. Report pass/skip/fail counts and overall pass rate.
+      Target >= 50% of executed scenarios passing.
+    status: pending
+    dependencies:
+      - task-035
+    acceptance_criteria:
+      - "Real openCypher .feature files are included (vendored or downloaded at test time)"
+      - "Godog harness runs against the real TCK scenarios"
+      - "Pass rate >= 50% of executed (non-skipped) scenarios"
+      - "All failed/skipped scenarios are documented with skip reasons"
+      - "go test -tags=tck ./compat/... reports the pass rate"
+    completed_at: null
