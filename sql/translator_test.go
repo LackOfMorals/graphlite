@@ -2129,3 +2129,55 @@ func TestTranslate_VarLength_DirectConstruction(t *testing.T) {
 		"json_extract(n1.props, '$.name') AS name",
 	)
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests for multi-node MATCH (Cartesian product) column scoping fix
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestTranslate_CartesianProduct_ReadQuery verifies that MATCH (n), (m) RETURN ...
+// generates a CROSS JOIN so both table aliases appear in the FROM clause.
+func TestTranslate_CartesianProduct_ReadQuery(t *testing.T) {
+	result := translateCypher(t, "MATCH (n), (m) RETURN n, m")
+	containsAll(t, result, "CROSS JOIN", "nodes n0", "nodes n1")
+	// Both aliases must be reachable in the SELECT list.
+	if strings.Contains(result.SQL, "n1.id") && !strings.Contains(result.SQL, "CROSS JOIN") {
+		t.Errorf("expected CROSS JOIN for cartesian product, got: %s", result.SQL)
+	}
+}
+
+// TestTranslate_CartesianProduct_MatchForWrite verifies that
+// MATCH (x:X), (y:Y) CREATE (x)-[:R]->(y) generates a correct KindMatchForWrite
+// SELECT with both node aliases in the FROM clause.
+func TestTranslate_CartesianProduct_MatchForWrite(t *testing.T) {
+	result := translateCypher(t, "MATCH (x:X), (y:Y) CREATE (x)-[:R]->(y)")
+	if len(result.Statements) < 2 {
+		t.Fatalf("expected at least 2 statements, got %d", len(result.Statements))
+	}
+	matchStmt := result.Statements[0]
+	if matchStmt.Kind != sqldialect.KindMatchForWrite {
+		t.Fatalf("expected first statement to be KindMatchForWrite, got %d", matchStmt.Kind)
+	}
+	// Both x and y aliases (n0 and n1) must appear in the match SELECT.
+	containsAll(t, sqldialect.Result{SQL: matchStmt.SQL}, "nodes n0", "CROSS JOIN nodes n1")
+}
+
+// TestTranslate_MatchCreate_AnonymousEnd verifies that
+// MATCH (x:Begin) CREATE (x)-[:TYPE]->(:End) generates a KindMatchForWrite
+// SELECT that only references the MATCH node (n0), not the CREATE node (n1).
+func TestTranslate_MatchCreate_AnonymousEnd(t *testing.T) {
+	result := translateCypher(t, "MATCH (x:Begin) CREATE (x)-[:TYPE]->(:End)")
+	if len(result.Statements) < 2 {
+		t.Fatalf("expected at least 2 statements, got %d", len(result.Statements))
+	}
+	matchStmt := result.Statements[0]
+	if matchStmt.Kind != sqldialect.KindMatchForWrite {
+		t.Fatalf("expected first statement to be KindMatchForWrite, got %d", matchStmt.Kind)
+	}
+	// The match SELECT must only contain x (n0), not the CREATE-introduced _anon0 (n1).
+	if strings.Contains(matchStmt.SQL, "n1.id") {
+		t.Errorf("KindMatchForWrite SELECT should not reference n1 (CREATE node): %s", matchStmt.SQL)
+	}
+	if !strings.Contains(matchStmt.SQL, "n0.id") {
+		t.Errorf("KindMatchForWrite SELECT should reference n0 (matched node): %s", matchStmt.SQL)
+	}
+}

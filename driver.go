@@ -574,6 +574,15 @@ func execMergeBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 	}
 
 	// ── Run the existence check ───────────────────────────────────────────────
+	// Resolve any idSentinels in the check statement's args before executing.
+	// This handles MERGE checks that JOIN against externally-matched nodes
+	// (e.g. MATCH (person) MERGE (city {name: person.bornIn}) — the JOIN ON
+	// node.id = ? uses person's id from idMap).
+	resolvedCheck, err := glsql.ResolveIDs(glsql.Result{Statements: []glsql.Statement{checkStmt}}, idMap)
+	if err != nil {
+		return consumed, fmt.Errorf("graphlite: MERGE check resolve IDs: %w", err)
+	}
+	checkStmt = resolvedCheck.Statements[0]
 	var existingID int64
 	row := ex.QueryRowContext(ctx, checkStmt.SQL, checkStmt.Args...)
 	scanErr := row.Scan(&existingID)
@@ -612,7 +621,13 @@ func execMergeBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 		if insertStmt == nil {
 			return consumed, fmt.Errorf("graphlite: MERGE has no INSERT statement")
 		}
-		res, err := ex.ExecContext(ctx, insertStmt.SQL, insertStmt.Args...)
+		// Resolve any idSentinels in the INSERT args (e.g. from MERGE props that
+		// reference external matched nodes via INSERT … SELECT … JOIN).
+		resolvedInsert, err := glsql.ResolveIDs(glsql.Result{Statements: []glsql.Statement{*insertStmt}}, idMap)
+		if err != nil {
+			return consumed, fmt.Errorf("graphlite: MERGE insert resolve IDs: %w", err)
+		}
+		res, err := ex.ExecContext(ctx, resolvedInsert.Statements[0].SQL, resolvedInsert.Statements[0].Args...)
 		if err != nil {
 			return consumed, fmt.Errorf("graphlite: MERGE insert: %w", err)
 		}

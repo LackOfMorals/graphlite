@@ -1059,9 +1059,22 @@ func (t *Translator) buildFromClauseForSequence(sp *cypher.SequencePlan, scope *
 		if err != nil {
 			return fromClause{}, err
 		}
-		// Accumulate JOIN fragments and args (JOIN ON appears before WHERE in SQL,
-		// so joinArgs must be assembled before whereArgs at the final call site).
-		if fc.joins != "" {
+		// A step that is a plain MatchNodePlan (or any step that contributes only
+		// a FROM table with no JOIN clause) must be folded in as a CROSS JOIN so
+		// its table alias is visible to the outer SELECT/WHERE. Without this the
+		// alias (e.g. n1) would be silently dropped from the query, causing
+		// "no such column: n1.id" errors for Cartesian-product patterns such as
+		// MATCH (a), (b) or MATCH (x:X), (y:Y) CREATE (x)-[:R]->(y).
+		if fc.from != "" && fc.joins == "" {
+			crossJoin := "CROSS JOIN " + fc.from
+			if allJoins != "" {
+				allJoins += " " + crossJoin
+			} else {
+				allJoins = crossJoin
+			}
+		} else if fc.joins != "" {
+			// Accumulate JOIN fragments and args (JOIN ON appears before WHERE in SQL,
+			// so joinArgs must be assembled before whereArgs at the final call site).
 			if allJoins != "" {
 				allJoins += " " + fc.joins
 			} else {
@@ -2121,6 +2134,19 @@ func (t *Translator) translateMerge(p *cypher.MergePlan, scope *cypher.BindingSc
 		propKeys = append(propKeys, k)
 	}
 	sort.Strings(propKeys)
+
+	// Collect any external variable aliases referenced by MERGE prop value
+	// expressions (e.g. person.bornIn references alias n0). These need to be
+	// present in the MERGE check FROM clause so the property can be resolved.
+	// We deduplicate by alias and emit CROSS JOIN nodes <alias> WHERE <alias>.id = ?
+	// with an idSentinel so the execution layer resolves the ID from idMap.
+	type externalRef struct {
+		varName string
+		alias   string
+	}
+	seenExternal := make(map[string]bool)
+	var externalRefs []externalRef
+
 	for _, key := range propKeys {
 		expr := p.Props[key]
 		sub := &Translator{dialect: t.dialect}
@@ -2130,10 +2156,34 @@ func (t *Translator) translateMerge(p *cypher.MergePlan, scope *cypher.BindingSc
 		}
 		whereParts = append(whereParts, t.dialect.JSONExtract(alias+".props", "$."+key)+" = "+valSQL)
 		whereArgs = append(whereArgs, sub.args...)
+
+		// Collect external variable references from this prop's expression.
+		if pe, ok := expr.(*cypher.PropExpr); ok {
+			if pe.Variable != p.Variable {
+				b, ok := scope.Resolve(pe.Variable)
+				if ok && b.IsNode && !seenExternal[b.Alias] && b.Alias != alias {
+					seenExternal[b.Alias] = true
+					externalRefs = append(externalRefs, externalRef{varName: pe.Variable, alias: b.Alias})
+				}
+			}
+		}
 	}
 
+	// Build the FROM clause: primary MERGE node table, plus any externally
+	// referenced node tables needed to resolve prop value expressions.
 	var checkSQL strings.Builder
 	fmt.Fprintf(&checkSQL, "SELECT %s.id FROM nodes %s", alias, alias)
+	var checkExtraArgs []any
+	for _, ref := range externalRefs {
+		fmt.Fprintf(&checkSQL, " JOIN nodes %s ON %s.id = ?", ref.alias, ref.alias)
+		checkExtraArgs = append(checkExtraArgs, idSentinel{VarName: ref.varName, Alias: ref.alias})
+	}
+	// Combine: external JOIN args first (they appear before WHERE in SQL), then
+	// the regular WHERE args (label checks and prop comparisons).
+	var checkArgs []any
+	checkArgs = append(checkArgs, checkExtraArgs...)
+	checkArgs = append(checkArgs, whereArgs...)
+
 	if len(whereParts) > 0 {
 		checkSQL.WriteString(" WHERE ")
 		checkSQL.WriteString(strings.Join(whereParts, " AND "))
@@ -2142,7 +2192,7 @@ func (t *Translator) translateMerge(p *cypher.MergePlan, scope *cypher.BindingSc
 
 	checkStmt := Statement{
 		SQL:        checkSQL.String(),
-		Args:       whereArgs,
+		Args:       checkArgs,
 		Kind:       KindMergeCheck,
 		CreatedVar: p.Variable,
 	}
@@ -2153,15 +2203,51 @@ func (t *Translator) translateMerge(p *cypher.MergePlan, scope *cypher.BindingSc
 	if err != nil {
 		return nil, fmt.Errorf("sql: MERGE insert props: %w", err)
 	}
-	var insertArgs []any
-	insertArgs = append(insertArgs, labels)
-	insertArgs = append(insertArgs, propsArgs...)
-	insertSQL := fmt.Sprintf("INSERT INTO nodes (labels, props) VALUES (?, json(%s))", propsJSON)
-	insertStmt := Statement{
-		SQL:        insertSQL,
-		Args:       insertArgs,
-		Kind:       KindMergeInsert,
-		CreatedVar: p.Variable,
+	var insertStmt Statement
+	if len(externalRefs) > 0 {
+		// When the MERGE props reference external node variables (e.g.
+		// MERGE (city {name: person.bornIn})), we can't use a plain VALUES
+		// INSERT because the external variable's props are not in scope.
+		// Instead, emit an INSERT … SELECT that JOINs against the external
+		// node(s), resolving their props via the id = ? condition.
+		var insertSQL strings.Builder
+		fmt.Fprintf(&insertSQL, "INSERT INTO nodes (labels, props) SELECT ?, json(%s) FROM", propsJSON)
+		var joinArgs []any
+		for i, ref := range externalRefs {
+			if i == 0 {
+				fmt.Fprintf(&insertSQL, " nodes %s", ref.alias)
+			} else {
+				fmt.Fprintf(&insertSQL, ", nodes %s", ref.alias)
+			}
+			joinArgs = append(joinArgs, idSentinel{VarName: ref.varName, Alias: ref.alias})
+		}
+		var whereParts2 []string
+		for _, ref := range externalRefs {
+			whereParts2 = append(whereParts2, fmt.Sprintf("%s.id = ?", ref.alias))
+		}
+		if len(whereParts2) > 0 {
+			fmt.Fprintf(&insertSQL, " WHERE %s", strings.Join(whereParts2, " AND "))
+		}
+		var insertArgs []any
+		insertArgs = append(insertArgs, labels)
+		insertArgs = append(insertArgs, propsArgs...)
+		insertArgs = append(insertArgs, joinArgs...)
+		insertStmt = Statement{
+			SQL:        insertSQL.String(),
+			Args:       insertArgs,
+			Kind:       KindMergeInsert,
+			CreatedVar: p.Variable,
+		}
+	} else {
+		var insertArgs []any
+		insertArgs = append(insertArgs, labels)
+		insertArgs = append(insertArgs, propsArgs...)
+		insertStmt = Statement{
+			SQL:        fmt.Sprintf("INSERT INTO nodes (labels, props) VALUES (?, json(%s))", propsJSON),
+			Args:       insertArgs,
+			Kind:       KindMergeInsert,
+			CreatedVar: p.Variable,
+		}
 	}
 
 	// ── 3. Build ON CREATE SET statements ───────────────────────────────────
@@ -2247,6 +2333,51 @@ func (t *Translator) translateSequenceWrite(sp *cypher.SequencePlan, scope *cyph
 	return allStmts, true, nil
 }
 
+// collectPlanAliases walks a plan tree and collects all SQL table aliases that
+// will be present in the FROM/JOIN clause when the plan is translated. This is
+// used by buildMatchForWriteSelect to filter out scope variables whose aliases
+// were introduced by write operations (CREATE / MERGE) and therefore do not
+// have a corresponding table row in the read-phase SELECT.
+func collectPlanAliases(plan cypher.LogicalPlan, aliases map[string]bool) {
+	if plan == nil {
+		return
+	}
+	switch p := plan.(type) {
+	case *cypher.MatchNodePlan:
+		if p.SQLAlias != "" {
+			aliases[p.SQLAlias] = true
+		}
+	case *cypher.MatchRelPlan:
+		if p.StartNode.SQLAlias != "" {
+			aliases[p.StartNode.SQLAlias] = true
+		}
+		if p.RelSQLAlias != "" {
+			aliases[p.RelSQLAlias] = true
+		}
+		if p.EndNode.SQLAlias != "" {
+			aliases[p.EndNode.SQLAlias] = true
+		}
+	case *cypher.VariableLengthRelPlan:
+		if p.StartNode.SQLAlias != "" {
+			aliases[p.StartNode.SQLAlias] = true
+		}
+		if p.EndNode.SQLAlias != "" {
+			aliases[p.EndNode.SQLAlias] = true
+		}
+	case *cypher.FilterPlan:
+		collectPlanAliases(p.Source, aliases)
+	case *cypher.SequencePlan:
+		for _, step := range p.Steps {
+			collectPlanAliases(step, aliases)
+		}
+	case *cypher.WithPlan:
+		collectPlanAliases(p.Source, aliases)
+	}
+	// Write plan nodes (CreateNodePlan, CreateRelPlan, MergePlan, DeleteNodePlan,
+	// DeleteRelPlan, SetPropPlan, etc.) introduce no table aliases in the FROM
+	// clause of the read-phase SELECT, so they are deliberately not listed here.
+}
+
 // buildMatchForWriteSelect generates a SELECT that returns the integer id of
 // every named variable visible in scope after running the given read steps.
 // The result columns are named by the Cypher variable name (e.g. "n", "r").
@@ -2274,7 +2405,19 @@ func (t *Translator) buildMatchForWriteSelect(readSteps []cypher.LogicalPlan, sc
 	matchT.args = append(matchT.args, fc.whereArgs...)
 	matchT.args = append(matchT.args, fc.extraWhereArgs...)
 
-	// Build the SELECT list: one "<alias>.id AS <varName>" per named variable.
+	// Collect the SQL table aliases that are actually present in the FROM/JOIN
+	// clause. We use these to filter scope variables: only variables whose alias
+	// appears in the read-phase FROM/JOIN should be included in the SELECT list.
+	// Variables introduced by write operations (CREATE, MERGE) have aliases that
+	// are NOT in the FROM clause, so including them would cause "no such column"
+	// SQL errors at execution time.
+	readAliases := make(map[string]bool)
+	for _, step := range readSteps {
+		collectPlanAliases(step, readAliases)
+	}
+
+	// Build the SELECT list: one "<alias>.id AS <varName>" per named variable
+	// whose alias is present in the read-phase FROM/JOIN clause.
 	// Sort variable names for deterministic column ordering.
 	varNames := scope.Names()
 	for i := 1; i < len(varNames); i++ {
@@ -2287,6 +2430,12 @@ func (t *Translator) buildMatchForWriteSelect(readSteps []cypher.LogicalPlan, sc
 	for _, varName := range varNames {
 		b, ok := scope.Resolve(varName)
 		if !ok {
+			continue
+		}
+		// Skip variables whose SQL alias is not in the read-phase FROM/JOIN.
+		// These are write-introduced variables (e.g. anonymous CREATE nodes)
+		// that have no table row in the read-phase SELECT.
+		if len(readAliases) > 0 && !readAliases[b.Alias] {
 			continue
 		}
 		col := fmt.Sprintf("%s.id AS %s", b.Alias, varName)

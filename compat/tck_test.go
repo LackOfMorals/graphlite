@@ -207,18 +207,47 @@ func (s *tckState) havingExecutedDocString(ctx context.Context, doc *godog.DocSt
 	if err != nil {
 		return fmt.Errorf("having executed %q: %w", cypher, err)
 	}
-	eager, err := graphlite.NewEagerResult(ctx, qr)
+	// Drain the result cursor but do NOT accumulate counters from "having
+	// executed" steps. The TCK spec treats "And having executed:" as pure setup;
+	// only the "When executing query:" step's side-effects count toward the
+	// "And the side effects should be:" assertions.
+	_, err = graphlite.NewEagerResult(ctx, qr)
 	if err != nil {
 		return fmt.Errorf("collect result for %q: %w", cypher, err)
 	}
-	if eager.Summary != nil {
-		c := eager.Summary.Counters()
-		s.nodesCreated += c.NodesCreated()
-		s.nodesDeleted += c.NodesDeleted()
-		s.relsCreated += c.RelationshipsCreated()
-		s.relsDeleted += c.RelationshipsDeleted()
-		s.propsSet += c.PropertiesSet()
+	return nil
+}
+
+// executingControlQueryDocString handles "When executing control query:" steps.
+// Unlike "And having executed:", a control query updates lastResult so that
+// subsequent "Then the result should be..." assertions can check it.
+// Side-effects from control queries are NOT accumulated (they are post-main-query
+// verification steps, not part of the scenario's side-effect count).
+func (s *tckState) executingControlQueryDocString(ctx context.Context, doc *godog.DocString) error {
+	if s.skipped {
+		return nil
 	}
+	if s.db == nil {
+		return fmt.Errorf("database not initialised")
+	}
+	cypher := strings.TrimSpace(doc.Content)
+	qr, err := s.db.RunQuery(ctx, cypher, nil)
+	if err != nil {
+		s.lastError = err
+		s.lastResult = nil
+		return nil
+	}
+	eager, err := graphlite.NewEagerResult(ctx, qr)
+	if err != nil {
+		s.lastError = err
+		s.lastResult = nil
+		return nil
+	}
+	// Update lastResult so subsequent "Then the result should be..." checks
+	// evaluate the control query's output.
+	s.lastResult = eager
+	s.lastError = nil
+	// Do NOT accumulate counters — control queries are verification-only.
 	return nil
 }
 
@@ -600,10 +629,12 @@ func TestTCK(t *testing.T) {
 					return state.errorShouldBeRaised(ctx, "ArgumentError", "runtime", code)
 				})
 
-			// ── Control query (additional setup step after main query) ────────
-			// Treated the same as "having executed:" — runs a Cypher query and
-			// accumulates counters but does not overwrite lastResult/lastError.
-			sc.Step(`^executing control query:$`, state.havingExecutedDocString)
+			// ── Control query (verification step after main query) ────────────
+			// Runs a Cypher query and updates lastResult/lastError so the
+			// subsequent "Then the result should be..." assertion checks the
+			// control query's output (not the main query's output).
+			// Side-effects from control queries are NOT accumulated.
+			sc.Step(`^executing control query:$`, state.executingControlQueryDocString)
 
 			// ── Parameters are: (table of param name/value pairs) ─────────────
 			// Graphlite does not support table-defined query parameters; accept
