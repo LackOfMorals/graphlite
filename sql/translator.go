@@ -54,6 +54,11 @@ const (
 	// KindMergeInsert is the INSERT INTO nodes statement emitted by MERGE when
 	// the node did not previously exist.
 	KindMergeInsert
+	// KindSelectAfterWrite is a SELECT statement emitted at the end of a write
+	// batch (e.g. CREATE … RETURN …). The execution layer resolves any idSentinel
+	// values in Args (using the idMap populated by preceding write statements),
+	// then runs the SELECT and returns its rows as the query result.
+	KindSelectAfterWrite
 )
 
 // Statement is a single parameterised SQL statement together with its bind
@@ -121,6 +126,32 @@ func NewTranslator(d Dialect) *Translator {
 // For write plans (CREATE, SET, DELETE, SequencePlan of write ops) the result
 // may contain multiple Statements; the caller must execute them all in order.
 func (t *Translator) Translate(plan cypher.LogicalPlan, scope *cypher.BindingScope) (Result, error) {
+	// Special case: ReturnPlan whose source is a write plan (CREATE … RETURN …).
+	// Translate the writes first, then emit a KindSelectAfterWrite SELECT that
+	// reads back the created/modified nodes by their idSentinel IDs.
+	if rp, ok := plan.(*cypher.ReturnPlan); ok {
+		if rp.Source != nil {
+			writeStmts, handled, err := t.translateWritePlan(rp.Source, scope)
+			if err != nil {
+				return Result{}, err
+			}
+			if handled {
+				// Translate the RETURN clause as a SELECT that reads back
+				// created nodes from the database using their IDs.
+				selectStmt, err := t.translateReturnAfterWrite(rp, scope)
+				if err != nil {
+					return Result{}, err
+				}
+				allStmts := append(writeStmts, selectStmt)
+				return Result{
+					SQL:        allStmts[0].SQL,
+					Args:       allStmts[0].Args,
+					Statements: allStmts,
+				}, nil
+			}
+		}
+	}
+
 	// Try write-plan translation first (handles CREATE/SET/DELETE/SequencePlan).
 	stmts, handled, err := t.translateWritePlan(plan, scope)
 	if err != nil {
@@ -144,6 +175,179 @@ func (t *Translator) Translate(plan cypher.LogicalPlan, scope *cypher.BindingSco
 	}
 	stmt := Statement{SQL: sqlStr, Args: t.args, Kind: KindSelect}
 	return Result{SQL: sqlStr, Args: t.args, Statements: []Statement{stmt}}, nil
+}
+
+// translateReturnAfterWrite translates a ReturnPlan that follows write operations
+// (CREATE … RETURN …). It emits a KindSelectAfterWrite SELECT that reads back
+// the created nodes/relationships from the database using idSentinel values in
+// the WHERE clause. The idSentinels are resolved by the execution layer after
+// write statements run.
+//
+// Only variables that appear in the RETURN projections are included in the FROM
+// clause to avoid unnecessary table scans.
+func (t *Translator) translateReturnAfterWrite(rp *cypher.ReturnPlan, scope *cypher.BindingScope) (Statement, error) {
+	// Determine which variables are referenced in the RETURN projections.
+	// We only add tables for variables that actually appear in the SELECT list.
+	referencedVars := collectReferencedVars(rp.Projections)
+	for _, s := range rp.OrderBy {
+		collectReferencedVarsFromExpr(s.Expr, referencedVars)
+	}
+
+	// Build FROM + WHERE id = ? fragments for referenced node and edge variables.
+	var fromParts []string  // "nodes <alias>" or "edges <alias>"
+	var whereFrags []string // "<alias>.id = ?"
+	var sentinelArgs []any
+
+	// We need a deterministic order for the FROM clause; iterate scope names sorted.
+	varNames := scope.Names()
+	for i := 1; i < len(varNames); i++ {
+		for j := i; j > 0 && varNames[j] < varNames[j-1]; j-- {
+			varNames[j], varNames[j-1] = varNames[j-1], varNames[j]
+		}
+	}
+
+	seenAliases := make(map[string]bool)
+	for _, name := range varNames {
+		b, ok := scope.Resolve(name)
+		if !ok {
+			continue
+		}
+		// Skip internal anonymous variables (not referenced in projections).
+		if len(referencedVars) > 0 && !referencedVars[name] {
+			continue
+		}
+		if seenAliases[b.Alias] {
+			continue
+		}
+		seenAliases[b.Alias] = true
+
+		if b.IsNode {
+			fromParts = append(fromParts, "nodes "+b.Alias)
+			whereFrags = append(whereFrags, b.Alias+".id = ?")
+			sentinelArgs = append(sentinelArgs, idSentinel{VarName: name, Alias: b.Alias})
+		} else if b.IsRel {
+			fromParts = append(fromParts, "edges "+b.Alias)
+			whereFrags = append(whereFrags, b.Alias+".id = ?")
+			sentinelArgs = append(sentinelArgs, idSentinel{VarName: name, Alias: b.Alias})
+		}
+	}
+
+	// Build SELECT list from RETURN projections.
+	retT := &Translator{dialect: t.dialect}
+	selectList, err := retT.buildSelectList(rp.Projections, scope)
+	if err != nil {
+		return Statement{}, fmt.Errorf("sql: RETURN after write SELECT list: %w", err)
+	}
+
+	var b strings.Builder
+	b.WriteString("SELECT ")
+	if rp.Distinct {
+		b.WriteString("DISTINCT ")
+	}
+	b.WriteString(selectList)
+
+	if len(fromParts) > 0 {
+		b.WriteString(" FROM ")
+		b.WriteString(strings.Join(fromParts, ", "))
+	}
+	if len(whereFrags) > 0 {
+		b.WriteString(" WHERE ")
+		b.WriteString(strings.Join(whereFrags, " AND "))
+	}
+
+	// ORDER BY.
+	if len(rp.OrderBy) > 0 {
+		b.WriteString(" ORDER BY ")
+		for i, s := range rp.OrderBy {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			sortSQL, err := retT.exprToSQL(s.Expr, scope)
+			if err != nil {
+				return Statement{}, fmt.Errorf("sql: RETURN after write ORDER BY: %w", err)
+			}
+			b.WriteString(sortSQL)
+			if s.Descending {
+				b.WriteString(" DESC")
+			} else {
+				b.WriteString(" ASC")
+			}
+		}
+	}
+
+	if rp.Limit != nil {
+		fmt.Fprintf(&b, " LIMIT %d", *rp.Limit)
+		if rp.Skip != nil {
+			fmt.Fprintf(&b, " OFFSET %d", *rp.Skip)
+		}
+	} else if rp.Skip != nil {
+		fmt.Fprintf(&b, " LIMIT -1 OFFSET %d", *rp.Skip)
+	}
+
+	// The args are: SELECT-list args (literals from projections) + sentinel args
+	// (idSentinel values resolved at execution time from idMap).
+	var allArgs []any
+	allArgs = append(allArgs, retT.args...)
+	allArgs = append(allArgs, sentinelArgs...)
+
+	return Statement{
+		SQL:  b.String(),
+		Args: allArgs,
+		Kind: KindSelectAfterWrite,
+	}, nil
+}
+
+// collectReferencedVars returns a set of Cypher variable names that appear in
+// the given projection list. This is used by translateReturnAfterWrite to avoid
+// adding unnecessary table entries for anonymous internal variables.
+func collectReferencedVars(projections []cypher.ProjectionItem) map[string]bool {
+	refs := make(map[string]bool)
+	for _, proj := range projections {
+		collectReferencedVarsFromExpr(proj.Expr, refs)
+	}
+	return refs
+}
+
+// collectReferencedVarsFromExpr recursively collects variable names from an expression.
+func collectReferencedVarsFromExpr(expr cypher.Expr, refs map[string]bool) {
+	if expr == nil {
+		return
+	}
+	switch e := expr.(type) {
+	case *cypher.VarExpr:
+		refs[e.Name] = true
+	case *cypher.PropExpr:
+		refs[e.Variable] = true
+	case *cypher.ComparisonExpr:
+		collectReferencedVarsFromExpr(e.Left, refs)
+		collectReferencedVarsFromExpr(e.Right, refs)
+	case *cypher.BoolExpr:
+		collectReferencedVarsFromExpr(e.Left, refs)
+		collectReferencedVarsFromExpr(e.Right, refs)
+	case *cypher.NotExpr:
+		collectReferencedVarsFromExpr(e.Expr, refs)
+	case *cypher.AggCallExpr:
+		collectReferencedVarsFromExpr(e.Arg, refs)
+	case *cypher.NullCheckExpr:
+		collectReferencedVarsFromExpr(e.Expr, refs)
+	case *cypher.InListExpr:
+		collectReferencedVarsFromExpr(e.Expr, refs)
+		for _, item := range e.List {
+			collectReferencedVarsFromExpr(item, refs)
+		}
+	case *cypher.StringMatchExpr:
+		collectReferencedVarsFromExpr(e.Expr, refs)
+		collectReferencedVarsFromExpr(e.Pattern, refs)
+	case *cypher.CaseExpr:
+		collectReferencedVarsFromExpr(e.Subject, refs)
+		for _, wc := range e.WhenClauses {
+			collectReferencedVarsFromExpr(wc.Condition, refs)
+			collectReferencedVarsFromExpr(wc.CaseVal, refs)
+			collectReferencedVarsFromExpr(wc.Value, refs)
+		}
+		collectReferencedVarsFromExpr(e.Else, refs)
+	}
+	// LiteralExpr, ParamRef, RawExpr — no variable references.
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1666,7 +1870,7 @@ func (t *Translator) translateCreateRel(p *cypher.CreateRelPlan, scope *cypher.B
 	args = append(args, propsArgs...)
 
 	sql := fmt.Sprintf("INSERT INTO edges (type, start_id, end_id, props) VALUES (?, ?, ?, json(%s))", propsJSON)
-	return Statement{SQL: sql, Args: args, Kind: KindInsertEdge}, nil
+	return Statement{SQL: sql, Args: args, Kind: KindInsertEdge, CreatedVar: p.RelVariable}, nil
 }
 
 // translateSetProp emits:

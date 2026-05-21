@@ -23,6 +23,11 @@ type QueryResult struct {
 	err      error
 	consumed bool
 	counters queryCounters
+
+	// inMemory holds pre-collected records for in-memory results (no sql.Rows).
+	// When non-nil, Next/Record/Consume iterate over this slice instead of rows.
+	inMemory    []*Record
+	inMemoryPos int
 }
 
 // NewQueryResultFromRows constructs a QueryResult, deriving column names from
@@ -33,6 +38,19 @@ func NewQueryResultFromRows(rows *sql.Rows) (*QueryResult, error) {
 		return nil, fmt.Errorf("graphlite: read column names: %w", err)
 	}
 	return &QueryResult{rows: rows, keys: cols}, nil
+}
+
+// newInMemoryQueryResult constructs a QueryResult backed by a pre-collected
+// slice of records. Used by the write-then-select execution path when multiple
+// result rows must be assembled from several SELECT calls.
+func newInMemoryQueryResult(keys []string, records []*Record) *QueryResult {
+	if records == nil {
+		records = []*Record{}
+	}
+	return &QueryResult{
+		keys:     keys,
+		inMemory: records,
+	}
 }
 
 // Keys returns the projection key names for this result set.
@@ -47,6 +65,16 @@ func (r *QueryResult) Keys() []string {
 func (r *QueryResult) Next(_ context.Context) bool {
 	if r.consumed || r.err != nil {
 		return false
+	}
+	// In-memory mode: iterate over pre-collected records.
+	if r.inMemory != nil {
+		if r.inMemoryPos >= len(r.inMemory) {
+			r.consumed = true
+			return false
+		}
+		r.record = r.inMemory[r.inMemoryPos]
+		r.inMemoryPos++
+		return true
 	}
 	if !r.rows.Next() {
 		if err := r.rows.Err(); err != nil {
@@ -88,8 +116,13 @@ func (r *QueryResult) Err() error {
 
 // Consume drains any remaining records, closes the underlying *sql.Rows, and
 // returns the ResultSummary. After Consume returns the cursor is closed.
-// Consume is safe to call on a write result (where rows is nil).
+// Consume is safe to call on a write result (where rows is nil) and on
+// in-memory results.
 func (r *QueryResult) Consume(_ context.Context) (ResultSummary, error) {
+	if r.inMemory != nil {
+		r.consumed = true
+		return &resultSummary{counters: r.counters}, r.err
+	}
 	if !r.consumed && r.rows != nil {
 		// Drain remaining rows so we can release the cursor cleanly.
 		for r.rows.Next() {
@@ -108,8 +141,19 @@ func (r *QueryResult) Consume(_ context.Context) (ResultSummary, error) {
 }
 
 // Collect drains all remaining records into a slice and closes the cursor.
-// Collect is safe to call on a write result (where rows is nil).
+// Collect is safe to call on a write result (where rows is nil) and on
+// in-memory results.
 func (r *QueryResult) Collect(ctx context.Context) ([]*Record, error) {
+	// Fast path for in-memory results: return remaining records directly.
+	if r.inMemory != nil {
+		recs := r.inMemory[r.inMemoryPos:]
+		r.inMemoryPos = len(r.inMemory)
+		r.consumed = true
+		if r.err != nil {
+			return nil, r.err
+		}
+		return recs, nil
+	}
 	var recs []*Record
 	for r.Next(ctx) {
 		rec := r.Record()

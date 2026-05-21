@@ -188,6 +188,13 @@ func executeStatements(ctx context.Context, ex execer, sqlResult glsql.Result) (
 		return qr, nil
 	}
 
+	// Write-then-read: statement list ends with a KindSelectAfterWrite.
+	// Execute all write statements first, then run the final SELECT using the
+	// resolved IDs from the write batch's idMap.
+	if len(stmts) >= 1 && stmts[len(stmts)-1].Kind == glsql.KindSelectAfterWrite {
+		return execWriteThenSelect(ctx, ex, stmts)
+	}
+
 	// If the statement list contains a MERGE check and ex is a plain *stdsql.DB,
 	// wrap the execution in an implicit transaction for atomicity.
 	hasMerge := false
@@ -218,6 +225,115 @@ func executeStatements(ctx context.Context, ex execer, sqlResult glsql.Result) (
 
 	// Write (or guard+write) statements: execute in order.
 	return execWriteStatements(ctx, ex, stmts)
+}
+
+// execWriteThenSelect executes a write-then-read statement sequence produced by
+// CREATE … RETURN … and MATCH … SET/DELETE … RETURN … queries.
+//
+// The statement list is: [optional KindMatchForWrite, write stmts..., KindSelectAfterWrite].
+//
+// For pure CREATE+RETURN (no KindMatchForWrite):
+//   - Runs all write statements once, collecting idMap from INSERT results.
+//   - Runs the final SELECT once with idSentinels resolved from idMap.
+//
+// For MATCH+write+RETURN (starts with KindMatchForWrite):
+//   - Runs the match SELECT to get matched IDs row by row.
+//   - For each matched row: runs write statements, then runs the final SELECT.
+//   - Collects all result rows across all matched rows.
+func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement) (*QueryResult, error) {
+	selectStmt := stmts[len(stmts)-1]
+	writeStmts := stmts[:len(stmts)-1]
+	var ctr QueryCounters
+
+	// Check if the write batch starts with a KindMatchForWrite.
+	var matchStmt *glsql.Statement
+	writeBatch := writeStmts
+	if len(writeStmts) > 0 && writeStmts[0].Kind == glsql.KindMatchForWrite {
+		matchStmt = &writeStmts[0]
+		writeBatch = writeStmts[1:]
+	}
+
+	if matchStmt != nil {
+		// MATCH + write + RETURN: iterate over matched rows.
+		matchedRows, cols, err := collectMatchRows(ctx, ex, matchStmt)
+		if err != nil {
+			return nil, err
+		}
+
+		// Collect all result rows from the SELECT across all matched rows.
+		var allRecords []*Record
+		var resultKeys []string
+
+		for _, rowVals := range matchedRows {
+			idMap := make(map[string]int64)
+			for i, col := range cols {
+				switch v := rowVals[i].(type) {
+				case int64:
+					idMap[col] = v
+				case float64:
+					idMap[col] = int64(v)
+				}
+			}
+
+			if err := execWriteBatch(ctx, ex, writeBatch, idMap, &ctr); err != nil {
+				return nil, err
+			}
+
+			// Run the final SELECT for this matched row.
+			resolved, err := glsql.ResolveIDs(glsql.Result{Statements: []glsql.Statement{selectStmt}}, idMap)
+			if err != nil {
+				return nil, fmt.Errorf("graphlite: write-then-select resolve IDs: %w", err)
+			}
+			s := resolved.Statements[0]
+
+			rows, err := ex.QueryContext(ctx, s.SQL, s.Args...)
+			if err != nil {
+				return nil, fmt.Errorf("graphlite: write-then-select query: %w", err)
+			}
+			rowQR, err := NewQueryResultFromRows(rows)
+			if err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			recs, err := rowQR.Collect(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("graphlite: write-then-select collect: %w", err)
+			}
+			if len(resultKeys) == 0 {
+				resultKeys = rowQR.Keys()
+			}
+			allRecords = append(allRecords, recs...)
+		}
+
+		qr := newInMemoryQueryResult(resultKeys, allRecords)
+		qr.SetCounters(ctr)
+		return qr, nil
+	}
+
+	// Pure write (no MATCH): run all write statements once.
+	idMap := make(map[string]int64)
+	if err := execWriteBatch(ctx, ex, writeBatch, idMap, &ctr); err != nil {
+		return nil, err
+	}
+
+	// Resolve idSentinels in the SELECT statement using the populated idMap.
+	resolved, err := glsql.ResolveIDs(glsql.Result{Statements: []glsql.Statement{selectStmt}}, idMap)
+	if err != nil {
+		return nil, fmt.Errorf("graphlite: write-then-select resolve IDs: %w", err)
+	}
+	s := resolved.Statements[0]
+
+	rows, err := ex.QueryContext(ctx, s.SQL, s.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("graphlite: write-then-select query: %w", err)
+	}
+	qr, err := NewQueryResultFromRows(rows)
+	if err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	qr.SetCounters(ctr)
+	return qr, nil
 }
 
 // execWriteStatements runs write statements, resolving idSentinels between steps.
@@ -366,8 +482,18 @@ func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 			ctr.NodesCreated++
 
 		case glsql.KindInsertEdge:
-			if _, err := ex.ExecContext(ctx, s.SQL, s.Args...); err != nil {
+			res, err := ex.ExecContext(ctx, s.SQL, s.Args...)
+			if err != nil {
 				return fmt.Errorf("graphlite: insert edge: %w", err)
+			}
+			// Capture the new edge ID in idMap when the relationship has a variable
+			// name (needed for CREATE … RETURN r … queries).
+			if stmt.CreatedVar != "" {
+				lastID, err := res.LastInsertId()
+				if err != nil {
+					return fmt.Errorf("graphlite: insert edge last-id: %w", err)
+				}
+				idMap[stmt.CreatedVar] = lastID
 			}
 			ctr.RelationshipsCreated++
 

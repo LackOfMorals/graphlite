@@ -25,6 +25,7 @@ func Plan(q *Query, scope *BindingScope) (LogicalPlan, error) {
 type aliasCounter struct {
 	nodeCount int
 	relCount  int
+	anonCount int
 }
 
 func (a *aliasCounter) nextNode() string {
@@ -37,6 +38,15 @@ func (a *aliasCounter) nextRel() string {
 	alias := fmt.Sprintf("r%d", a.relCount)
 	a.relCount++
 	return alias
+}
+
+// nextAnon returns a unique internal variable name for anonymous CREATE nodes.
+// These names are bound in scope so the translator can resolve them for
+// CREATE relationship statements, but they are never exposed to users.
+func (a *aliasCounter) nextAnon() string {
+	name := fmt.Sprintf("_anon%d", a.anonCount)
+	a.anonCount++
+	return name
 }
 
 // ─── query planning ───────────────────────────────────────────────────────────
@@ -183,28 +193,55 @@ func planQuery(q *Query, scope *BindingScope) (LogicalPlan, error) {
 		base = &FilterPlan{Source: base, Predicate: filterPred}
 	}
 
-	// Wire up RETURN clause.
-	if returnPlan != nil {
-		if base == nil {
-			// RETURN without a MATCH — treat as a standalone projection with nil source.
-		}
-		returnPlan.Source = base
-		base = returnPlan
-	}
-
-	// Append write plans.
-	if len(writePlans) > 0 {
+	// Wire up RETURN clause and write plans.
+	//
+	// When both write plans and a RETURN clause are present, make ReturnPlan the
+	// outermost node with the write operations (and optional MATCH base) as its
+	// source. The translator emits write statements followed by a
+	// KindSelectAfterWrite that reads back the result set.
+	//
+	//   No MATCH:   ReturnPlan{Source: writePlan(s)}
+	//   MATCH+write: ReturnPlan{Source: SequencePlan{[matchBase, write(s)]}}
+	//
+	// When there is no RETURN or no write plans, use the original assembly logic.
+	if returnPlan != nil && len(writePlans) > 0 {
+		// Build the write source for ReturnPlan.Source.
+		var writeSource LogicalPlan
 		if base != nil {
-			// MATCH + write: combine into a SequencePlan (MATCH subtree first,
-			// then the write operations).
+			// MATCH + write + RETURN: embed MATCH base and writes in a SequencePlan.
 			all := make([]LogicalPlan, 0, 1+len(writePlans))
 			all = append(all, base)
 			all = append(all, writePlans...)
-			base = &SequencePlan{Steps: all}
+			writeSource = &SequencePlan{Steps: all}
 		} else if len(writePlans) == 1 {
-			base = writePlans[0]
+			writeSource = writePlans[0]
 		} else {
-			base = &SequencePlan{Steps: writePlans}
+			writeSource = &SequencePlan{Steps: writePlans}
+		}
+		returnPlan.Source = writeSource
+		base = returnPlan
+	} else {
+		// No write plans or no RETURN: use the original assembly logic.
+		if returnPlan != nil {
+			if base == nil {
+				// RETURN without a MATCH — treat as a standalone projection with nil source.
+			}
+			returnPlan.Source = base
+			base = returnPlan
+		}
+
+		if len(writePlans) > 0 {
+			if base != nil {
+				// MATCH + write (no RETURN): combine into a SequencePlan.
+				all := make([]LogicalPlan, 0, 1+len(writePlans))
+				all = append(all, base)
+				all = append(all, writePlans...)
+				base = &SequencePlan{Steps: all}
+			} else if len(writePlans) == 1 {
+				base = writePlans[0]
+			} else {
+				base = &SequencePlan{Steps: writePlans}
+			}
 		}
 	}
 
@@ -523,46 +560,52 @@ func planCreateClause(cc *CreateClause, scope *BindingScope, ac *aliasCounter) (
 			plans = append(plans, nodePlan)
 		} else {
 			// Chain: create the start node if it does not yet exist in scope.
-			_, startAlreadyBound := scope.Resolve(part.Start.Variable)
-			if part.Start.Variable == "" || !startAlreadyBound {
+			startVar := part.Start.Variable
+			_, startAlreadyBound := scope.Resolve(startVar)
+			if startVar == "" || !startAlreadyBound {
+				// For anonymous nodes, generate a unique internal name so the
+				// translator can resolve the variable in scope for the relationship.
+				if startVar == "" {
+					startVar = ac.nextAnon()
+				}
 				startAlias := ac.nextNode()
 				nodePlan := &CreateNodePlan{
-					Variable: part.Start.Variable,
+					Variable: startVar,
 					Labels:   part.Start.Labels,
 					Props:    planPropsMap(part.Start.Props),
 				}
-				if part.Start.Variable != "" {
-					scope.Bind(part.Start.Variable, Binding{
-						Alias:  startAlias,
-						Column: startAlias + ".id",
-						Table:  "nodes",
-						IsNode: true,
-					})
-				}
+				scope.Bind(startVar, Binding{
+					Alias:  startAlias,
+					Column: startAlias + ".id",
+					Table:  "nodes",
+					IsNode: true,
+				})
 				plans = append(plans, nodePlan)
 			}
 
-			currentVar := part.Start.Variable
+			currentVar := startVar
 
 			for _, hop := range part.Chain {
 				// Create the end node if not in scope.
 				endVar := hop.Node.Variable
 				_, endAlreadyBound := scope.Resolve(endVar)
 				if endVar == "" || !endAlreadyBound {
+					// For anonymous nodes, generate a unique internal name.
+					if endVar == "" {
+						endVar = ac.nextAnon()
+					}
 					endAlias := ac.nextNode()
 					endNodePlan := &CreateNodePlan{
 						Variable: endVar,
 						Labels:   hop.Node.Labels,
 						Props:    planPropsMap(hop.Node.Props),
 					}
-					if endVar != "" {
-						scope.Bind(endVar, Binding{
-							Alias:  endAlias,
-							Column: endAlias + ".id",
-							Table:  "nodes",
-							IsNode: true,
-						})
-					}
+					scope.Bind(endVar, Binding{
+						Alias:  endAlias,
+						Column: endAlias + ".id",
+						Table:  "nodes",
+						IsNode: true,
+					})
 					plans = append(plans, endNodePlan)
 				}
 
@@ -573,6 +616,17 @@ func planCreateClause(cc *CreateClause, scope *BindingScope, ac *aliasCounter) (
 					StartVar:    currentVar,
 					EndVar:      endVar,
 					Props:       planPropsMap(hop.Rel.Props),
+				}
+				// Bind the relationship variable in scope so the translator can
+				// reference it in RETURN clauses (e.g. RETURN r.prop).
+				if hop.Rel.Variable != "" {
+					relAlias := ac.nextRel()
+					scope.Bind(hop.Rel.Variable, Binding{
+						Alias:  relAlias,
+						Column: relAlias + ".id",
+						Table:  "edges",
+						IsRel:  true,
+					})
 				}
 				plans = append(plans, relPlan)
 				currentVar = endVar
