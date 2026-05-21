@@ -3,17 +3,18 @@ package graphlite
 
 import (
 	"context"
-	stdsql "database/sql"
 	"fmt"
+
+	"github.com/LackOfMorals/graphlite/store"
 )
 
 // Tx is an explicit graphlite transaction. All queries run via Run share the
-// same underlying SQLite transaction. Call Commit to persist changes or
+// same underlying database transaction. Call Commit to persist changes or
 // Rollback to discard them.
 //
 // A Tx must not be used after Commit or Rollback returns.
 type Tx struct {
-	rawTx *stdsql.Tx
+	rawTx store.TxExecer
 	done  bool
 }
 

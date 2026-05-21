@@ -100,9 +100,9 @@ func (d *DB) RunQuery(ctx context.Context, cypherStr string, params map[string]a
 				return nil, ErrReadOnly
 			}
 		}
-		return executeStatements(ctx, d.st.DB(), sqlResult)
+		return executeStatements(ctx, d.st.Exec(), sqlResult, nil)
 	}
-	return runQuery(ctx, d.st.DB(), cypherStr, params)
+	return runQuery(ctx, d.st.Exec(), cypherStr, params, d.st.BeginExecTx)
 }
 
 // BeginTx starts an explicit transaction and returns a *Tx.
@@ -111,40 +111,39 @@ func (d *DB) RunQuery(ctx context.Context, cypherStr string, params map[string]a
 // at the transaction level — use WithReadOnly() on Open to enforce read-only
 // access across the entire database connection.
 func (d *DB) BeginTx(ctx context.Context, _ bool) (*Tx, error) {
-	rawTx, err := d.st.DB().BeginTx(ctx, nil)
+	txEx, err := d.st.BeginExecTx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("graphlite: begin transaction: %w", err)
 	}
-	return &Tx{rawTx: rawTx}, nil
+	return &Tx{rawTx: txEx}, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Core execution pipeline (shared by auto-commit and transactional paths)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// execer abstracts *stdsql.DB and *stdsql.Tx for the execution helpers.
-type execer interface {
-	QueryContext(ctx context.Context, query string, args ...any) (*stdsql.Rows, error)
-	QueryRowContext(ctx context.Context, query string, args ...any) *stdsql.Row
-	ExecContext(ctx context.Context, query string, args ...any) (stdsql.Result, error)
-}
+// execer is an alias for store.Execer used throughout the execution helpers.
+// Any *sql.DB, *sql.Tx, or store.TxExecer satisfies this interface.
+type execer = store.Execer
 
-// runQuery is the execution pipeline against *stdsql.DB (auto-commit).
-func runQuery(ctx context.Context, db *stdsql.DB, cypherStr string, params map[string]any) (*QueryResult, error) {
+// runQuery is the execution pipeline for auto-commit mode.
+// beginTxFn is used to start an implicit transaction for atomic MERGE operations.
+func runQuery(ctx context.Context, ex execer, cypherStr string, params map[string]any, beginTxFn func(context.Context) (store.TxExecer, error)) (*QueryResult, error) {
 	sqlResult, err := buildSQLResult(cypherStr, params)
 	if err != nil {
 		return nil, err
 	}
-	return executeStatements(ctx, db, sqlResult)
+	return executeStatements(ctx, ex, sqlResult, beginTxFn)
 }
 
-// runQueryTx is the execution pipeline against *stdsql.Tx (transactional).
-func runQueryTx(ctx context.Context, tx *stdsql.Tx, cypherStr string, params map[string]any) (*QueryResult, error) {
+// runQueryTx is the execution pipeline for transactional mode. beginTxFn is
+// nil because the caller already holds an open transaction.
+func runQueryTx(ctx context.Context, ex execer, cypherStr string, params map[string]any) (*QueryResult, error) {
 	sqlResult, err := buildSQLResult(cypherStr, params)
 	if err != nil {
 		return nil, err
 	}
-	return executeStatements(ctx, tx, sqlResult)
+	return executeStatements(ctx, ex, sqlResult, nil)
 }
 
 // buildSQLResult runs parse → plan → translate → bind-params, returning the
@@ -190,16 +189,13 @@ func buildSQLResult(cypherStr string, params map[string]any) (glsql.Result, erro
 // Statement executor
 // ─────────────────────────────────────────────────────────────────────────────
 
-// executeStatements runs all Statements in sqlResult against ex (a *stdsql.DB
-// or *stdsql.Tx). For a single KindSelect it returns a lazy QueryResult; for
-// write statements it executes each in order and returns a QueryResult with
-// counters.
+// executeStatements runs all Statements in sqlResult against ex. For a single
+// KindSelect it returns a lazy QueryResult; for write statements it executes
+// each in order and returns a QueryResult with counters.
 //
-// When the statement list contains a KindMergeCheck and ex is a *stdsql.DB
-// (auto-commit), the execution is wrapped in an implicit transaction so the
-// check+insert is atomic. If ex is already a *stdsql.Tx the caller's
-// transaction is used directly.
-func executeStatements(ctx context.Context, ex execer, sqlResult glsql.Result) (*QueryResult, error) {
+// beginTxFn, when non-nil, is called to start an implicit transaction for
+// atomic MERGE operations. Pass nil when ex is already transaction-scoped.
+func executeStatements(ctx context.Context, ex execer, sqlResult glsql.Result, beginTxFn func(context.Context) (store.TxExecer, error)) (*QueryResult, error) {
 	stmts := sqlResult.Statements
 	if len(stmts) == 0 {
 		return nil, fmt.Errorf("graphlite: no SQL statements to execute")
@@ -226,7 +222,7 @@ func executeStatements(ctx context.Context, ex execer, sqlResult glsql.Result) (
 		return execWriteThenSelect(ctx, ex, stmts)
 	}
 
-	// If the statement list contains a MERGE check and ex is a plain *stdsql.DB,
+	// If the statement list contains a MERGE check and we have a beginTxFn,
 	// wrap the execution in an implicit transaction for atomicity.
 	hasMerge := false
 	for _, s := range stmts {
@@ -235,23 +231,21 @@ func executeStatements(ctx context.Context, ex execer, sqlResult glsql.Result) (
 			break
 		}
 	}
-	if hasMerge {
-		if db, ok := ex.(*stdsql.DB); ok {
-			tx, err := db.BeginTx(ctx, nil)
-			if err != nil {
-				return nil, fmt.Errorf("graphlite: MERGE begin tx: %w", err)
-			}
-			qr, err := execWriteStatements(ctx, tx, stmts)
-			if err != nil {
-				_ = tx.Rollback()
-				return nil, err
-			}
-			if err := tx.Commit(); err != nil {
-				return nil, fmt.Errorf("graphlite: MERGE commit: %w", err)
-			}
-			return qr, nil
+	if hasMerge && beginTxFn != nil {
+		txEx, err := beginTxFn(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("graphlite: MERGE begin tx: %w", err)
 		}
-		// Already a *stdsql.Tx — use it directly (the caller manages the transaction).
+		qr, err := execWriteStatements(ctx, txEx, stmts)
+		if err != nil {
+			_ = txEx.Rollback()
+			return nil, err
+		}
+		if err := txEx.Commit(); err != nil {
+			return nil, fmt.Errorf("graphlite: MERGE commit: %w", err)
+		}
+		return qr, nil
+		// beginTxFn == nil: already in a transaction, fall through to execWriteStatements.
 	}
 
 	// Write (or guard+write) statements: execute in order.
@@ -619,8 +613,8 @@ func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 //
 // If the check finds a row → run ON MATCH SETs (skip insert and ON CREATE SETs).
 // If the check finds no row → run INSERT + ON CREATE SETs (skip ON MATCH SETs).
-// All actions run within the caller's transaction (ex is already a *stdsql.Tx or
-// *stdsql.DB held by the execer; the BeginTx wrapping is the caller's responsibility).
+// All actions run within the caller's execer scope (either a TxExecer already
+// in a transaction, or a plain Execer when beginTxFn wraps the MERGE).
 func execMergeBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idMap map[string]int64, ctr *QueryCounters) (consumed int, err error) {
 	if len(stmts) == 0 || stmts[0].Kind != glsql.KindMergeCheck {
 		return 0, fmt.Errorf("graphlite: execMergeBatch called on non-MergeCheck statement")

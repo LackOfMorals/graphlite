@@ -818,14 +818,6 @@ func openTx(t *testing.T) (*store.SQLiteStore, store.Tx) {
 	return s, tx
 }
 
-// TestTxDB verifies that DB() on a Tx returns the same *sql.DB as the store.
-func TestTxDB(t *testing.T) {
-	s, tx := openTx(t)
-	if tx.DB() != s.DB() {
-		t.Error("tx.DB() should return the same *sql.DB as the parent store")
-	}
-}
-
 // TestTxGetNode verifies that GetNode works within a transaction.
 func TestTxGetNode(t *testing.T) {
 	_, tx := openTx(t)

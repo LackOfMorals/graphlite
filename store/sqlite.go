@@ -65,8 +65,21 @@ func Open(uri string, cfg Config) (*SQLiteStore, error) {
 	return &SQLiteStore{db: db}, nil
 }
 
-// DB returns the underlying *sql.DB.
+// DB returns the underlying *sql.DB. This method is on the concrete type only
+// and is not part of the Store interface — use Exec() in interface-typed code.
 func (s *SQLiteStore) DB() *sql.DB { return s.db }
+
+// Exec returns the underlying *sql.DB as a store.Execer.
+func (s *SQLiteStore) Exec() Execer { return s.db }
+
+// BeginExecTx starts a new transaction and returns a TxExecer.
+func (s *SQLiteStore) BeginExecTx(ctx context.Context) (TxExecer, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("store: begin exec tx: %w", err)
+	}
+	return tx, nil
+}
 
 // Close releases all resources held by the store.
 func (s *SQLiteStore) Close() error { return s.db.Close() }
@@ -185,8 +198,13 @@ func (t *sqliteTx) Begin(_ context.Context) (Tx, error) {
 	return nil, fmt.Errorf("store: cannot nest transactions")
 }
 
-// DB returns the underlying *sql.DB (not the transaction's connection).
-func (t *sqliteTx) DB() *sql.DB { return t.SQLiteStore.db }
+// Exec returns the underlying *sql.Tx as an Execer.
+func (t *sqliteTx) Exec() Execer { return t.tx }
+
+// BeginExecTx is not supported on an already-transactional store.
+func (t *sqliteTx) BeginExecTx(_ context.Context) (TxExecer, error) {
+	return nil, fmt.Errorf("store: cannot nest transactions")
+}
 
 // Override all operations to use the transaction's executor.
 

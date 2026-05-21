@@ -8,6 +8,23 @@ import (
 	"database/sql"
 )
 
+// Execer is the SQL execution surface required by the query translation layer.
+// It is satisfied by *database/sql.DB, *database/sql.Tx, and by any adapter
+// that wraps another database/sql-compatible driver (DuckDB, PostgreSQL, etc.).
+type Execer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// TxExecer is an Execer scoped to a single database transaction.
+// Commit persists the transaction; Rollback discards it.
+type TxExecer interface {
+	Execer
+	Commit() error
+	Rollback() error
+}
+
 // NodeRow is the raw node record as stored in SQLite.
 // Props is a JSON object encoded as a string.
 // Labels is a comma-separated list of label names (e.g. "Person,Employee").
@@ -98,9 +115,17 @@ type Store interface {
 	// Close releases all resources held by the store.
 	Close() error
 
-	// DB returns the underlying *sql.DB for callers that need to run raw SQL
-	// (e.g. the translator layer executing generated queries).
-	DB() *sql.DB
+	// Exec returns the SQL execution surface for running generated queries.
+	// The returned Execer shares the store's connection and transaction state.
+	Exec() Execer
+
+	// BeginExecTx starts a database transaction and returns a TxExecer that
+	// runs all subsequent SQL within that transaction. Call Commit or Rollback
+	// on the returned TxExecer to finish the transaction.
+	//
+	// Returns an error if called on a Store that is already a transaction scope
+	// (i.e. nested transactions are not supported).
+	BeginExecTx(ctx context.Context) (TxExecer, error)
 }
 
 // Tx is a Store scoped to a single database transaction. It embeds Store so
