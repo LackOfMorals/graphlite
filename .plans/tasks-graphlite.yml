@@ -673,7 +673,7 @@ tasks:
       GitHub repository. Update the Godog harness to run against the real .feature files
       rather than inline Gherkin. Report pass/skip/fail counts and overall pass rate.
       Target >= 50% of executed scenarios passing.
-    status: pending
+    status: completed
     dependencies:
       - task-035
     acceptance_criteria:
@@ -682,4 +682,4 @@ tasks:
       - "Pass rate >= 50% of executed (non-skipped) scenarios"
       - "All failed/skipped scenarios are documented with skip reasons"
       - "go test -tags=tck ./compat/... reports the pass rate"
-    completed_at: null
+    completed_at: "2026-05-21T16:00:00Z"

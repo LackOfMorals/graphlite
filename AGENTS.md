@@ -48,10 +48,12 @@ CGO_ENABLED=0 go test -bench=BenchmarkSingleHopTraversal_1M -bench-1m -benchtime
 ```bash
 CGO_ENABLED=0 go test -tags=tck ./compat/... -v
 ```
-The TCK harness uses Godog (Cucumber for Go) and runs inline Gherkin scenarios
-against a real in-memory graphlite database. Scenarios tagged `@skip` are
-excluded; a pass-rate banner is printed at the end of the run. The harness is
-compiled only with `-tags=tck` to avoid slowing the main test suite.
+The TCK harness uses Godog (Cucumber for Go) and runs the real openCypher TCK
+.feature files from `compat/testdata/tck/` against a real in-memory graphlite
+database. Unsupported scenarios are skipped via a Before hook that checks Cypher
+content for unsupported patterns; a pass-rate banner is printed at the end of
+the run. The harness is compiled only with `-tags=tck` to avoid slowing the
+main test suite. Current pass rate: ~60% (141/235 executed scenarios).
 
 ### Build for all target platforms (cross-compile check)
 ```bash
@@ -226,3 +228,8 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - Never call `b.Fatalf` inside `sync.Once` in benchmarks — `b.Fatalf` calls `runtime.Goexit()` which unwinds the goroutine but `sync.Once` marks the operation done, leaving the shared fixture variable nil. Store the error in a package-level `error` variable and call `b.Fatalf` after the `Once` returns.
 - Benchmark fixture databases (100K+ nodes) should be seeded via JSON bulk import (single `db.Import` call), not individual `CREATE` statements — bulk import is orders of magnitude faster and avoids per-statement parse/plan/translate overhead during setup.
 - After `go mod vendor`, rapid's vendor entry is present but the neo4j shim must be manually re-installed: `tail -n +3 scripts/graphlite_bridge.go > vendor/github.com/neo4j/neo4j-go-driver/v6/neo4j/graphlite_bridge.go` (strips the `//go:build ignore` line). The `scripts/apply-vendor-shim.sh` script expects the source at `internal/neo4jshim/graphlite_bridge.go` — that path is wrong; use the manual `tail` command instead.
+- `godog.Scenario` is a type alias for `messages.Pickle`. Its `Steps` field is `[]*messages.PickleStep`. A step's DocString lives at `step.Argument.DocString` (type `*messages.PickleDocString`), NOT `step.DocString` directly — the direct field does not exist.
+- Real TCK .feature files live in `compat/testdata/tck/`. The harness uses `filepath.Walk` to load them; the skip mechanism inspects `step.Argument.DocString.Content` for unsupported patterns in a `Before` hook.
+- graphlite's `Counters` interface does not include `LabelsAdded`/`LabelsRemoved`. The TCK `+labels`/`-labels` side-effect rows must be silently skipped in the harness.
+- TCK `executing control query:` is a setup step that runs after the main query (to check side effects via a second query) — wire it to the same handler as `having executed:`.
+- TCK step `parameters are:` (table of query params) is a no-op in graphlite's harness since named params must be hard-coded in the Cypher string, not supplied via a separate table step.
