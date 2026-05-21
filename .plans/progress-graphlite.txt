@@ -1093,3 +1093,41 @@ Key Decisions:
   production code was needed for those two acceptance criteria.
 
 Next Task: task-034
+
+================================================================================
+TASK-034: v1.0: GoReleaser pipeline, complete GoDoc, and contribution guide
+Date: 2026-05-21T14:00:00Z
+================================================================================
+Summary:
+Added GoReleaser configuration (.goreleaser.yml), a GitHub Actions release workflow
+(.github/workflows/release.yml), a CONTRIBUTING.md guide, an Apache 2.0 LICENSE file,
+and updated README.md with the API stability commitment and a Contributing section.
+GoDoc audit confirmed all exported symbols across all packages already had doc comments;
+no production code changes were needed for the GoDoc criterion.
+
+Files Changed:
+- .goreleaser.yml (created — library release config: skip builds, produce source
+  archive + SHA256 checksums, triggered on v* tags)
+- .github/workflows/release.yml (created — goreleaser-action@v6 workflow triggered on
+  v* tags with GITHUB_TOKEN for release creation)
+- CONTRIBUTING.md (created — prerequisites, all test suite run commands, 5-step
+  Cypher feature guide, benchmark baseline process, API stability commitment,
+  PR guidelines)
+- LICENSE (created — Apache License 2.0, referenced in README and goreleaser archive)
+- README.md (modified — added API Stability section with version table and stability
+  commitment; added Contributing section linking to CONTRIBUTING.md)
+- .plans/tasks-graphlite.yml (modified — task-034 status: completed)
+
+Key Decisions:
+- .goreleaser.yml uses `builds: skip: true` since graphlite is a library with no
+  compiled binaries; the release produces a source archive and checksums.txt only.
+- The archive name uses `_source` suffix (not platform-specific) since the library
+  is platform-agnostic.
+- CONTRIBUTING.md includes the `tail -n +3 scripts/graphlite_bridge.go > vendor/...`
+  workaround documented in AGENTS.md for restoring the neo4j vendor shim after
+  `go mod vendor`.
+- Apache 2.0 LICENSE text matches the "Apache 2.0" statement already in README.md.
+- GoDoc audit: all exported types, functions, methods, and constants in all packages
+  (root, cypher/, sql/, store/) already had doc comments; no additions needed.
+
+Next Task: All tasks complete

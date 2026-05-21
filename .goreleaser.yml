@@ -1,0 +1,38 @@
+version: 2
+
+project_name: graphlite
+
+before:
+  hooks:
+    - go mod tidy
+    - go mod verify
+
+# graphlite is a Go library — there are no compiled binaries to release.
+# The release produces source archives and SHA256 checksums only.
+builds:
+  - skip: true
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_source"
+    files:
+      - src: "**/*.go"
+      - src: "go.mod"
+      - src: "go.sum"
+      - src: "README.md"
+      - src: "LICENSE"
+      - src: "CONTRIBUTING.md"
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"

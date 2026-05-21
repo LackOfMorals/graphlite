@@ -637,7 +637,7 @@ tasks:
       and property-based suites), how to add a new Cypher feature, and the benchmark baseline
       process. Publish the API stability commitment: no breaking changes post-v0.3 without a
       major version bump.
-    status: pending
+    status: completed
     dependencies:
       - task-033
     acceptance_criteria:
@@ -646,4 +646,4 @@ tasks:
       - "CONTRIBUTING.md documents how to run all test suites (unit, integration, TCK, property-based, benchmarks)"
       - "README includes the API stability commitment and a link to the compatibility table"
       - "A GitHub release tag triggers the GoReleaser workflow and produces downloadable archives with SHA256 checksums"
-    completed_at: null
+    completed_at: "2026-05-21T14:00:00Z"

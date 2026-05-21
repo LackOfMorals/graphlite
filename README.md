@@ -197,6 +197,33 @@ CREATE TABLE edges (
 
 ---
 
+## API Stability
+
+**No breaking changes are made to the public API after v0.3 without a major version bump.**
+
+This covers the root package and all documented sub-packages. Adding new exported symbols is not a breaking change. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full stability commitment definition.
+
+| Version | Status |
+|---|---|
+| v0.1 | Initial feature set (MATCH, CREATE, SET, DELETE, bulk JSON import) |
+| v0.2 | OPTIONAL MATCH, WITH, aggregation, COLLECT, DISTINCT, REMOVE, CSV import/export |
+| v0.3 | MERGE, property-based tests, TCK harness |
+| v1.0 | CASE expressions, benchmarks, security hardening |
+| **post-v1.0** | **No breaking changes without a major version bump** |
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for:
+- Prerequisites and setup
+- How to run all test suites (unit, integration, TCK, property-based, benchmarks)
+- How to add a new Cypher feature (5-step guide)
+- Benchmark baseline process
+- Pull request guidelines
+
+---
+
 ## Build
 
 ```bash
