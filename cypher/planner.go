@@ -370,6 +370,12 @@ func planPatternPart(part PatternPart, optional bool, scope *BindingScope, ac *a
 
 		// Bind the relationship variable if named.
 		if relVar != "" {
+			// Check for variable type conflict: if the variable is already bound as a node.
+			if existing, ok := scope.Resolve(relVar); ok {
+				if existing.IsNode {
+					return nil, fmt.Errorf("cypher: variable %q used as both node and relationship: SyntaxError VariableTypeConflict", relVar)
+				}
+			}
 			scope.Bind(relVar, Binding{
 				Alias:      relAlias,
 				Column:     relAlias + ".id",
@@ -397,6 +403,10 @@ func planNodePattern(np NodePattern, optional bool, scope *BindingScope, ac *ali
 	if np.Variable != "" {
 		if existing, ok := scope.Resolve(np.Variable); ok {
 			// Variable already bound (e.g. repeated in multi-part MATCH or cycle).
+			// Check for variable type conflict: if the variable was bound as a relationship.
+			if existing.IsRel {
+				return nil, fmt.Errorf("cypher: variable %q used as both node and relationship: SyntaxError VariableTypeConflict", np.Variable)
+			}
 			alias = existing.Alias
 		} else {
 			alias = ac.nextNode()
@@ -450,6 +460,14 @@ func planReturnClause(rc *ReturnClause, scope *BindingScope) (*ReturnPlan, error
 			Expr:       sortExpr,
 			Descending: si.Descending,
 		})
+	}
+
+	// Validate SKIP and LIMIT values are non-negative.
+	if rc.Skip != nil && *rc.Skip < 0 {
+		return nil, fmt.Errorf("cypher: SKIP value must be non-negative: SyntaxError NegativeIntegerArgument")
+	}
+	if rc.Limit != nil && *rc.Limit < 0 {
+		return nil, fmt.Errorf("cypher: LIMIT value must be non-negative: SyntaxError NegativeIntegerArgument")
 	}
 
 	rp.Skip = rc.Skip
@@ -511,6 +529,14 @@ func planWithClause(wc *WithClause, scope *BindingScope) (*WithPlan, error) {
 		}
 	}
 
+	// Validate SKIP and LIMIT values are non-negative.
+	if wc.Skip != nil && *wc.Skip < 0 {
+		return nil, fmt.Errorf("cypher: WITH SKIP value must be non-negative: SyntaxError NegativeIntegerArgument")
+	}
+	if wc.Limit != nil && *wc.Limit < 0 {
+		return nil, fmt.Errorf("cypher: WITH LIMIT value must be non-negative: SyntaxError NegativeIntegerArgument")
+	}
+
 	// Post-WITH WHERE becomes HAVING in SQL.
 	if wc.Where != nil {
 		wp.Having = wc.Where
@@ -541,6 +567,12 @@ func planCreateClause(cc *CreateClause, scope *BindingScope, ac *aliasCounter) (
 		// Start node.
 		if len(part.Chain) == 0 {
 			// Pure node CREATE.
+			// Check if the variable is already bound (VariableAlreadyBound).
+			if part.Start.Variable != "" && !strings.HasPrefix(part.Start.Variable, "_") {
+				if _, alreadyBound := scope.Resolve(part.Start.Variable); alreadyBound {
+					return nil, fmt.Errorf("cypher: variable %q already bound, cannot CREATE: SyntaxError VariableAlreadyBound", part.Start.Variable)
+				}
+			}
 			nodePlan := &CreateNodePlan{
 				Variable: part.Start.Variable,
 				Labels:   part.Start.Labels,
@@ -607,6 +639,11 @@ func planCreateClause(cc *CreateClause, scope *BindingScope, ac *aliasCounter) (
 						IsNode: true,
 					})
 					plans = append(plans, endNodePlan)
+				}
+
+				// Validate relationship direction: CREATE requires a directed relationship.
+				if !hop.Rel.ToLeft && !hop.Rel.ToRight {
+					return nil, fmt.Errorf("cypher: CREATE relationship must have a direction: SyntaxError RequiresDirectedRelationship")
 				}
 
 				// Create the relationship.
