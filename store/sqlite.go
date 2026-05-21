@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // CGO-free SQLite driver
@@ -83,6 +84,16 @@ func (s *SQLiteStore) BeginExecTx(ctx context.Context) (TxExecer, error) {
 
 // Close releases all resources held by the store.
 func (s *SQLiteStore) Close() error { return s.db.Close() }
+
+// Snapshot writes an atomic, consistent copy of the database to path using
+// VACUUM INTO. path must not already exist.
+func (s *SQLiteStore) Snapshot(path string) error {
+	escaped := strings.ReplaceAll(path, "'", "''")
+	if _, err := s.db.Exec("VACUUM INTO '" + escaped + "'"); err != nil {
+		return fmt.Errorf("store: snapshot: %w", err)
+	}
+	return nil
+}
 
 // Begin starts a new database transaction and returns a Tx.
 func (s *SQLiteStore) Begin(ctx context.Context) (Tx, error) {

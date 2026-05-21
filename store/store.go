@@ -128,6 +128,14 @@ type Store interface {
 	BeginExecTx(ctx context.Context) (TxExecer, error)
 }
 
+// Snapshotter is implemented by stores that support atomic file snapshots.
+// SQLiteStore satisfies this via VACUUM INTO.
+type Snapshotter interface {
+	// Snapshot writes a consistent copy of the database to path.
+	// path must not already exist; SQLite refuses to overwrite an existing file.
+	Snapshot(path string) error
+}
+
 // Tx is a Store scoped to a single database transaction. It embeds Store so
 // all read and write methods are available within the transaction context.
 type Tx interface {

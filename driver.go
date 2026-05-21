@@ -50,6 +50,7 @@ import (
 	stdsql "database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -106,6 +107,24 @@ func Open(path string, opts ...Option) (*DB, error) {
 		return nil, fmt.Errorf("graphlite: open %q: %w", path, err)
 	}
 	return &DB{st: st, readOnly: cfg.readOnly}, nil
+}
+
+// Snapshot writes an atomic, consistent copy of the database to path.
+// path must not already exist. The resulting file is a valid SQLite database
+// that can be opened with [Open]. Works on both file-backed and in-memory
+// databases — snapshotting an in-memory database is useful to persist its
+// state before it is discarded.
+//
+// Returns an error if the backend does not support snapshots.
+func (d *DB) Snapshot(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("graphlite: snapshot: %q already exists", path)
+	}
+	sn, ok := d.st.(store.Snapshotter)
+	if !ok {
+		return fmt.Errorf("graphlite: snapshot: not supported by this backend")
+	}
+	return sn.Snapshot(path)
 }
 
 // Close releases all resources held by the database. Subsequent calls on a

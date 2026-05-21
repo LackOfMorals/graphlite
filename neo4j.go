@@ -101,6 +101,10 @@ func (d *DriverCompat) IsEncrypted() bool { return false }
 // Bookmarks are accepted and tracked but have no semantic effect on SQLite queries.
 func (d *DriverCompat) ExecuteQueryBookmarkManager() neo4j.BookmarkManager { return d.bkMgr }
 
+// DB returns the underlying [DB] for use with the native graphlite API.
+// Useful when you hold a DriverCompat but also need RunQuery, Import, CopyFrom, etc.
+func (d *DriverCompat) DB() *DB { return d.db }
+
 // Close closes all resources held by the DriverCompat.
 func (d *DriverCompat) Close(_ context.Context) error { return d.db.Close() }
 
