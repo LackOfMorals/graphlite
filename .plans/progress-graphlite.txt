@@ -1131,3 +1131,49 @@ Key Decisions:
   (root, cypher/, sql/, store/) already had doc comments; no additions needed.
 
 Next Task: All tasks complete
+
+================================================================================
+TASK-035: Variable-length paths via WITH RECURSIVE CTE
+Date: 2026-05-21T15:00:00Z
+================================================================================
+Summary:
+Implemented variable-length relationship patterns (a)-[r*min..max]->(b) across
+all four layers. The parser now extracts MinHops/MaxHops from OC_RangeLiteral
+raw text (e.g. "*", "*2", "*2..5", "*..5", "*2.."). A new VariableLengthRelPlan
+type in the planner replaces the previous "unsupported" error. The SQL translator
+emits a WITH RECURSIVE CTE (SQLite-compatible UNION ALL form) with a depth guard
+for bounded paths and a safety cap of 15 hops for unbounded paths. Direction
+(ToRight/ToLeft/Undirected) and relationship type filters are applied in both
+the base case and the recursive case. End-node labels/properties are pushed to
+WHERE on the outer SELECT. The WITH RECURSIVE prefix is prepended to the final
+SQL string when CTEs are present; CTE bind args are correctly ordered before
+SELECT args. CTEs propagate through SequencePlan so multi-hop queries that mix
+fixed and variable-length hops work correctly.
+
+Files Changed:
+- cypher/ast.go (added MinHops, MaxHops fields to RelPattern)
+- cypher/parser.go (extract MinHops/MaxHops from OC_RangeLiteral; added parseRangeLiteral helper)
+- cypher/plan.go (added VariableLengthRelPlan type)
+- cypher/planner.go (emit VariableLengthRelPlan instead of error for VarLength hops)
+- cypher/planner_test.go (updated test-021 to verify VariableLengthRelPlan is produced)
+- sql/translator.go (added CTEs/cteArgs fields to fromClause; buildFromClauseForVarLengthRel;
+  WITH RECURSIVE prefix in translateReturnPlan; CTE propagation in buildFromClauseForSequence)
+- sql/translator_test.go (4 new unit tests: WITH RECURSIVE structure, unbounded safety cap,
+  type filter push-down, direct plan construction)
+- testdata/integration_test.go (5 integration tests: depth 1+2 reachability, exactly-2-hops,
+  unbounded all-reachable, type filter isolation, start-node exclusion)
+
+Key Decisions:
+- parseRangeLiteral uses raw GetText() output (whitespace stripped by ANTLR) for reliable
+  parsing without depending on AllOC_IntegerLiteral() index positions (which vary by form).
+- Safety cap of 15 hops for unbounded paths prevents runaway recursive queries; the cap is
+  a single named constant (safetyLimit) in buildFromClauseForVarLengthRel.
+- CTEs use UNION ALL (not UNION) as required for SQLite recursive CTEs.
+- CTE args are prepended in translateReturnPlan (not appended) because WITH RECURSIVE
+  appears before SELECT in the SQL string — arg position must match text position.
+- VariableLengthRelPlan.CTEAlias uses the node counter (not rel counter) to keep aliases
+  unique even when VarLength hops are mixed with fixed hops.
+- The "depth >= minHops" filter is placed in the end-node JOIN ON (not in the CTE itself)
+  to keep the CTE reusable and the recursive case simple.
+
+Next Task: task-036

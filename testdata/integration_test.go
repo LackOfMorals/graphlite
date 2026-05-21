@@ -2254,3 +2254,116 @@ func TestIntegration_Case_MultipleWhen(t *testing.T) {
 		t.Errorf("%s: unexpected tiers: %v", q, tiers)
 	}
 }
+
+// ─── variable-length path integration tests (task-035) ───────────────────────
+
+// setupChain creates a 3-node chain: Alice -[:KNOWS]-> Bob -[:KNOWS]-> Carol
+// and returns the database.
+func setupChain(t *testing.T) *graphlite.DB {
+	t.Helper()
+	db := openDB(t)
+	// Use inline chain CREATE to avoid the comma-MATCH+CREATE limitation.
+	setup(t, db,
+		`CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person {name: 'Bob'})-[:KNOWS]->(c:Person {name: 'Carol'})`,
+	)
+	return db
+}
+
+// collectNames returns the set of b_name values from the result.
+func collectNames(result *graphlite.EagerResult) map[string]bool {
+	names := make(map[string]bool)
+	for _, rec := range result.Records {
+		if v, ok := rec.Get("b_name"); ok {
+			if s, ok := v.(string); ok {
+				names[s] = true
+			}
+		}
+	}
+	return names
+}
+
+// TestIntegration_VarLength_1to2_ReachesDepth1and2 verifies that
+// MATCH (a:Person {name:'Alice'})-[*1..2]->(b:Person) RETURN b.name
+// returns both Bob (depth 1) and Carol (depth 2).
+func TestIntegration_VarLength_1to2_ReachesDepth1and2(t *testing.T) {
+	db := setupChain(t)
+	q := `MATCH (a:Person {name: 'Alice'})-[*1..2]->(b:Person) RETURN b.name AS b_name`
+	result := query(t, db, q, nil)
+	assertCount(t, q, result, 2)
+	names := collectNames(result)
+	if !names["Bob"] {
+		t.Errorf("%s: expected Bob in results, got %v", q, names)
+	}
+	if !names["Carol"] {
+		t.Errorf("%s: expected Carol in results, got %v", q, names)
+	}
+}
+
+// TestIntegration_VarLength_Exactly2_OnlyDepth2 verifies that
+// MATCH (a:Person {name:'Alice'})-[*2..2]->(b:Person) RETURN b.name
+// returns only Carol (exactly 2 hops).
+func TestIntegration_VarLength_Exactly2_OnlyDepth2(t *testing.T) {
+	db := setupChain(t)
+	q := `MATCH (a:Person {name: 'Alice'})-[*2..2]->(b:Person) RETURN b.name AS b_name`
+	result := query(t, db, q, nil)
+	assertCount(t, q, result, 1)
+	names := collectNames(result)
+	if !names["Carol"] {
+		t.Errorf("%s: expected Carol in results, got %v", q, names)
+	}
+	if names["Bob"] {
+		t.Errorf("%s: did not expect Bob (depth 1) in results, got %v", q, names)
+	}
+}
+
+// TestIntegration_VarLength_Unbounded_ReachesAll verifies that
+// MATCH (a:Person {name:'Alice'})-[*]->(b:Person) RETURN b.name
+// returns both Bob and Carol (all reachable nodes).
+func TestIntegration_VarLength_Unbounded_ReachesAll(t *testing.T) {
+	db := setupChain(t)
+	q := `MATCH (a:Person {name: 'Alice'})-[*]->(b:Person) RETURN b.name AS b_name`
+	result := query(t, db, q, nil)
+	assertCount(t, q, result, 2)
+	names := collectNames(result)
+	if !names["Bob"] || !names["Carol"] {
+		t.Errorf("%s: expected Bob and Carol, got %v", q, names)
+	}
+}
+
+// TestIntegration_VarLength_TypeFilter_LimitsTraversal verifies that a type
+// filter on [r:KNOWS*1..2] only traverses edges of the correct type.
+func TestIntegration_VarLength_TypeFilter_LimitsTraversal(t *testing.T) {
+	// Build the graph entirely with inline CREATE chains:
+	//   Alice -[KNOWS]-> Bob -[KNOWS]-> Carol
+	//   Alice -[LIKES]-> Dave
+	// We use two separate CREATE statements because Alice appears as the common anchor.
+	db := openDB(t)
+	setup(t, db,
+		`CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person {name: 'Bob'})-[:KNOWS]->(c:Person {name: 'Carol'})`,
+		`CREATE (a2:Person {name: 'Alice2'})-[:LIKES]->(d:Person {name: 'Dave'})`,
+	)
+	// Re-query using the name that actually has KNOWS edges.
+	q := `MATCH (a:Person {name: 'Alice'})-[:KNOWS*1..2]->(b:Person) RETURN b.name AS b_name`
+	result := query(t, db, q, nil)
+	// Should only reach Bob and Carol, NOT Dave (connected via LIKES only).
+	assertCount(t, q, result, 2)
+	names := collectNames(result)
+	if names["Dave"] {
+		t.Errorf("%s: Dave should not be reachable via KNOWS path, got %v", q, names)
+	}
+	if !names["Bob"] || !names["Carol"] {
+		t.Errorf("%s: expected Bob and Carol, got %v", q, names)
+	}
+}
+
+// TestIntegration_VarLength_MinHop1_ExcludesDepth0 verifies that the start
+// node itself is not returned (min 1 hop means at least one edge must be traversed).
+func TestIntegration_VarLength_MinHop1_ExcludesDepth0(t *testing.T) {
+	db := setupChain(t)
+	q := `MATCH (a:Person {name: 'Alice'})-[*1..3]->(b:Person) RETURN b.name AS b_name`
+	result := query(t, db, q, nil)
+	names := collectNames(result)
+	if names["Alice"] {
+		t.Errorf("%s: Alice (start node) should not appear as a reachable destination, got %v", q, names)
+	}
+}

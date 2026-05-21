@@ -242,6 +242,45 @@ type MatchRelPlan struct {
 
 func (*MatchRelPlan) planNode() {}
 
+// VariableLengthRelPlan represents a variable-length relationship pattern:
+//
+//	(a)-[r*min..max]->(b)
+//
+// The planner emits one VariableLengthRelPlan per variable-length hop. The SQL
+// translator converts it to a WITH RECURSIVE CTE that traverses the edges table
+// tracking depth and enforcing direction/type constraints at every hop.
+type VariableLengthRelPlan struct {
+	// StartVar is the Cypher variable name for the anchor (start) node.
+	StartVar string
+	// StartNode contains the label/property constraints for the start node.
+	// Its SQLAlias is the alias assigned during planning.
+	StartNode MatchNodePlan
+	// EndVar is the Cypher variable name for the destination node.
+	EndVar string
+	// EndNode contains the label/property constraints for the destination node.
+	EndNode MatchNodePlan
+	// RelVar is the optional Cypher variable for the relationship (may be "").
+	RelVar string
+	// RelTypes lists acceptable relationship types (empty = any type).
+	RelTypes []string
+	// MinHops is the minimum number of hops (inclusive). 1 when unspecified.
+	MinHops int
+	// MaxHops is the maximum number of hops (inclusive). 0 means unbounded.
+	MaxHops int
+	// ToRight is true for -[*]->
+	ToRight bool
+	// ToLeft is true for <-[*]-
+	ToLeft bool
+	// Undirected is true for -[*]-
+	Undirected bool
+	// Optional is true when introduced by OPTIONAL MATCH.
+	Optional bool
+	// CTEAlias is the unique name used for the WITH RECURSIVE CTE (e.g. "_vl0").
+	CTEAlias string
+}
+
+func (*VariableLengthRelPlan) planNode() {}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Filter plan node
 // ─────────────────────────────────────────────────────────────────────────────

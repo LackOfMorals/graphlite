@@ -696,8 +696,9 @@ func buildRelPattern(ctx *parser.OC_RelationshipPatternContext) (RelPattern, err
 			}
 		}
 
-		if d.OC_RangeLiteral() != nil {
+		if rl := d.OC_RangeLiteral(); rl != nil {
 			rp.VarLength = true
+			rp.MinHops, rp.MaxHops = parseRangeLiteral(rl.GetText())
 		}
 
 		if props := d.OC_Properties(); props != nil {
@@ -751,6 +752,63 @@ func exprText(ctx parser.IOC_ExpressionContext) string {
 // is kept for safety.
 func trimWhitespace(s string) string {
 	return strings.TrimSpace(s)
+}
+
+// parseRangeLiteral parses the raw text of an OC_RangeLiteral (the part after
+// the '*' in a variable-length relationship pattern) and returns the min and max
+// hop counts.
+//
+// The raw text from the ANTLR CST has whitespace stripped by GetText(); the
+// leading '*' is always present. Examples:
+//
+//	"*"      → min=1, max=0 (unbounded)
+//	"*2"     → min=2, max=2 (exactly 2)
+//	"*2..5"  → min=2, max=5
+//	"*..5"   → min=1, max=5
+//	"*2.."   → min=2, max=0 (unbounded)
+func parseRangeLiteral(text string) (min, max int) {
+	// Strip leading '*'.
+	s := strings.TrimPrefix(text, "*")
+	if s == "" {
+		// [*] — one or more hops, unbounded.
+		return 1, 0
+	}
+
+	dotIdx := strings.Index(s, "..")
+	if dotIdx < 0 {
+		// No ".." — single integer means exactly N hops.
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 0 {
+			return 1, 0 // fallback
+		}
+		return n, n
+	}
+
+	// Has "..": split into left and right parts.
+	left := s[:dotIdx]
+	right := s[dotIdx+2:]
+
+	if left == "" {
+		min = 1
+	} else {
+		n, err := strconv.Atoi(left)
+		if err != nil || n < 0 {
+			min = 1
+		} else {
+			min = n
+		}
+	}
+	if right == "" {
+		max = 0 // unbounded
+	} else {
+		n, err := strconv.Atoi(right)
+		if err != nil || n < 0 {
+			max = 0
+		} else {
+			max = n
+		}
+	}
+	return min, max
 }
 
 // parseInt64Expr parses a simple integer literal expression from the CST.

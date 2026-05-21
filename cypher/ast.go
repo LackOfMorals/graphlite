@@ -285,6 +285,12 @@ type RelPattern struct {
 	// ToRight is true when the arrow points right: -[r]->
 	ToRight bool
 	// VarLength is true when a variable-length range was specified (*1..5).
-	// This is a GAP-003 indicator: the planner must return ErrUnsupportedCypher.
+	// When true, MinHops and MaxHops carry the parsed bounds.
 	VarLength bool
+	// MinHops is the minimum number of hops (inclusive). Default 1 when VarLength
+	// is true but no lower bound was specified (e.g. [*] or [*..5]).
+	MinHops int
+	// MaxHops is the maximum number of hops (inclusive). 0 means unbounded
+	// (e.g. [*] or [*2..]).
+	MaxHops int
 }

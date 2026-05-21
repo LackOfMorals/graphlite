@@ -655,7 +655,7 @@ tasks:
       Extract min/max hop bounds from the ANTLR OC_RangeLiteral context (currently discarded).
       Add VariableLengthRelPlan to the planner. Emit a WITH RECURSIVE CTE in the translator
       that tracks depth and enforces direction/type/property constraints at each hop.
-    status: pending
+    status: completed
     dependencies:
       - task-034
     acceptance_criteria:
@@ -664,7 +664,7 @@ tasks:
       - "Direction is respected: directed -> uses start_id/end_id; undirected checks both"
       - "Type filter on [r:KNOWS*1..3] is pushed into the CTE base and recursive cases"
       - "Integration tests verify shortest-path semantics and hop count limits"
-    completed_at: null
+    completed_at: "2026-05-21T15:00:00Z"
 
   - id: task-036
     title: "Run real openCypher TCK corpus and report pass rate"

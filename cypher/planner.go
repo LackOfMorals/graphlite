@@ -264,16 +264,51 @@ func planPatternPart(part PatternPart, optional bool, scope *BindingScope, ac *a
 		return nil, err
 	}
 
-	for i, hop := range part.Chain {
+	for _, hop := range part.Chain {
+		// Determine direction.
+		undirected := !hop.Rel.ToLeft && !hop.Rel.ToRight
+
 		if hop.Rel.VarLength {
-			return nil, fmt.Errorf("cypher: variable-length paths are not supported in v0.1 (MATCH hop %d)", i)
+			// Variable-length path: emit a VariableLengthRelPlan backed by a
+			// WITH RECURSIVE CTE in the translator.
+			cteAlias := fmt.Sprintf("_vl%d", ac.nodeCount)
+			ac.nodeCount++
+
+			// Plan the end node (allocates a new alias, adds to scope).
+			endNodePlan, err := planNodePatternNewAlias(hop.Node, optional, scope, ac)
+			if err != nil {
+				return nil, err
+			}
+
+			minHops := hop.Rel.MinHops
+			if minHops <= 0 {
+				minHops = 1 // default
+			}
+
+			vlPlan := &VariableLengthRelPlan{
+				StartVar:   currentVar,
+				StartNode:  *startNodePlan,
+				EndVar:     hop.Node.Variable,
+				EndNode:    *endNodePlan,
+				RelVar:     hop.Rel.Variable,
+				RelTypes:   hop.Rel.Types,
+				MinHops:    minHops,
+				MaxHops:    hop.Rel.MaxHops,
+				ToRight:    hop.Rel.ToRight,
+				ToLeft:     hop.Rel.ToLeft,
+				Undirected: undirected,
+				Optional:   optional,
+				CTEAlias:   cteAlias,
+			}
+
+			plans = append(plans, vlPlan)
+			currentVar = hop.Node.Variable
+			startNodePlan = endNodePlan
+			continue
 		}
 
 		relAlias := ac.nextRel()
 		relVar := hop.Rel.Variable
-
-		// Determine direction.
-		undirected := !hop.Rel.ToLeft && !hop.Rel.ToRight
 
 		// Plan the end node and add it to the scope.
 		endNodePlan, err := planNodePatternNewAlias(hop.Node, optional, scope, ac)

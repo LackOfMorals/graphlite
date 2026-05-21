@@ -572,20 +572,37 @@ func TestPlanner_MatchInlineIntProp(t *testing.T) {
 	}
 }
 
-// ─── test 21: variable-length path returns error ─────────────────────────────
+// ─── test 21: variable-length path produces VariableLengthRelPlan ────────────
 
-func TestPlanner_VarLengthPath_Error(t *testing.T) {
+func TestPlanner_VarLengthPath_Plan(t *testing.T) {
 	// The parser accepts variable-length paths and sets VarLength=true;
-	// the planner must return an error.
+	// the planner must now produce a VariableLengthRelPlan (not an error).
 	q, err := cypher.Parse("MATCH (a)-[r*1..3]->(b) RETURN b")
 	if err != nil {
-		// Parser may also reject it — both outcomes are acceptable.
-		return
+		t.Fatalf("parse error: %v", err)
 	}
 	scope := cypher.NewScope()
-	_, planErr := cypher.Plan(q, scope)
-	if planErr == nil {
-		t.Error("expected error for variable-length path, got nil")
+	plan, planErr := cypher.Plan(q, scope)
+	if planErr != nil {
+		t.Fatalf("unexpected planner error: %v", planErr)
+	}
+	// Expect: ReturnPlan → VariableLengthRelPlan
+	rp, ok := plan.(*cypher.ReturnPlan)
+	if !ok {
+		t.Fatalf("expected ReturnPlan at top, got %T", plan)
+	}
+	vlp, ok := rp.Source.(*cypher.VariableLengthRelPlan)
+	if !ok {
+		t.Fatalf("expected VariableLengthRelPlan as source, got %T", rp.Source)
+	}
+	if vlp.MinHops != 1 {
+		t.Errorf("MinHops: want 1 got %d", vlp.MinHops)
+	}
+	if vlp.MaxHops != 3 {
+		t.Errorf("MaxHops: want 3 got %d", vlp.MaxHops)
+	}
+	if !vlp.ToRight {
+		t.Error("expected ToRight=true for -[*1..3]->")
 	}
 }
 

@@ -185,16 +185,27 @@ func (t *Translator) translateReturnPlan(rp *cypher.ReturnPlan, scope *cypher.Bi
 	}
 
 	// Assemble bind args in SQL-text order:
-	//   SELECT args (already in t.args from buildSelectList above)
+	//   CTE args (prepended; CTEs appear before SELECT in SQL text)
+	//   → SELECT args (already in t.args from buildSelectList above)
 	//   → JOIN ON args (fc.joinArgs; JOIN appears before WHERE in SQL)
 	//   → WHERE args (fc.whereArgs)
 	//   → extra WHERE args (fc.extraWhereArgs; extraWhere appears after whereFragments)
 	// ORDER BY args are appended later by the exprToSQL calls below.
+	// CTE args must come first because the WITH RECURSIVE clause is emitted
+	// before SELECT in the final SQL string.
+	t.args = append(fc.cteArgs, t.args...)
 	t.args = append(t.args, fc.joinArgs...)
 	t.args = append(t.args, fc.whereArgs...)
 	t.args = append(t.args, fc.extraWhereArgs...)
 
 	var b strings.Builder
+
+	// Prepend WITH RECURSIVE if any variable-length path CTEs were collected.
+	if len(fc.ctes) > 0 {
+		b.WriteString("WITH RECURSIVE ")
+		b.WriteString(strings.Join(fc.ctes, ", "))
+		b.WriteString(" ")
+	}
 
 	b.WriteString("SELECT ")
 	if rp.Distinct {
@@ -351,6 +362,15 @@ type fromClause struct {
 	having string
 	// havingArgs are bind args for the HAVING predicate.
 	havingArgs []any
+	// ctes holds complete WITH RECURSIVE CTE definitions for variable-length
+	// path patterns. Each entry is the body of one CTE (e.g.
+	// "_vl0(end_id, depth) AS (SELECT ...)"). The caller prepends
+	// "WITH RECURSIVE " before the SELECT when len(ctes) > 0.
+	ctes []string
+	// cteArgs holds the bind args for all CTE definitions, in the order they
+	// appear within the cte bodies. These must be prepended before all other
+	// args because the CTEs appear before the main SELECT in SQL.
+	cteArgs []any
 }
 
 // buildFromClause recurses into the source plan and collects the FROM/JOIN/WHERE
@@ -384,6 +404,9 @@ func (t *Translator) buildFromClause(source cypher.LogicalPlan, scope *cypher.Bi
 		fc.extraWhere = predSQL
 		fc.extraWhereArgs = sub.args
 		return fc, nil
+
+	case *cypher.VariableLengthRelPlan:
+		return t.buildFromClauseForVarLengthRel(s, scope)
 
 	case *cypher.SequencePlan:
 		return t.buildFromClauseForSequence(s, scope)
@@ -592,6 +615,179 @@ func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope 
 	return fc, nil
 }
 
+// buildFromClauseForVarLengthRel handles a VariableLengthRelPlan by emitting a
+// WITH RECURSIVE CTE. The CTE name is vlp.CTEAlias (e.g. "_vl0").
+//
+// Directed (ToRight):
+//
+//	WITH RECURSIVE _vl0(end_id, depth) AS (
+//	  SELECT e.end_id, 1 FROM edges e WHERE e.start_id = <startAlias>.id [AND type IN (...)]
+//	  UNION ALL
+//	  SELECT e.end_id, _vl0.depth + 1 FROM edges e JOIN _vl0 ON e.start_id = _vl0.end_id
+//	  WHERE _vl0.depth < <maxHops> [AND type IN (...)]
+//	)
+//
+// The main SELECT then JOINs:
+//
+//	JOIN nodes <endAlias> ON <endAlias>.id IN (SELECT end_id FROM _vl0 WHERE depth >= <minHops>)
+//
+// Safety cap: if MaxHops == 0 (unbounded) the recursive case always applies a
+// depth < 15 guard to prevent runaway queries.
+func (t *Translator) buildFromClauseForVarLengthRel(vlp *cypher.VariableLengthRelPlan, scope *cypher.BindingScope) (fromClause, error) {
+	startAlias := vlp.StartNode.SQLAlias
+	if startAlias == "" && vlp.StartVar != "" {
+		b, ok := scope.Resolve(vlp.StartVar)
+		if !ok {
+			return fromClause{}, fmt.Errorf("sql: start variable %q not in scope for variable-length path", vlp.StartVar)
+		}
+		startAlias = b.Alias
+	}
+	endAlias := vlp.EndNode.SQLAlias
+
+	cte := vlp.CTEAlias
+	const safetyLimit = 15
+
+	// ── Build type-filter SQL fragment for both base and recursive cases ─────
+	// e.g. " AND e.type IN (?, ?)" — appended in both base and recursive cases.
+	var typeFilter string
+	var typeArgs []any
+	for _, rt := range vlp.RelTypes {
+		typeArgs = append(typeArgs, rt)
+	}
+	if len(typeArgs) == 1 {
+		typeFilter = " AND e.type = ?"
+	} else if len(typeArgs) > 1 {
+		placeholders := make([]string, len(typeArgs))
+		for i := range placeholders {
+			placeholders[i] = "?"
+		}
+		typeFilter = " AND e.type IN (" + strings.Join(placeholders, ", ") + ")"
+	}
+
+	// ── Base case ─────────────────────────────────────────────────────────────
+	var baseCond string
+	if vlp.Undirected {
+		baseCond = fmt.Sprintf("(e.start_id = %s.id OR e.end_id = %s.id)", startAlias, startAlias)
+	} else if vlp.ToRight {
+		baseCond = fmt.Sprintf("e.start_id = %s.id", startAlias)
+	} else {
+		// ToLeft: start node is at end_id side.
+		baseCond = fmt.Sprintf("e.end_id = %s.id", startAlias)
+	}
+
+	var baseEndID string
+	if vlp.Undirected {
+		baseEndID = fmt.Sprintf("CASE WHEN e.start_id = %s.id THEN e.end_id ELSE e.start_id END", startAlias)
+	} else if vlp.ToRight {
+		baseEndID = "e.end_id"
+	} else {
+		baseEndID = "e.start_id"
+	}
+
+	// ── Recursive case ────────────────────────────────────────────────────────
+	var recCond string
+	if vlp.Undirected {
+		recCond = fmt.Sprintf("(e.start_id = %s.end_id OR e.end_id = %s.end_id)", cte, cte)
+	} else if vlp.ToRight {
+		recCond = fmt.Sprintf("e.start_id = %s.end_id", cte)
+	} else {
+		recCond = fmt.Sprintf("e.end_id = %s.end_id", cte)
+	}
+
+	var recEndID string
+	if vlp.Undirected {
+		recEndID = fmt.Sprintf("CASE WHEN e.start_id = %s.end_id THEN e.end_id ELSE e.start_id END", cte)
+	} else if vlp.ToRight {
+		recEndID = "e.end_id"
+	} else {
+		recEndID = "e.start_id"
+	}
+
+	// Depth guard in the recursive case.
+	maxHops := vlp.MaxHops
+	if maxHops == 0 {
+		maxHops = safetyLimit // practical cap for unbounded paths
+	}
+	// The recursive WHERE condition stops expansion when depth reaches the cap.
+	// "depth < maxHops" allows the recursive case to add one more hop (depth+1).
+	recDepthGuard := fmt.Sprintf("%s.depth < ?", cte)
+	var depthArgs []any
+	depthArgs = append(depthArgs, maxHops)
+
+	// ── Assemble CTE SQL ──────────────────────────────────────────────────────
+	var cteBuf strings.Builder
+	fmt.Fprintf(&cteBuf, "%s(end_id, depth) AS (", cte)
+	// Base case.
+	fmt.Fprintf(&cteBuf, "SELECT %s, 1 FROM edges e WHERE %s%s", baseEndID, baseCond, typeFilter)
+	// Recursive case.
+	fmt.Fprintf(&cteBuf, " UNION ALL SELECT %s, %s.depth + 1 FROM edges e JOIN %s ON %s WHERE %s%s",
+		recEndID, cte, cte, recCond, recDepthGuard, typeFilter)
+	cteBuf.WriteByte(')')
+
+	// Args for the CTE: base type args, then recursive (depth guard + type args).
+	var allCTEArgs []any
+	allCTEArgs = append(allCTEArgs, typeArgs...)   // base case type filter
+	allCTEArgs = append(allCTEArgs, depthArgs...)  // recursive depth guard
+	allCTEArgs = append(allCTEArgs, typeArgs...)   // recursive type filter
+
+	// ── End-node JOIN ─────────────────────────────────────────────────────────
+	// JOIN nodes <endAlias> ON <endAlias>.id IN (SELECT end_id FROM <cte> WHERE depth >= ?)
+	minHops := vlp.MinHops
+	if minHops <= 0 {
+		minHops = 1
+	}
+	endJoinSQL := fmt.Sprintf("JOIN nodes %s ON %s.id IN (SELECT end_id FROM %s WHERE depth >= ?)",
+		endAlias, endAlias, cte)
+
+	// ── Start-node constraints (WHERE) ────────────────────────────────────────
+	var whereParts []string
+	var whereArgs []any
+	for _, label := range vlp.StartNode.Labels {
+		pred, args := t.dialect.LabelContains(startAlias+".labels", label)
+		whereParts = append(whereParts, pred)
+		whereArgs = append(whereArgs, args...)
+	}
+	for key, expr := range vlp.StartNode.Props {
+		sub := &Translator{dialect: t.dialect}
+		valSQL, err := sub.exprToSQL(expr, scope)
+		if err != nil {
+			return fromClause{}, fmt.Errorf("sql: var-length start node prop %q: %w", key, err)
+		}
+		whereParts = append(whereParts, t.dialect.JSONExtract(startAlias+".props", "$."+key)+" = "+valSQL)
+		whereArgs = append(whereArgs, sub.args...)
+	}
+
+	// ── End-node constraints (additional WHERE fragments) ─────────────────────
+	for _, label := range vlp.EndNode.Labels {
+		pred, args := t.dialect.LabelContains(endAlias+".labels", label)
+		whereParts = append(whereParts, pred)
+		whereArgs = append(whereArgs, args...)
+	}
+	for key, expr := range vlp.EndNode.Props {
+		sub := &Translator{dialect: t.dialect}
+		valSQL, err := sub.exprToSQL(expr, scope)
+		if err != nil {
+			return fromClause{}, fmt.Errorf("sql: var-length end node prop %q: %w", key, err)
+		}
+		whereParts = append(whereParts, t.dialect.JSONExtract(endAlias+".props", "$."+key)+" = "+valSQL)
+		whereArgs = append(whereArgs, sub.args...)
+	}
+
+	// ── Assemble fromClause ───────────────────────────────────────────────────
+	// cteArgs carries: allCTEArgs (for the CTE body) + [minHops] (for the end-node JOIN).
+	// These are prepended to the final args in translateReturnPlan.
+	fc := fromClause{
+		from:           "nodes " + startAlias,
+		joins:          endJoinSQL,
+		joinArgs:       []any{int64(minHops)}, // for the "depth >= ?" in end-node JOIN
+		whereFragments: whereParts,
+		whereArgs:      whereArgs,
+		ctes:           []string{cteBuf.String()},
+		cteArgs:        allCTEArgs,
+	}
+	return fc, nil
+}
+
 // directionCond returns the structural ON predicate for the edge join
 // (direction-only, no type or property constraints).
 func (t *Translator) directionCond(mrp *cypher.MatchRelPlan, relAlias, startAlias string) string {
@@ -650,6 +846,8 @@ func (t *Translator) buildFromClauseForSequence(sp *cypher.SequencePlan, scope *
 
 	allWhere := baseFC.whereFragments
 	allJoins := baseFC.joins
+	allCTEs := append([]string(nil), baseFC.ctes...)
+	allCTEArgs := append([]any(nil), baseFC.cteArgs...)
 
 	// Process the remaining steps (additional MATCH hops).
 	for _, step := range sp.Steps[1:] {
@@ -675,6 +873,9 @@ func (t *Translator) buildFromClauseForSequence(sp *cypher.SequencePlan, scope *
 			allWhere = append(allWhere, fc.extraWhere)
 			allWhereArgs = append(allWhereArgs, fc.extraWhereArgs...)
 		}
+		// Propagate any CTEs from variable-length hops.
+		allCTEs = append(allCTEs, fc.ctes...)
+		allCTEArgs = append(allCTEArgs, fc.cteArgs...)
 	}
 
 	return fromClause{
@@ -685,6 +886,8 @@ func (t *Translator) buildFromClauseForSequence(sp *cypher.SequencePlan, scope *
 		whereArgs:      allWhereArgs,
 		extraWhere:     extraWhere,
 		extraWhereArgs: extraWhereArgs,
+		ctes:           allCTEs,
+		cteArgs:        allCTEArgs,
 	}, nil
 }
 

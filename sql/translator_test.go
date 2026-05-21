@@ -2032,3 +2032,100 @@ func TestTranslate_CaseDirectConstruction(t *testing.T) {
 		t.Errorf("expected 2 args (adult, minor), got %d: %v", len(result.Args), result.Args)
 	}
 }
+
+// ─── variable-length path translator unit tests ───────────────────────────────
+
+// TestTranslate_VarLength_WithRecursive verifies that a VariableLengthRelPlan
+// produces a WITH RECURSIVE CTE with the correct depth guard in the SQL.
+func TestTranslate_VarLength_WithRecursive(t *testing.T) {
+	result := translateCypher(t, "MATCH (a)-[*1..3]->(b) RETURN b.name")
+	containsAll(t, result,
+		"WITH RECURSIVE",
+		"UNION ALL",
+		"depth",
+	)
+	// The depth guard should cap at 3.
+	if !strings.Contains(result.SQL, "< ?") && !strings.Contains(result.SQL, "<3") {
+		t.Errorf("expected depth guard in SQL, got: %s", result.SQL)
+	}
+}
+
+// TestTranslate_VarLength_Unbounded verifies that an unbounded [*] path uses the
+// safety cap (15) rather than omitting the depth guard entirely.
+func TestTranslate_VarLength_Unbounded(t *testing.T) {
+	result := translateCypher(t, "MATCH (a)-[*]->(b) RETURN b.name")
+	containsAll(t, result,
+		"WITH RECURSIVE",
+		"UNION ALL",
+		"depth",
+	)
+	// Safety cap of 15 must appear as a bind arg.
+	found := false
+	for _, a := range result.Args {
+		if a == int64(15) || a == 15 {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected safety-cap arg 15 in args, got %v", result.Args)
+	}
+}
+
+// TestTranslate_VarLength_TypeFilter verifies that a type constraint is pushed
+// into both the base and recursive cases of the CTE.
+func TestTranslate_VarLength_TypeFilter(t *testing.T) {
+	result := translateCypher(t, "MATCH (a)-[:KNOWS*1..2]->(b) RETURN b.name")
+	containsAll(t, result,
+		"WITH RECURSIVE",
+		"e.type = ?",
+	)
+	// "KNOWS" should appear as a bind arg (twice: base + recursive).
+	count := 0
+	for _, a := range result.Args {
+		if a == "KNOWS" {
+			count++
+		}
+	}
+	if count < 2 {
+		t.Errorf("expected KNOWS to appear at least twice in args (base+recursive), got %d: %v", count, result.Args)
+	}
+}
+
+// TestTranslate_VarLength_DirectConstruction builds a VariableLengthRelPlan
+// directly and verifies the WITH RECURSIVE prefix and JOIN structure.
+func TestTranslate_VarLength_DirectConstruction(t *testing.T) {
+	scope := cypher.NewScope()
+	scope.Bind("a", cypher.Binding{Alias: "n0", Column: "n0.id", IsNode: true})
+	scope.Bind("b", cypher.Binding{Alias: "n1", Column: "n1.id", IsNode: true})
+
+	vlp := &cypher.VariableLengthRelPlan{
+		StartVar:  "a",
+		StartNode: cypher.MatchNodePlan{Variable: "a", SQLAlias: "n0"},
+		EndVar:    "b",
+		EndNode:   cypher.MatchNodePlan{Variable: "b", SQLAlias: "n1"},
+		MinHops:   1,
+		MaxHops:   2,
+		ToRight:   true,
+		CTEAlias:  "_vl0",
+	}
+	returnPlan := &cypher.ReturnPlan{
+		Source: vlp,
+		Projections: []cypher.ProjectionItem{
+			{Expr: &cypher.PropExpr{Variable: "b", Property: "name"}, Alias: "name"},
+		},
+	}
+
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(returnPlan, scope)
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	containsAll(t, result,
+		"WITH RECURSIVE",
+		"_vl0(end_id, depth) AS",
+		"UNION ALL",
+		"JOIN nodes n1 ON n1.id IN (SELECT end_id FROM _vl0 WHERE depth >= ?)",
+		"json_extract(n1.props, '$.name') AS name",
+	)
+}
