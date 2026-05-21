@@ -1,13 +1,48 @@
-// Package graphlite provides the public native API: Open, DB, and query
-// execution. The execution pipeline is:
+// Package graphlite is an embedded property graph database for Go.
 //
-//  1. cypher.Parse  → *Query
-//  2. cypher.Plan   → LogicalPlan
-//  3. sql.Translate → Result (with paramSentinels and idSentinels in Args)
-//  4. sql.BindParams → Result (paramSentinels replaced by caller values)
-//  5. executeStatements → run each Statement; KindMatchForWrite populates idMap;
-//     KindInsertNode captures last-insert rowid → idMap; idSentinels resolved
-//     from idMap before each write statement.
+// graphlite stores a labelled property graph in a local SQLite file and
+// accepts queries written in openCypher. It implements the neo4j-go-driver
+// v6 API so that application code written against [neo4j.Driver] can switch
+// between a real Neo4j instance and an in-process graphlite database with a
+// one-line change.
+//
+// # Quick start
+//
+// Native API — lowest dependency, suitable for tools and scripts:
+//
+//	db, err := graphlite.Open(":memory:")
+//	result, err := db.RunQuery(ctx, `MATCH (n:Person) RETURN n.name AS name`, nil)
+//
+// Driver compat — drop-in for code already using the Neo4j Go driver:
+//
+//	driver, err := graphlite.NewDriver(":memory:", nil)
+//	result, err := neo4j.ExecuteQuery(ctx, driver, `MATCH (n:Person) RETURN n.name`, nil, neo4j.EagerResultTransformer)
+//
+// In tests, use [NewTestDB] to open an in-memory database that is closed
+// automatically when the test ends:
+//
+//	db := graphlite.NewTestDB(t)
+//
+// # Switching between graphlite and Neo4j
+//
+// Both implement [neo4j.DriverWithContext]. A constructor that reads from the
+// environment is the recommended pattern:
+//
+//	func newDriver(ctx context.Context) (neo4j.DriverWithContext, error) {
+//	    if uri := os.Getenv("NEO4J_URI"); uri != "" {
+//	        return neo4j.NewDriverWithContext(uri, neo4j.BasicAuth(...))
+//	    }
+//	    return graphlite.NewDriver(":memory:", nil)
+//	}
+//
+// # Options
+//
+// Pass functional options to [Open] or [NewDriver] to tune behaviour:
+//
+//	db, err := graphlite.Open("graph.db",
+//	    graphlite.WithBusyTimeout(5*time.Second),
+//	    graphlite.WithReadOnly(),
+//	)
 package graphlite
 
 import (
