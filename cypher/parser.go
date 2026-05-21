@@ -672,6 +672,7 @@ func buildNodePattern(ctx *parser.OC_NodePatternContext) NodePattern {
 	}
 	if props := ctx.OC_Properties(); props != nil {
 		np.Props = buildProperties(props.(*parser.OC_PropertiesContext))
+		np.HasExplicitProps = true
 	}
 	return np
 }

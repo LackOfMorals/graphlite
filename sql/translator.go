@@ -82,6 +82,10 @@ type Statement struct {
 	// contains its integer id. The execution layer scans each row and populates
 	// idMap[varName] = id for every row returned.
 	MatchedVars map[string]string
+	// NumProps is the number of non-null properties written by a KindInsertNode or
+	// KindInsertEdge statement. The execution layer adds this to the PropertiesSet
+	// counter after a successful INSERT.
+	NumProps int
 }
 
 // Result carries the output of a single translation pass.
@@ -1692,6 +1696,7 @@ func BindParams(result Result, params map[string]any) (Result, error) {
 			Kind:        stmt.Kind,
 			CreatedVar:  stmt.CreatedVar,
 			MatchedVars: stmt.MatchedVars,
+			NumProps:    stmt.NumProps,
 		}
 	}
 	out := Result{
@@ -1831,12 +1836,15 @@ func (t *Translator) translateCreateNode(p *cypher.CreateNodePlan, scope *cypher
 		return Statement{}, fmt.Errorf("sql: CREATE node props: %w", err)
 	}
 
+	// Count non-null properties for the PropertiesSet counter.
+	numProps := countNonNullProps(p.Props)
+
 	var args []any
 	args = append(args, labels)
 	args = append(args, propsArgs...)
 
 	sql := fmt.Sprintf("INSERT INTO nodes (labels, props) VALUES (?, json(%s))", propsJSON)
-	return Statement{SQL: sql, Args: args, Kind: KindInsertNode, CreatedVar: p.Variable}, nil
+	return Statement{SQL: sql, Args: args, Kind: KindInsertNode, CreatedVar: p.Variable, NumProps: numProps}, nil
 }
 
 // translateCreateRel emits:
@@ -1874,6 +1882,9 @@ func (t *Translator) translateCreateRel(p *cypher.CreateRelPlan, scope *cypher.B
 		return Statement{}, fmt.Errorf("sql: CREATE relationship props: %w", err)
 	}
 
+	// Count non-null properties for the PropertiesSet counter.
+	numProps := countNonNullProps(p.Props)
+
 	// Args layout: [type, idSentinel(start), idSentinel(end), ...propsArgs]
 	// The two idSentinels are replaced by the execution layer with actual int64 IDs.
 	var args []any
@@ -1883,7 +1894,23 @@ func (t *Translator) translateCreateRel(p *cypher.CreateRelPlan, scope *cypher.B
 	args = append(args, propsArgs...)
 
 	sql := fmt.Sprintf("INSERT INTO edges (type, start_id, end_id, props) VALUES (?, ?, ?, json(%s))", propsJSON)
-	return Statement{SQL: sql, Args: args, Kind: KindInsertEdge, CreatedVar: p.RelVariable}, nil
+	return Statement{SQL: sql, Args: args, Kind: KindInsertEdge, CreatedVar: p.RelVariable, NumProps: numProps}, nil
+}
+
+// countNonNullProps counts the number of non-null properties in a props map.
+// Null properties (LiteralExpr with nil value) do not count as "set" per the
+// openCypher TCK specification.
+func countNonNullProps(props map[string]cypher.Expr) int {
+	count := 0
+	for _, expr := range props {
+		if lit, ok := expr.(*cypher.LiteralExpr); ok {
+			if lit.Value == nil {
+				continue // null literal — does not count
+			}
+		}
+		count++
+	}
+	return count
 }
 
 // translateSetProp emits:
@@ -2203,6 +2230,7 @@ func (t *Translator) translateMerge(p *cypher.MergePlan, scope *cypher.BindingSc
 	if err != nil {
 		return nil, fmt.Errorf("sql: MERGE insert props: %w", err)
 	}
+	mergeNumProps := countNonNullProps(p.Props)
 	var insertStmt Statement
 	if len(externalRefs) > 0 {
 		// When the MERGE props reference external node variables (e.g.
@@ -2237,6 +2265,7 @@ func (t *Translator) translateMerge(p *cypher.MergePlan, scope *cypher.BindingSc
 			Args:       insertArgs,
 			Kind:       KindMergeInsert,
 			CreatedVar: p.Variable,
+			NumProps:   mergeNumProps,
 		}
 	} else {
 		var insertArgs []any
@@ -2247,6 +2276,7 @@ func (t *Translator) translateMerge(p *cypher.MergePlan, scope *cypher.BindingSc
 			Args:       insertArgs,
 			Kind:       KindMergeInsert,
 			CreatedVar: p.Variable,
+			NumProps:   mergeNumProps,
 		}
 	}
 
@@ -2552,6 +2582,7 @@ func ResolveIDs(result Result, idMap map[string]int64) (Result, error) {
 			Kind:        stmt.Kind,
 			CreatedVar:  stmt.CreatedVar,
 			MatchedVars: stmt.MatchedVars,
+			NumProps:    stmt.NumProps,
 		}
 	}
 	out := Result{Statements: newStmts}

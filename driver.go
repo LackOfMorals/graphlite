@@ -480,6 +480,7 @@ func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 				idMap[stmt.CreatedVar] = lastID
 			}
 			ctr.NodesCreated++
+			ctr.PropertiesSet += s.NumProps
 
 		case glsql.KindInsertEdge:
 			res, err := ex.ExecContext(ctx, s.SQL, s.Args...)
@@ -496,6 +497,7 @@ func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 				idMap[stmt.CreatedVar] = lastID
 			}
 			ctr.RelationshipsCreated++
+			ctr.PropertiesSet += s.NumProps
 
 		case glsql.KindUpdate:
 			if _, err := ex.ExecContext(ctx, s.SQL, s.Args...); err != nil {
@@ -639,6 +641,7 @@ func execMergeBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 			idMap[varName] = lastID
 		}
 		ctr.NodesCreated++
+		ctr.PropertiesSet += insertStmt.NumProps
 
 		for _, s := range onCreateStmts {
 			realVar := strings.TrimPrefix(s.CreatedVar, "oncreate:")

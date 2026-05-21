@@ -261,6 +261,11 @@ type NodePattern struct {
 	// Props maps property key → raw expression text.
 	// Empty map means no inline properties constraint.
 	Props map[string]string
+	// HasExplicitProps is true when the node pattern included an explicit
+	// property map in the source Cypher (even an empty map "{}"). This
+	// distinguishes (n {}) from (n) — the former re-binds an existing node
+	// which is a VariableAlreadyBound error in CREATE.
+	HasExplicitProps bool
 }
 
 // PatternChain is one hop in a path: a relationship pattern followed by a node.

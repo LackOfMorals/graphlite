@@ -311,6 +311,24 @@ func planPatternPart(part PatternPart, optional bool, scope *BindingScope, ac *a
 			cteAlias := fmt.Sprintf("_vl%d", ac.nodeCount)
 			ac.nodeCount++
 
+			// Bind the rel variable if named, checking for type conflicts first.
+			if hop.Rel.Variable != "" {
+				relVar := hop.Rel.Variable
+				if existing, ok := scope.Resolve(relVar); ok {
+					if existing.IsNode {
+						return nil, fmt.Errorf("cypher: variable %q used as both node and relationship: SyntaxError VariableTypeConflict", relVar)
+					}
+				} else {
+					relAlias := ac.nextRel()
+					scope.Bind(relVar, Binding{
+						Alias:  relAlias,
+						Column: relAlias + ".id",
+						Table:  "edges",
+						IsRel:  true,
+					})
+				}
+			}
+
 			// Plan the end node (allocates a new alias, adds to scope).
 			endNodePlan, err := planNodePatternNewAlias(hop.Node, optional, scope, ac)
 			if err != nil {
@@ -573,10 +591,16 @@ func planCreateClause(cc *CreateClause, scope *BindingScope, ac *aliasCounter) (
 					return nil, fmt.Errorf("cypher: variable %q already bound, cannot CREATE: SyntaxError VariableAlreadyBound", part.Start.Variable)
 				}
 			}
+			// Validate property value expressions against current scope to catch
+			// undefined variable references (e.g. {name: missing}).
+			nodeProps, err := planPropsMapValidated(part.Start.Props, scope)
+			if err != nil {
+				return nil, err
+			}
 			nodePlan := &CreateNodePlan{
 				Variable: part.Start.Variable,
 				Labels:   part.Start.Labels,
-				Props:    planPropsMap(part.Start.Props),
+				Props:    nodeProps,
 			}
 			// If the variable is named, add it to scope so subsequent
 			// CREATE relationship clauses can reference it.
@@ -593,7 +617,21 @@ func planCreateClause(cc *CreateClause, scope *BindingScope, ac *aliasCounter) (
 		} else {
 			// Chain: create the start node if it does not yet exist in scope.
 			startVar := part.Start.Variable
-			_, startAlreadyBound := scope.Resolve(startVar)
+			startBinding, startAlreadyBound := scope.Resolve(startVar)
+			if startAlreadyBound {
+				// The variable is already in scope. If labels or props are specified
+				// (including an explicit empty map "{}"), this is a VariableAlreadyBound
+				// error (cannot re-define an existing node).
+				// If neither labels nor props are given, the variable is being used as an
+				// anchor (e.g. MATCH (a) CREATE (a)-[:T]->(b)) — that is allowed.
+				if len(part.Start.Labels) > 0 || part.Start.HasExplicitProps {
+					return nil, fmt.Errorf("cypher: variable %q already bound, cannot CREATE: SyntaxError VariableAlreadyBound", startVar)
+				}
+				// Type conflict check: cannot use a relationship variable as a node anchor.
+				if startBinding.IsRel {
+					return nil, fmt.Errorf("cypher: variable %q used as both node and relationship: SyntaxError VariableTypeConflict", startVar)
+				}
+			}
 			if startVar == "" || !startAlreadyBound {
 				// For anonymous nodes, generate a unique internal name so the
 				// translator can resolve the variable in scope for the relationship.
@@ -601,10 +639,14 @@ func planCreateClause(cc *CreateClause, scope *BindingScope, ac *aliasCounter) (
 					startVar = ac.nextAnon()
 				}
 				startAlias := ac.nextNode()
+				startProps, err := planPropsMapValidated(part.Start.Props, scope)
+				if err != nil {
+					return nil, err
+				}
 				nodePlan := &CreateNodePlan{
 					Variable: startVar,
 					Labels:   part.Start.Labels,
-					Props:    planPropsMap(part.Start.Props),
+					Props:    startProps,
 				}
 				scope.Bind(startVar, Binding{
 					Alias:  startAlias,
@@ -618,19 +660,62 @@ func planCreateClause(cc *CreateClause, scope *BindingScope, ac *aliasCounter) (
 			currentVar := startVar
 
 			for _, hop := range part.Chain {
+				// Validate relationship direction: CREATE requires a directed relationship.
+				// Both ToLeft and ToRight set means a bidirectional arrow, which is also invalid.
+				if hop.Rel.ToLeft && hop.Rel.ToRight {
+					return nil, fmt.Errorf("cypher: CREATE relationship cannot have both directions: SyntaxError RequiresDirectedRelationship")
+				}
+				if !hop.Rel.ToLeft && !hop.Rel.ToRight {
+					return nil, fmt.Errorf("cypher: CREATE relationship must have a direction: SyntaxError RequiresDirectedRelationship")
+				}
+
+				// Validate relationship type: CREATE requires exactly one type.
+				if len(hop.Rel.Types) == 0 {
+					return nil, fmt.Errorf("cypher: CREATE relationship must have a type: SyntaxError NoSingleRelationshipType")
+				}
+				if len(hop.Rel.Types) > 1 {
+					return nil, fmt.Errorf("cypher: CREATE relationship cannot have multiple types: SyntaxError NoSingleRelationshipType")
+				}
+
+				// Validate no variable-length in CREATE.
+				if hop.Rel.VarLength {
+					return nil, fmt.Errorf("cypher: CREATE relationship cannot be variable-length: SyntaxError CreatingVarLength")
+				}
+
+				// Check relationship variable is not already bound.
+				if hop.Rel.Variable != "" {
+					if _, alreadyBound := scope.Resolve(hop.Rel.Variable); alreadyBound {
+						return nil, fmt.Errorf("cypher: variable %q already bound, cannot CREATE: SyntaxError VariableAlreadyBound", hop.Rel.Variable)
+					}
+				}
+
 				// Create the end node if not in scope.
 				endVar := hop.Node.Variable
-				_, endAlreadyBound := scope.Resolve(endVar)
+				endBinding, endAlreadyBound := scope.Resolve(endVar)
+				if endAlreadyBound {
+					// Already in scope: labels or explicit props not allowed (VariableAlreadyBound).
+					if len(hop.Node.Labels) > 0 || hop.Node.HasExplicitProps {
+						return nil, fmt.Errorf("cypher: variable %q already bound, cannot CREATE: SyntaxError VariableAlreadyBound", endVar)
+					}
+					// Type conflict check.
+					if endBinding.IsRel {
+						return nil, fmt.Errorf("cypher: variable %q used as both node and relationship: SyntaxError VariableTypeConflict", endVar)
+					}
+				}
 				if endVar == "" || !endAlreadyBound {
 					// For anonymous nodes, generate a unique internal name.
 					if endVar == "" {
 						endVar = ac.nextAnon()
 					}
 					endAlias := ac.nextNode()
+					endProps, err := planPropsMapValidated(hop.Node.Props, scope)
+					if err != nil {
+						return nil, err
+					}
 					endNodePlan := &CreateNodePlan{
 						Variable: endVar,
 						Labels:   hop.Node.Labels,
-						Props:    planPropsMap(hop.Node.Props),
+						Props:    endProps,
 					}
 					scope.Bind(endVar, Binding{
 						Alias:  endAlias,
@@ -641,18 +726,17 @@ func planCreateClause(cc *CreateClause, scope *BindingScope, ac *aliasCounter) (
 					plans = append(plans, endNodePlan)
 				}
 
-				// Validate relationship direction: CREATE requires a directed relationship.
-				if !hop.Rel.ToLeft && !hop.Rel.ToRight {
-					return nil, fmt.Errorf("cypher: CREATE relationship must have a direction: SyntaxError RequiresDirectedRelationship")
-				}
-
 				// Create the relationship.
+				relProps, err := planPropsMapValidated(hop.Rel.Props, scope)
+				if err != nil {
+					return nil, err
+				}
 				relPlan := &CreateRelPlan{
 					RelVariable: hop.Rel.Variable,
 					Type:        firstRelType(hop.Rel.Types),
 					StartVar:    currentVar,
 					EndVar:      endVar,
-					Props:       planPropsMap(hop.Rel.Props),
+					Props:       relProps,
 				}
 				// Bind the relationship variable in scope so the translator can
 				// reference it in RETURN clauses (e.g. RETURN r.prop).
@@ -696,6 +780,13 @@ func planSetClause(sc *SetClause, scope *BindingScope) ([]LogicalPlan, error) {
 		if err != nil {
 			return nil, fmt.Errorf("cypher: SET %s.%s: %w", item.Variable, item.Property, err)
 		}
+		// Detect undefined variable references in the SET value: a bare identifier
+		// that fell through to RawExpr and is not in scope is an undefined variable.
+		if raw, ok := valueExpr.(*RawExpr); ok && isIdentifier(raw.Text) {
+			if _, inScope := scope.Resolve(raw.Text); !inScope {
+				return nil, fmt.Errorf("cypher: undefined variable %q in SET value: SyntaxError UndefinedVariable", raw.Text)
+			}
+		}
 		plans = append(plans, &SetPropPlan{
 			Variable: item.Variable,
 			Property: item.Property,
@@ -733,6 +824,14 @@ func planMergeClause(mc *MergeClause, scope *BindingScope, ac *aliasCounter) (*M
 	np := mc.Pattern.Start
 	if len(mc.Pattern.Chain) > 0 {
 		return nil, fmt.Errorf("cypher: MERGE with relationship patterns is not yet supported")
+	}
+
+	// Check that the MERGE variable is not already bound in scope.
+	// MERGE (a) when a was bound by a preceding MATCH is a VariableAlreadyBound error.
+	if np.Variable != "" {
+		if _, alreadyBound := scope.Resolve(np.Variable); alreadyBound {
+			return nil, fmt.Errorf("cypher: variable %q already bound, cannot MERGE: SyntaxError VariableAlreadyBound", np.Variable)
+		}
 	}
 
 	// Allocate an alias and, for named variables, add a scope binding so the
@@ -925,8 +1024,17 @@ func isIdentifier(s string) bool {
 // Expr map. For v0.1 the values are simple: string/number literals, param refs,
 // or RawExpr for complex expressions.
 func planPropsMap(raw map[string]string) map[string]Expr {
+	result, _ := planPropsMapValidated(raw, nil)
+	return result
+}
+
+// planPropsMapValidated is like planPropsMap but validates property value
+// expressions against the provided scope. When scope is non-nil, a bare
+// identifier that is not in scope is treated as an undefined variable reference
+// and causes an error. Pass nil to skip validation (for MATCH/MERGE props).
+func planPropsMapValidated(raw map[string]string, scope *BindingScope) (map[string]Expr, error) {
 	if len(raw) == 0 {
-		return nil
+		return nil, nil
 	}
 	result := make(map[string]Expr, len(raw))
 	for k, v := range raw {
@@ -940,9 +1048,22 @@ func planPropsMap(raw map[string]string) map[string]Expr {
 		// for inline props; they are plain literals or param refs).
 		emptyScope := NewScope()
 		expr, _ := parseExprText(v, emptyScope)
+
+		// When a scope is provided for validation, check that bare identifier
+		// expressions (those that resolved to RawExpr because they weren't in the
+		// empty scope) are not undefined variables in the real scope.
+		if scope != nil {
+			if raw, ok := expr.(*RawExpr); ok && isIdentifier(raw.Text) {
+				// Bare identifier not matched as literal/param/prop — check real scope.
+				if _, inScope := scope.Resolve(raw.Text); !inScope {
+					return nil, fmt.Errorf("cypher: undefined variable %q in property value: SyntaxError UndefinedVariable", raw.Text)
+				}
+			}
+		}
+
 		result[k] = expr
 	}
-	return result
+	return result, nil
 }
 
 // firstRelType returns the first relationship type from a list, or "" if empty.
