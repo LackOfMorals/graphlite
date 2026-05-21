@@ -3,6 +3,8 @@ package graphlite_test
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -149,4 +151,139 @@ func ExampleDB_Import() {
 
 	// Output:
 	// Diana -> Eve
+}
+
+// ExampleDB_CopyFrom demonstrates seeding a graphlite database from another
+// neo4j.Driver — useful for loading a subset of a real Neo4j graph into a
+// local in-memory instance for testing.
+func ExampleDB_CopyFrom() {
+	ctx := context.Background()
+
+	// Source: any neo4j.Driver. Here we use another graphlite instance.
+	src, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	if err != nil {
+		panic(err)
+	}
+	defer src.Close(ctx)
+
+	_, err = neo4j.ExecuteQuery(ctx, src,
+		`CREATE (:City {name: "London"})-[:CONNECTED_TO]->(:City {name: "Paris"})`,
+		nil, neo4j.EagerResultTransformer)
+	if err != nil {
+		panic(err)
+	}
+
+	// Destination: a fresh local database.
+	dst, err := graphlite.Open(":memory:")
+	if err != nil {
+		panic(err)
+	}
+	defer dst.Close()
+
+	if err := dst.CopyFrom(ctx, src); err != nil {
+		panic(err)
+	}
+
+	result, err := dst.RunQuery(ctx,
+		`MATCH (a:City)-[:CONNECTED_TO]->(b:City) RETURN a.name AS src, b.name AS dst`,
+		nil)
+	if err != nil {
+		panic(err)
+	}
+	for result.Next(ctx) {
+		rec := result.Record().AsMap()
+		fmt.Printf("%s -> %s\n", rec["src"], rec["dst"])
+	}
+
+	// Output:
+	// London -> Paris
+}
+
+// ExampleDB_CopyTo demonstrates promoting a graphlite database into another
+// neo4j.Driver — useful for pushing locally built graph data to Neo4j.
+func ExampleDB_CopyTo() {
+	ctx := context.Background()
+
+	// Source: a graphlite database with some graph data.
+	src, err := graphlite.Open(":memory:")
+	if err != nil {
+		panic(err)
+	}
+	defer src.Close()
+
+	_, err = src.RunQuery(ctx,
+		`CREATE (:Product {name: "Widget"})-[:SHIPS_TO]->(:Region {name: "EU"})`,
+		nil)
+	if err != nil {
+		panic(err)
+	}
+
+	// Destination: any neo4j.Driver. Here we use another graphlite instance.
+	dst, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	if err != nil {
+		panic(err)
+	}
+	defer dst.Close(ctx)
+
+	if err := src.CopyTo(ctx, dst); err != nil {
+		panic(err)
+	}
+
+	result, err := neo4j.ExecuteQuery(ctx, dst,
+		`MATCH (p:Product)-[:SHIPS_TO]->(r:Region) RETURN p.name AS product, r.name AS region`,
+		nil, neo4j.EagerResultTransformer)
+	if err != nil {
+		panic(err)
+	}
+	rec := result.Records[0].AsMap()
+	fmt.Printf("%s ships to %s\n", rec["product"], rec["region"])
+
+	// Output:
+	// Widget ships to EU
+}
+
+// ExampleDB_Snapshot demonstrates saving a consistent copy of an in-memory
+// database to a file so it can be reopened later.
+func ExampleDB_Snapshot() {
+	ctx := context.Background()
+
+	db, err := graphlite.Open(":memory:")
+	if err != nil {
+		panic(err)
+	}
+	defer db.Close()
+
+	_, err = db.RunQuery(ctx, `CREATE (:Event {name: "Launch"})`, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	dir, err := os.MkdirTemp("", "graphlite-snap-*")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(dir)
+
+	snapPath := filepath.Join(dir, "snap.db")
+	if err := db.Snapshot(snapPath); err != nil {
+		panic(err)
+	}
+
+	// Reopen the snapshot as a normal database.
+	snap, err := graphlite.Open(snapPath)
+	if err != nil {
+		panic(err)
+	}
+	defer snap.Close()
+
+	result, err := snap.RunQuery(ctx, `MATCH (e:Event) RETURN e.name AS name`, nil)
+	if err != nil {
+		panic(err)
+	}
+	for result.Next(ctx) {
+		fmt.Println(result.Record().Values()[0])
+	}
+
+	// Output:
+	// Launch
 }
