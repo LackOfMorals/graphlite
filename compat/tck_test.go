@@ -43,7 +43,8 @@ type tckState struct {
 	relsCreated  int
 	relsDeleted  int
 	propsSet     int
-	skipped      bool // set by Before hook; steps become no-ops
+	skipped      bool           // set by Before hook; steps become no-ops
+	params       map[string]any // query parameters set by "And parameters are:" step
 }
 
 func newTCKState() *tckState { return &tckState{} }
@@ -61,6 +62,7 @@ func (s *tckState) reset() {
 	s.relsDeleted = 0
 	s.propsSet = 0
 	s.skipped = false
+	s.params = nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -259,7 +261,8 @@ func (s *tckState) whenExecutingQueryDocString(ctx context.Context, doc *godog.D
 		return fmt.Errorf("database not initialised")
 	}
 	cypher := strings.TrimSpace(doc.Content)
-	qr, err := s.db.RunQuery(ctx, cypher, nil)
+	qr, err := s.db.RunQuery(ctx, cypher, s.params)
+	s.params = nil // consume params after use
 	if err != nil {
 		s.lastError = err
 		s.lastResult = nil
@@ -508,6 +511,19 @@ func compareUnordered(expected, actual []any, col string) error {
 	for _, v := range actual {
 		key := fmt.Sprintf("%v", v)
 		if freq[key] <= 0 {
+			// SQLite returns int64 for boolean expressions (0/1); try bool equivalents.
+			switch key {
+			case "0":
+				if freq["false"] > 0 {
+					freq["false"]--
+					continue
+				}
+			case "1":
+				if freq["true"] > 0 {
+					freq["true"]--
+					continue
+				}
+			}
 			return fmt.Errorf("column %q: unexpected value %q in actual results", col, key)
 		}
 		freq[key]--
@@ -637,9 +653,21 @@ func TestTCK(t *testing.T) {
 			sc.Step(`^executing control query:$`, state.executingControlQueryDocString)
 
 			// ── Parameters are: (table of param name/value pairs) ─────────────
-			// Graphlite does not support table-defined query parameters; accept
-			// the step as a no-op so the scenario can still execute the query.
+			// Parse the two-column table (name | value) and store the values
+			// in state.params so they are passed to the next RunQuery call.
 			sc.Step(`^parameters are:$`, func(ctx context.Context, table *godog.Table) error {
+				if state.skipped {
+					return nil
+				}
+				state.params = make(map[string]any)
+				for _, row := range table.Rows {
+					if len(row.Cells) < 2 {
+						continue
+					}
+					name := strings.TrimSpace(row.Cells[0].Value)
+					val := parseTCKValue(strings.TrimSpace(row.Cells[1].Value))
+					state.params[name] = val
+				}
 				return nil
 			})
 

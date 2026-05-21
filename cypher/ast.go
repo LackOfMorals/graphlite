@@ -123,6 +123,10 @@ type SetItem struct {
 	// ExprText is the raw text of the right-hand-side expression for n.prop = expr.
 	// Empty for the += merge form (Props holds the key/value pairs instead).
 	ExprText string
+	// Expr is the typed AST for the right-hand-side expression. When non-nil it
+	// takes priority over ExprText in the planner. Set by buildSetItem when the
+	// RHS can be parsed into a typed Expr (e.g. arithmetic, function calls).
+	Expr Expr
 	// Merge is true for SET n += {map} (property merge without overwriting other keys).
 	Merge bool
 	// Props holds the key/value pairs for the SET n += {map} form.
@@ -193,8 +197,14 @@ type ReturnClause struct {
 	OrderBy  []SortItem
 	// Skip is nil when not present.
 	Skip *int64
+	// SkipParam holds the parameter name when SKIP uses a $param reference.
+	// When set, Skip is nil.
+	SkipParam string
 	// Limit is nil when not present.
 	Limit *int64
+	// LimitParam holds the parameter name when LIMIT uses a $param reference.
+	// When set, Limit is nil.
+	LimitParam string
 }
 
 func (*ReturnClause) clauseNode() {}

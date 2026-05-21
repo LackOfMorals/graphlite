@@ -489,7 +489,9 @@ func planReturnClause(rc *ReturnClause, scope *BindingScope) (*ReturnPlan, error
 	}
 
 	rp.Skip = rc.Skip
+	rp.SkipParam = rc.SkipParam
 	rp.Limit = rc.Limit
+	rp.LimitParam = rc.LimitParam
 
 	return rp, nil
 }
@@ -731,11 +733,17 @@ func planCreateClause(cc *CreateClause, scope *BindingScope, ac *aliasCounter) (
 				if err != nil {
 					return nil, err
 				}
+				// For ToLeft (-><-), the relationship runs from the right
+				// node (endVar) to the left node (currentVar).
+				relStartVar, relEndVar := currentVar, endVar
+				if hop.Rel.ToLeft {
+					relStartVar, relEndVar = endVar, currentVar
+				}
 				relPlan := &CreateRelPlan{
 					RelVariable: hop.Rel.Variable,
 					Type:        firstRelType(hop.Rel.Types),
-					StartVar:    currentVar,
-					EndVar:      endVar,
+					StartVar:    relStartVar,
+					EndVar:      relEndVar,
 					Props:       relProps,
 				}
 				// Bind the relationship variable in scope so the translator can
@@ -776,9 +784,16 @@ func planSetClause(sc *SetClause, scope *BindingScope) ([]LogicalPlan, error) {
 			plans = append(plans, &SetMergePlan{Variable: item.Variable, Props: props})
 			continue
 		}
-		valueExpr, err := parseExprText(item.ExprText, scope)
-		if err != nil {
-			return nil, fmt.Errorf("cypher: SET %s.%s: %w", item.Variable, item.Property, err)
+		var valueExpr Expr
+		if item.Expr != nil {
+			// Typed expr from parser (e.g. arithmetic, concat).
+			valueExpr = item.Expr
+		} else {
+			var err error
+			valueExpr, err = parseExprText(item.ExprText, scope)
+			if err != nil {
+				return nil, fmt.Errorf("cypher: SET %s.%s: %w", item.Variable, item.Property, err)
+			}
 		}
 		// Detect undefined variable references in the SET value: a bare identifier
 		// that fell through to RawExpr and is not in scope is an undefined variable.
@@ -850,10 +865,14 @@ func planMergeClause(mc *MergeClause, scope *BindingScope, ac *aliasCounter) (*M
 		_ = ac.nextNode()
 	}
 
+	mergeProps, err := planPropsMapValidated(np.Props, scope)
+	if err != nil {
+		return nil, fmt.Errorf("cypher: MERGE props: %w", err)
+	}
 	mp := &MergePlan{
 		Variable: np.Variable,
 		Labels:   np.Labels,
-		Props:    planPropsMap(np.Props),
+		Props:    mergeProps,
 	}
 
 	// Plan ON CREATE SET items.
@@ -1044,17 +1063,38 @@ func planPropsMapValidated(raw map[string]string, scope *BindingScope) (map[stri
 			result[k] = &ParamRef{Name: strings.TrimPrefix(v, "$")}
 			continue
 		}
-		// Use a minimal scope for property value expressions (no variables in scope
-		// for inline props; they are plain literals or param refs).
-		emptyScope := NewScope()
-		expr, _ := parseExprText(v, emptyScope)
+
+		// The "__list__:" sentinel encodes a list literal (e.g. [1, 2, 3]).
+		// Parse each element and wrap them in a ListLiteralExpr.
+		if listContent, ok := strings.CutPrefix(v, "__list__:"); ok {
+			var items []Expr
+			if listContent != "" {
+				emptyScope := NewScope()
+				for _, elemText := range strings.Split(listContent, ",") {
+					elem, _ := parseExprText(strings.TrimSpace(elemText), emptyScope)
+					items = append(items, elem)
+				}
+			}
+			result[k] = &ListLiteralExpr{Items: items}
+			continue
+		}
+
+		// Use the provided scope (if any) to resolve variable references in property
+		// value expressions. This allows MERGE (n {prop: withAlias}) to resolve
+		// WITH-introduced aliases to typed VarExpr/PropExpr nodes. Fall back to an
+		// empty scope for plain literal/param values when no scope is provided.
+		parseScope := scope
+		if parseScope == nil {
+			parseScope = NewScope()
+		}
+		expr, _ := parseExprText(v, parseScope)
 
 		// When a scope is provided for validation, check that bare identifier
 		// expressions (those that resolved to RawExpr because they weren't in the
-		// empty scope) are not undefined variables in the real scope.
+		// scope) are not undefined variables.
 		if scope != nil {
 			if raw, ok := expr.(*RawExpr); ok && isIdentifier(raw.Text) {
-				// Bare identifier not matched as literal/param/prop — check real scope.
+				// Bare identifier not matched as literal/param/prop — check scope.
 				if _, inScope := scope.Resolve(raw.Text); !inScope {
 					return nil, fmt.Errorf("cypher: undefined variable %q in property value: SyntaxError UndefinedVariable", raw.Text)
 				}

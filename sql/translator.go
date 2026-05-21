@@ -11,6 +11,7 @@
 package sql
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -86,6 +87,10 @@ type Statement struct {
 	// KindInsertEdge statement. The execution layer adds this to the PropertiesSet
 	// counter after a successful INSERT.
 	NumProps int
+	// Optional is true when a KindMatchForWrite statement comes from an OPTIONAL
+	// MATCH. When true, the execution layer must still execute write and SELECT
+	// statements exactly once (with all matched IDs nil) even when no rows are found.
+	Optional bool
 }
 
 // Result carries the output of a single translation pass.
@@ -116,6 +121,11 @@ type Translator struct {
 	dialect Dialect
 	// args accumulates SQL bind arguments in the order they appear.
 	args []any
+	// updateVar, when non-empty, is the Cypher variable being updated in a SET
+	// statement. PropExpr and VarExpr references to this variable will use
+	// unqualified column names (e.g. "props" instead of "n0.props") since
+	// UPDATE statements cannot use table aliases.
+	updateVar string
 }
 
 // NewTranslator creates a Translator that uses the given Dialect.
@@ -279,14 +289,7 @@ func (t *Translator) translateReturnAfterWrite(rp *cypher.ReturnPlan, scope *cyp
 		}
 	}
 
-	if rp.Limit != nil {
-		fmt.Fprintf(&b, " LIMIT %d", *rp.Limit)
-		if rp.Skip != nil {
-			fmt.Fprintf(&b, " OFFSET %d", *rp.Skip)
-		}
-	} else if rp.Skip != nil {
-		fmt.Fprintf(&b, " LIMIT -1 OFFSET %d", *rp.Skip)
-	}
+	retT.appendLimitOffset(&b, rp.Limit, rp.LimitParam, rp.Skip, rp.SkipParam)
 
 	// The args are: SELECT-list args (literals from projections) + sentinel args
 	// (idSentinel values resolved at execution time from idMap).
@@ -476,14 +479,8 @@ func (t *Translator) translateReturnPlan(rp *cypher.ReturnPlan, scope *cypher.Bi
 	// LIMIT / SKIP (SQLite: LIMIT n OFFSET m).
 	// SQLite requires LIMIT before OFFSET; when only SKIP is present we emit
 	// LIMIT -1 (unlimited) so that OFFSET is valid syntax.
-	if rp.Limit != nil {
-		fmt.Fprintf(&b, " LIMIT %d", *rp.Limit)
-		if rp.Skip != nil {
-			fmt.Fprintf(&b, " OFFSET %d", *rp.Skip)
-		}
-	} else if rp.Skip != nil {
-		fmt.Fprintf(&b, " LIMIT -1 OFFSET %d", *rp.Skip)
-	}
+	// Both LIMIT and SKIP accept either integer literals or $param references.
+	t.appendLimitOffset(&b, rp.Limit, rp.LimitParam, rp.Skip, rp.SkipParam)
 
 	return b.String(), nil
 }
@@ -705,9 +702,17 @@ func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope 
 
 		// 1. Build edge LEFT JOIN ON clause.
 		edgeOnParts := []string{t.directionCond(mrp, relAlias, startAlias)}
-		for _, relType := range mrp.Types {
+		if len(mrp.Types) == 1 {
 			edgeOnParts = append(edgeOnParts, relAlias+".type = ?")
-			fc.joinArgs = append(fc.joinArgs, relType)
+			fc.joinArgs = append(fc.joinArgs, mrp.Types[0])
+		} else if len(mrp.Types) > 1 {
+			// Multiple types: (r.type = ? OR r.type = ? …)
+			typeParts := make([]string, len(mrp.Types))
+			for i, relType := range mrp.Types {
+				typeParts[i] = relAlias + ".type = ?"
+				fc.joinArgs = append(fc.joinArgs, relType)
+			}
+			edgeOnParts = append(edgeOnParts, "("+strings.Join(typeParts, " OR ")+")")
 		}
 		for key, expr := range mrp.RelProps {
 			sub := &Translator{dialect: t.dialect}
@@ -782,10 +787,17 @@ func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope 
 		joinParts = append(joinParts, fmt.Sprintf("JOIN edges %s ON %s",
 			relAlias, t.directionCond(mrp, relAlias, startAlias)))
 
-		// Edge constraints to WHERE.
-		for _, relType := range mrp.Types {
+		// Edge type constraints to WHERE (OR semantics for multiple types).
+		if len(mrp.Types) == 1 {
 			whereParts = append(whereParts, relAlias+".type = ?")
-			fc.whereArgs = append(fc.whereArgs, relType)
+			fc.whereArgs = append(fc.whereArgs, mrp.Types[0])
+		} else if len(mrp.Types) > 1 {
+			typeParts := make([]string, len(mrp.Types))
+			for i, relType := range mrp.Types {
+				typeParts[i] = relAlias + ".type = ?"
+				fc.whereArgs = append(fc.whereArgs, relType)
+			}
+			whereParts = append(whereParts, "("+strings.Join(typeParts, " OR ")+")")
 		}
 		for key, expr := range mrp.RelProps {
 			sub := &Translator{dialect: t.dialect}
@@ -1229,13 +1241,19 @@ func (t *Translator) buildSelectList(projections []cypher.ProjectionItem, scope 
 			case *cypher.VarExpr:
 				alias = e.Name
 			case *cypher.PropExpr:
-				// Use underscore separator to produce a valid SQL identifier
-				// (dot is not valid in unquoted column aliases).
-				alias = e.Variable + "_" + e.Property
+				// Use "variable.property" as the alias (matching Cypher convention).
+				// SQLite accepts quoted identifiers with dots: AS "a.name".
+				alias = e.Variable + "." + e.Property
 			}
 		}
 		if alias != "" {
-			colSQL += " AS " + alias
+			// Quote aliases that contain non-identifier characters (e.g. dots).
+			// Plain identifiers are left unquoted for readability.
+			if strings.ContainsAny(alias, ". ") {
+				colSQL += ` AS "` + alias + `"`
+			} else {
+				colSQL += " AS " + alias
+			}
 		}
 		parts = append(parts, colSQL)
 	}
@@ -1271,7 +1289,97 @@ func (t *Translator) exprToSQL(expr cypher.Expr, scope *cypher.BindingScope) (st
 		if !ok {
 			return "", fmt.Errorf("sql: variable %q not in scope", e.Variable)
 		}
+		// In an UPDATE context for this variable, use the unqualified column name
+		// since UPDATE statements cannot reference table aliases.
+		if t.updateVar == e.Variable {
+			return t.dialect.JSONExtract("props", "$."+e.Property), nil
+		}
 		return t.dialect.JSONExtract(binding.Alias+".props", "$."+e.Property), nil
+
+	case *cypher.ArithExpr:
+		// Evaluate left and right sides, collecting their bind args.
+		// Inherit updateVar so nested PropExprs use unqualified column names.
+		leftT := &Translator{dialect: t.dialect, updateVar: t.updateVar}
+		leftSQL, err := leftT.exprToSQL(e.Left, scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: arith lhs: %w", err)
+		}
+		rightT := &Translator{dialect: t.dialect, updateVar: t.updateVar}
+		rightSQL, err := rightT.exprToSQL(e.Right, scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: arith rhs: %w", err)
+		}
+		switch e.Op {
+		case "+":
+			// Detect list literal on either side: if one side is a ListLiteralExpr,
+			// use JSON array concatenation. Otherwise use text concatenation (||).
+			_, leftIsList := e.Left.(*cypher.ListLiteralExpr)
+			_, rightIsList := e.Right.(*cypher.ListLiteralExpr)
+			if leftIsList || rightIsList {
+				// JSON array concatenation.
+				// Format: json(substr(lhsNoClose, 1, length(lhsNoClose)-1) || ',' || substr(rhs, 2))
+				// lhs appears twice; if only lhs has NO bind args (it's a json_extract), safe to repeat.
+				// rhs appears once.
+				// For the list-literal side (which has a ? arg), it appears only once.
+				if rightIsList && len(leftT.args) == 0 {
+					// rhs is the list literal (one ? arg), lhs is an expression (no args, safe to repeat).
+					// json(substr(lhs,1,length(lhs)-1)||','||substr(?,2))
+					t.args = append(t.args, rightT.args...)
+					return fmt.Sprintf("json(substr(%s,1,length(%s)-1)||','||substr(%s,2))", leftSQL, leftSQL, rightSQL), nil
+				}
+				if leftIsList && len(rightT.args) == 0 {
+					// lhs is the list literal (one ? arg), rhs is an expression (no args, safe to repeat).
+					// json(substr(?,1,length(?)-1)||','||substr(rhs,2))
+					// ? appears twice so we duplicate the arg.
+					t.args = append(t.args, leftT.args...)
+					t.args = append(t.args, leftT.args...)
+					return fmt.Sprintf("json(substr(%s,1,length(%s)-1)||','||substr(%s,2))", leftSQL, leftSQL, rightSQL), nil
+				}
+				// Both sides have args or both are list literals: fall back to text concat.
+			}
+			// Default: text/string concatenation.
+			t.args = append(t.args, leftT.args...)
+			t.args = append(t.args, rightT.args...)
+			return fmt.Sprintf("(CAST(%s AS TEXT)||CAST(%s AS TEXT))", leftSQL, rightSQL), nil
+		case "-":
+			t.args = append(t.args, leftT.args...)
+			t.args = append(t.args, rightT.args...)
+			return fmt.Sprintf("(%s - %s)", leftSQL, rightSQL), nil
+		case "*":
+			t.args = append(t.args, leftT.args...)
+			t.args = append(t.args, rightT.args...)
+			return fmt.Sprintf("(%s * %s)", leftSQL, rightSQL), nil
+		case "/":
+			t.args = append(t.args, leftT.args...)
+			t.args = append(t.args, rightT.args...)
+			return fmt.Sprintf("(%s / %s)", leftSQL, rightSQL), nil
+		default:
+			t.args = append(t.args, leftT.args...)
+			t.args = append(t.args, rightT.args...)
+			return fmt.Sprintf("(%s %s %s)", leftSQL, e.Op, rightSQL), nil
+		}
+
+	case *cypher.HasLabelExpr:
+		// n:Label1:Label2 → all label checks ANDed together.
+		// Each label uses the same LabelContains helper as inline pattern checks.
+		binding, ok := scope.Resolve(e.Variable)
+		if !ok {
+			return "", fmt.Errorf("sql: variable %q not in scope for label check", e.Variable)
+		}
+		labelsCol := binding.Alias + ".labels"
+		parts := make([]string, 0, len(e.Labels))
+		for _, label := range e.Labels {
+			pred, args := t.dialect.LabelContains(labelsCol, label)
+			t.args = append(t.args, args...)
+			parts = append(parts, pred)
+		}
+		if len(parts) == 0 {
+			return "1", nil // no labels — vacuously true
+		}
+		if len(parts) == 1 {
+			return parts[0], nil
+		}
+		return "(" + strings.Join(parts, " AND ") + ")", nil
 
 	case *cypher.VarExpr:
 		// Whole-variable reference: for a node, emit the id/labels/props JSON object;
@@ -1485,6 +1593,27 @@ func (t *Translator) exprToSQL(expr cypher.Expr, scope *cypher.BindingScope) (st
 	case *cypher.CaseExpr:
 		return t.caseExprToSQL(e, scope)
 
+	case *cypher.ListLiteralExpr:
+		// List literal used as a property value: encode as a JSON array string
+		// bound as a single parameter (e.g. [1,2,3] → '?'  where ? = "[1,2,3]").
+		// We collect each element's Go value, marshal to JSON, and bind the string.
+		items := make([]any, len(e.Items))
+		for i, item := range e.Items {
+			lit, ok := item.(*cypher.LiteralExpr)
+			if !ok {
+				// Non-literal element — fall back to a JSON null for safety.
+				items[i] = nil
+				continue
+			}
+			items[i] = lit.Value
+		}
+		jsonBytes, err := json.Marshal(items)
+		if err != nil {
+			return "", fmt.Errorf("sql: list literal JSON encoding: %w", err)
+		}
+		t.args = append(t.args, string(jsonBytes))
+		return "?", nil
+
 	case *cypher.RawExpr:
 		// RawExpr: unsupported sub-expression; return as-is (best effort).
 		// The translator cannot produce correct SQL for this but should not crash.
@@ -1624,6 +1753,41 @@ func (t *Translator) aggArgToSQL(expr cypher.Expr, scope *cypher.BindingScope) (
 	return t.exprToSQL(expr, scope)
 }
 
+// appendLimitOffset appends LIMIT / OFFSET clauses to b.
+// Each of limit/skip may be either an integer pointer (literal value) or a
+// non-empty param name string (bound at execution time via paramSentinel).
+// Both may be absent (nil pointer and empty string) — in that case nothing is appended.
+func (t *Translator) appendLimitOffset(b *strings.Builder, limit *int64, limitParam string, skip *int64, skipParam string) {
+	hasLimit := limit != nil || limitParam != ""
+	hasSkip := skip != nil || skipParam != ""
+
+	if hasLimit {
+		if limit != nil {
+			fmt.Fprintf(b, " LIMIT %d", *limit)
+		} else {
+			b.WriteString(" LIMIT ?")
+			t.args = append(t.args, paramSentinel{Name: limitParam})
+		}
+		if hasSkip {
+			if skip != nil {
+				fmt.Fprintf(b, " OFFSET %d", *skip)
+			} else {
+				b.WriteString(" OFFSET ?")
+				t.args = append(t.args, paramSentinel{Name: skipParam})
+			}
+		}
+	} else if hasSkip {
+		// No LIMIT but has SKIP: SQLite requires LIMIT before OFFSET, so emit LIMIT -1.
+		b.WriteString(" LIMIT -1")
+		if skip != nil {
+			fmt.Fprintf(b, " OFFSET %d", *skip)
+		} else {
+			b.WriteString(" OFFSET ?")
+			t.args = append(t.args, paramSentinel{Name: skipParam})
+		}
+	}
+}
+
 // literalToSQL converts a LiteralExpr to a SQL value. String literals are
 // added as bind arguments; numeric and boolean literals are inlined.
 func (t *Translator) literalToSQL(e *cypher.LiteralExpr) (string, error) {
@@ -1697,6 +1861,7 @@ func BindParams(result Result, params map[string]any) (Result, error) {
 			CreatedVar:  stmt.CreatedVar,
 			MatchedVars: stmt.MatchedVars,
 			NumProps:    stmt.NumProps,
+			Optional:    stmt.Optional,
 		}
 	}
 	out := Result{
@@ -1928,7 +2093,7 @@ func (t *Translator) translateSetProp(p *cypher.SetPropPlan, scope *cypher.Bindi
 	}
 
 	// Build the value SQL fragment (with its own fresh arg list).
-	valTranslator := &Translator{dialect: t.dialect}
+	valTranslator := &Translator{dialect: t.dialect, updateVar: p.Variable}
 	valSQL, err := valTranslator.exprToSQL(p.Value, scope)
 	if err != nil {
 		return Statement{}, fmt.Errorf("sql: SET value expr: %w", err)
@@ -2356,11 +2521,49 @@ func (t *Translator) translateSequenceWrite(sp *cypher.SequencePlan, scope *cyph
 		if err != nil {
 			return nil, true, err
 		}
+		// Propagate optional flag: if any read step is from an OPTIONAL MATCH,
+		// the execution layer must still run write/select once even with no matches.
+		if isOptionalPlan(readSteps) {
+			matchStmt.Optional = true
+		}
 		allStmts = append(allStmts, matchStmt)
 	}
 
 	allStmts = append(allStmts, writeStmts...)
 	return allStmts, true, nil
+}
+
+// isOptionalPlan returns true if any plan in the slice is (or contains) an
+// OPTIONAL MATCH node, indicating that the match may produce zero rows while
+// still requiring one null-row pass through the write/select pipeline.
+func isOptionalPlan(steps []cypher.LogicalPlan) bool {
+	for _, step := range steps {
+		if optionalInPlan(step) {
+			return true
+		}
+	}
+	return false
+}
+
+func optionalInPlan(plan cypher.LogicalPlan) bool {
+	if plan == nil {
+		return false
+	}
+	switch p := plan.(type) {
+	case *cypher.MatchNodePlan:
+		return p.Optional
+	case *cypher.MatchRelPlan:
+		return p.Optional
+	case *cypher.FilterPlan:
+		return optionalInPlan(p.Source)
+	case *cypher.SequencePlan:
+		for _, s := range p.Steps {
+			if optionalInPlan(s) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // collectPlanAliases walks a plan tree and collects all SQL table aliases that
@@ -2462,10 +2665,17 @@ func (t *Translator) buildMatchForWriteSelect(readSteps []cypher.LogicalPlan, sc
 		if !ok {
 			continue
 		}
+		// Skip aggregate/WITH alias bindings — they have AggExpr set and no real
+		// SQL table alias, so including them would produce ".id AS varName" syntax errors.
+		if b.AggExpr != nil {
+			continue
+		}
 		// Skip variables whose SQL alias is not in the read-phase FROM/JOIN.
 		// These are write-introduced variables (e.g. anonymous CREATE nodes)
 		// that have no table row in the read-phase SELECT.
-		if len(readAliases) > 0 && !readAliases[b.Alias] {
+		// When readAliases is empty (e.g. a pure WITH … MERGE with no MATCH), no
+		// table-derived variables exist, so all are excluded (SELECT falls back to "1").
+		if !readAliases[b.Alias] {
 			continue
 		}
 		col := fmt.Sprintf("%s.id AS %s", b.Alias, varName)
@@ -2583,6 +2793,7 @@ func ResolveIDs(result Result, idMap map[string]int64) (Result, error) {
 			CreatedVar:  stmt.CreatedVar,
 			MatchedVars: stmt.MatchedVars,
 			NumProps:    stmt.NumProps,
+			Optional:    stmt.Optional,
 		}
 	}
 	out := Result{Statements: newStmts}

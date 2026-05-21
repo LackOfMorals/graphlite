@@ -332,8 +332,34 @@ func buildSetItem(ctx *parser.OC_SetItemContext) (SetItem, error) {
 		if atom == nil {
 			return SetItem{}, fmt.Errorf("cypher: SET item has no atom: %q", ctx.GetText())
 		}
-		varName := atom.(*parser.OC_AtomContext).OC_Variable()
+		atomCtx := atom.(*parser.OC_AtomContext)
+		varName := atomCtx.OC_Variable()
 		if varName == nil {
+			// The atom might be a parenthesized expression like (n).
+			// Try to unwrap it: OC_ParenthesizedExpression → OC_Expression → variable.
+			if parenCtx := atomCtx.OC_ParenthesizedExpression(); parenCtx != nil {
+				innerExpr := parenCtx.(*parser.OC_ParenthesizedExpressionContext).OC_Expression()
+				if innerExpr != nil {
+					innerText := trimWhitespace(innerExpr.GetText())
+					if isIdentifier(innerText) {
+						varName = nil // will use innerText directly below
+						lookups := pe.AllOC_PropertyLookup()
+						if len(lookups) != 1 {
+							return SetItem{}, fmt.Errorf("cypher: SET item must have exactly one property lookup (got %d): %q", len(lookups), ctx.GetText())
+						}
+						propKey := lookups[0].(*parser.OC_PropertyLookupContext).OC_PropertyKeyName()
+						exprCtx := ctx.OC_Expression()
+						if exprCtx == nil {
+							return SetItem{}, fmt.Errorf("cypher: SET item has no expression: %q", ctx.GetText())
+						}
+						return SetItem{
+							Variable: innerText,
+							Property: trimWhitespace(propKey.GetText()),
+							ExprText: exprText(exprCtx),
+						}, nil
+					}
+				}
+			}
 			return SetItem{}, fmt.Errorf("cypher: SET item atom is not a variable: %q", ctx.GetText())
 		}
 		lookups := pe.AllOC_PropertyLookup()
@@ -345,11 +371,18 @@ func buildSetItem(ctx *parser.OC_SetItemContext) (SetItem, error) {
 		if exprCtx == nil {
 			return SetItem{}, fmt.Errorf("cypher: SET item has no expression: %q", ctx.GetText())
 		}
-		return SetItem{
+		si := SetItem{
 			Variable: trimWhitespace(varName.GetText()),
 			Property: trimWhitespace(propKey.GetText()),
 			ExprText: exprText(exprCtx),
-		}, nil
+		}
+		// Also try to parse the RHS as a typed Expr (for arithmetic, etc.).
+		if typedExpr, err := buildExprFromCST(exprCtx); err == nil {
+			if _, isRaw := typedExpr.(*RawExpr); !isRaw {
+				si.Expr = typedExpr
+			}
+		}
+		return si, nil
 	}
 
 	// Forms 2, 3, 4 all have OC_Variable.
@@ -558,20 +591,28 @@ func buildReturnClause(ctx *parser.OC_ReturnContext) (*ReturnClause, error) {
 
 	// SKIP.
 	if skip := pb.OC_Skip(); skip != nil {
-		v, err := parseInt64Expr(skip.(*parser.OC_SkipContext).OC_Expression())
+		v, param, err := parseSkipLimitExpr(skip.(*parser.OC_SkipContext).OC_Expression())
 		if err != nil {
 			return nil, fmt.Errorf("cypher: SKIP value must be a non-negative integer literal: %w", err)
 		}
-		rc.Skip = &v
+		if param != "" {
+			rc.SkipParam = param
+		} else {
+			rc.Skip = &v
+		}
 	}
 
 	// LIMIT.
 	if limit := pb.OC_Limit(); limit != nil {
-		v, err := parseInt64Expr(limit.(*parser.OC_LimitContext).OC_Expression())
+		v, param, err := parseSkipLimitExpr(limit.(*parser.OC_LimitContext).OC_Expression())
 		if err != nil {
 			return nil, fmt.Errorf("cypher: LIMIT value must be a non-negative integer literal: %w", err)
 		}
-		rc.Limit = &v
+		if param != "" {
+			rc.LimitParam = param
+		} else {
+			rc.Limit = &v
+		}
 	}
 
 	return rc, nil
@@ -719,7 +760,7 @@ func buildProperties(ctx *parser.OC_PropertiesContext) map[string]string {
 		exprs := ml.AllOC_Expression()
 		for i, key := range keys {
 			if i < len(exprs) {
-				props[trimWhitespace(key.GetText())] = exprText(exprs[i])
+				props[trimWhitespace(key.GetText())] = encodePropertyExprText(exprs[i])
 			}
 		}
 	}
@@ -732,6 +773,74 @@ func buildProperties(ctx *parser.OC_PropertiesContext) map[string]string {
 	}
 
 	return props
+}
+
+// encodePropertyExprText returns the expression text for a property map value.
+// For most values this is just the raw ANTLR text (same as exprText). For list
+// literals (e.g. [1, 2, 3]) it returns a sentinel string prefixed with "__list__:"
+// so that the planner/translator can distinguish them from plain expression text
+// and encode them as JSON arrays.
+func encodePropertyExprText(ctx parser.IOC_ExpressionContext) string {
+	if ctx == nil {
+		return ""
+	}
+	raw := trimWhitespace(ctx.GetText())
+
+	// Try to detect a list literal by drilling down the expression hierarchy.
+	// We walk the same path as buildPropertiesFromExprText does for map literals.
+	orCtx := ctx.(*parser.OC_ExpressionContext).OC_OrExpression()
+	if orCtx != nil {
+		xors := orCtx.(*parser.OC_OrExpressionContext).AllOC_XorExpression()
+		if len(xors) == 1 {
+			ands := xors[0].(*parser.OC_XorExpressionContext).AllOC_AndExpression()
+			if len(ands) == 1 {
+				nots := ands[0].(*parser.OC_AndExpressionContext).AllOC_NotExpression()
+				if len(nots) == 1 {
+					cmpCtx := nots[0].(*parser.OC_NotExpressionContext).OC_ComparisonExpression()
+					if cmpCtx != nil {
+						addSub := cmpCtx.(*parser.OC_ComparisonExpressionContext).OC_AddOrSubtractExpression()
+						if addSub != nil {
+							mulDivs := addSub.(*parser.OC_AddOrSubtractExpressionContext).AllOC_MultiplyDivideModuloExpression()
+							if len(mulDivs) == 1 {
+								powers := mulDivs[0].(*parser.OC_MultiplyDivideModuloExpressionContext).AllOC_PowerOfExpression()
+								if len(powers) == 1 {
+									unarys := powers[0].(*parser.OC_PowerOfExpressionContext).AllOC_UnaryAddOrSubtractExpression()
+									if len(unarys) == 1 {
+										slnCtx := unarys[0].(*parser.OC_UnaryAddOrSubtractExpressionContext).OC_StringListNullOperatorExpression()
+										if slnCtx != nil {
+											propLabels := slnCtx.(*parser.OC_StringListNullOperatorExpressionContext).OC_PropertyOrLabelsExpression()
+											if propLabels != nil {
+												atom := propLabels.(*parser.OC_PropertyOrLabelsExpressionContext).OC_Atom()
+												if atom != nil {
+													litCtx := atom.(*parser.OC_AtomContext).OC_Literal()
+													if litCtx != nil {
+														listLit := litCtx.(*parser.OC_LiteralContext).OC_ListLiteral()
+														if listLit != nil {
+															// This is a list literal. Encode each element text joined by comma,
+															// prefixed with the sentinel so the planner knows to treat it as a list.
+															ll := listLit.(*parser.OC_ListLiteralContext)
+															elems := ll.AllOC_Expression()
+															parts := make([]string, len(elems))
+															for i, e := range elems {
+																parts[i] = exprText(e)
+															}
+															return "__list__:" + strings.Join(parts, ",")
+														}
+													}
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return raw
 }
 
 // ─── expression text helpers ──────────────────────────────────────────────────
@@ -824,6 +933,25 @@ func parseInt64Expr(ctx parser.IOC_ExpressionContext) (int64, error) {
 		return 0, fmt.Errorf("expected integer literal, got %q", text)
 	}
 	return v, nil
+}
+
+// parseSkipLimitExpr parses a SKIP or LIMIT expression. It accepts integer
+// literals and parameter references ($paramName). For parameter references it
+// returns (0, paramName, nil); for integer literals it returns (value, "", nil).
+func parseSkipLimitExpr(ctx parser.IOC_ExpressionContext) (intVal int64, paramName string, err error) {
+	if ctx == nil {
+		return 0, "", fmt.Errorf("nil expression")
+	}
+	text := trimWhitespace(ctx.GetText())
+	// Parameter reference: $param
+	if name, ok := strings.CutPrefix(text, "$"); ok {
+		return 0, name, nil
+	}
+	v, parseErr := strconv.ParseInt(text, 10, 64)
+	if parseErr != nil {
+		return 0, "", fmt.Errorf("expected integer literal, got %q", text)
+	}
+	return v, "", nil
 }
 
 // ─── WHERE expression tree builder ───────────────────────────────────────────
@@ -1014,15 +1142,58 @@ func buildPartialComparison(ctx *parser.OC_PartialComparisonExpressionContext) (
 }
 
 // buildAddOrSubtractExpr traverses the arithmetic expression hierarchy down to
-// the terminal PropertyOrLabelsExpression. For v0.1 WHERE clauses we only need
-// the simple forms (no arithmetic); arithmetic sub-expressions fall back to RawExpr.
+// the terminal PropertyOrLabelsExpression. Binary + / - are parsed into ArithExpr.
 func buildAddOrSubtractExpr(ctx *parser.OC_AddOrSubtractExpressionContext) (Expr, error) {
 	mulDivs := ctx.AllOC_MultiplyDivideModuloExpression()
-	if len(mulDivs) != 1 {
-		// Arithmetic expression — not supported for v0.1; fall back.
+	if len(mulDivs) == 1 {
+		return buildMulDivExpr(mulDivs[0].(*parser.OC_MultiplyDivideModuloExpressionContext))
+	}
+	if len(mulDivs) == 0 {
 		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
 	}
-	return buildMulDivExpr(mulDivs[0].(*parser.OC_MultiplyDivideModuloExpressionContext))
+	// Multiple additive terms: build left-associative ArithExpr chain.
+	// Extract operators from the context text by stripping operand texts.
+	// Grammar: mulDiv (SP? ('+' | '-') SP? mulDiv)*
+	// The ANTLR GetText() strips whitespace, so operator chars sit immediately
+	// between consecutive operand texts in the concatenated string.
+	left, err := buildMulDivExpr(mulDivs[0].(*parser.OC_MultiplyDivideModuloExpressionContext))
+	if err != nil {
+		return nil, err
+	}
+	// Build a left-associative ArithExpr chain by extracting operators between operands.
+	// The context's GetText() may or may not preserve spaces; we use TrimLeft to skip them.
+	remaining := ctx.GetText()[len(mulDivs[0].GetText()):]
+	for _, md := range mulDivs[1:] {
+		trimmed := strings.TrimLeft(remaining, " \t\n")
+		if len(trimmed) == 0 {
+			return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+		}
+		var op string
+		switch trimmed[0] {
+		case '+':
+			op = "+"
+			trimmed = trimmed[1:]
+		case '-':
+			op = "-"
+			trimmed = trimmed[1:]
+		default:
+			return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
+		}
+		// Advance remaining past the operator and the next operand.
+		operandText := md.GetText()
+		trimmed = strings.TrimLeft(trimmed, " \t\n")
+		if strings.HasPrefix(trimmed, operandText) {
+			remaining = trimmed[len(operandText):]
+		} else {
+			remaining = ""
+		}
+		right, err := buildMulDivExpr(md.(*parser.OC_MultiplyDivideModuloExpressionContext))
+		if err != nil {
+			return nil, err
+		}
+		left = &ArithExpr{Left: left, Op: op, Right: right}
+	}
+	return left, nil
 }
 
 // buildMulDivExpr traverses OC_MultiplyDivideModuloExpression down to PowerOfExpression.
@@ -1184,6 +1355,20 @@ func buildPropertyOrLabelsExpr(ctx *parser.OC_PropertyOrLabelsExpressionContext)
 
 	lookups := ctx.AllOC_PropertyLookup()
 	if len(lookups) == 0 {
+		// Check for node label predicate: n:Label1:Label2 (WHERE n:Label)
+		if labelsCtx := ctx.OC_NodeLabels(); labelsCtx != nil {
+			varExpr, ok := atom.(*VarExpr)
+			if ok {
+				var labels []string
+				for _, lbl := range labelsCtx.(*parser.OC_NodeLabelsContext).AllOC_NodeLabel() {
+					name := lbl.(*parser.OC_NodeLabelContext).OC_LabelName()
+					if name != nil {
+						labels = append(labels, trimWhitespace(name.GetText()))
+					}
+				}
+				return &HasLabelExpr{Variable: varExpr.Name, Labels: labels}, nil
+			}
+		}
 		return atom, nil
 	}
 	// Single property lookup: n.prop
@@ -1381,6 +1566,19 @@ func buildLiteralExpr(ctx *parser.OC_LiteralContext) (Expr, error) {
 		raw := trimWhitespace(ctx.StringLiteral().GetText())
 		val := unquoteString(raw)
 		return &LiteralExpr{Value: val}, nil
+	}
+	// List literal: [expr, expr, ...]
+	if listCtx := ctx.OC_ListLiteral(); listCtx != nil {
+		exprs := listCtx.(*parser.OC_ListLiteralContext).AllOC_Expression()
+		items := make([]Expr, 0, len(exprs))
+		for _, exprCtx := range exprs {
+			item, err := buildExprFromCST(exprCtx)
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, item)
+		}
+		return &ListLiteralExpr{Items: items}, nil
 	}
 	return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
 }

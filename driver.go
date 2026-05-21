@@ -260,6 +260,18 @@ func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement
 			return nil, err
 		}
 
+		// For OPTIONAL MATCH with no rows found, produce one null row by
+		// synthesizing a null record from the final SELECT's column structure.
+		if len(matchedRows) == 0 && matchStmt.Optional {
+			nullRec, keys, err := buildOptionalNullRow(ctx, ex, selectStmt)
+			if err != nil {
+				return nil, err
+			}
+			qr := newInMemoryQueryResult(keys, []*Record{nullRec})
+			qr.SetCounters(ctr)
+			return qr, nil
+		}
+
 		// Collect all result rows from the SELECT across all matched rows.
 		var allRecords []*Record
 		var resultKeys []string
@@ -389,6 +401,33 @@ func execWriteStatements(ctx context.Context, ex execer, stmts []glsql.Statement
 	qr := &QueryResult{consumed: true}
 	qr.SetCounters(ctr)
 	return qr, nil
+}
+
+// buildOptionalNullRow derives the column names from a KindSelectAfterWrite
+// statement by executing it with a WHERE-never-true rewrite, then returns a
+// single *Record with all-nil values (representing the OPTIONAL MATCH null row).
+func buildOptionalNullRow(ctx context.Context, ex execer, stmt glsql.Statement) (*Record, []string, error) {
+	// Rewrite the SQL: replace the last WHERE clause with "WHERE 0=1" to get
+	// the column structure without running the real query (avoids resolving
+	// idSentinels which would be absent for the unmatched optional row).
+	sql := stmt.SQL
+	upperSQL := strings.ToUpper(sql)
+	if idx := strings.LastIndex(upperSQL, " WHERE "); idx >= 0 {
+		sql = sql[:idx] + " WHERE 0=1"
+	} else {
+		sql += " WHERE 0=1"
+	}
+	rows, err := ex.QueryContext(ctx, sql)
+	if err != nil {
+		return nil, nil, fmt.Errorf("graphlite: optional null row: %w", err)
+	}
+	cols, err := rows.Columns()
+	rows.Close()
+	if err != nil {
+		return nil, nil, fmt.Errorf("graphlite: optional null row columns: %w", err)
+	}
+	vals := make([]any, len(cols))
+	return NewRecord(cols, vals), cols, nil
 }
 
 // collectMatchRows executes a KindMatchForWrite SELECT, drains all rows into

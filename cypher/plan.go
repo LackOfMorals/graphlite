@@ -88,6 +88,28 @@ type RawExpr struct {
 
 func (*RawExpr) exprNode() {}
 
+// ArithExpr represents a binary arithmetic or concatenation expression.
+// Op is one of "+", "-", "*", "/", "%".
+// For Cypher, "+" on strings means concatenation and on lists means list concat.
+type ArithExpr struct {
+	Left  Expr
+	Op    string
+	Right Expr
+}
+
+func (*ArithExpr) exprNode() {}
+
+// HasLabelExpr represents a node label predicate in a WHERE clause: n:Label.
+// Translates to the same SQL as an inline node label filter in a MATCH pattern.
+type HasLabelExpr struct {
+	// Variable is the Cypher variable name (e.g. "n" in n:Person).
+	Variable string
+	// Labels is the list of required labels (AND semantics, typically one).
+	Labels []string
+}
+
+func (*HasLabelExpr) exprNode() {}
+
 // NullCheckExpr represents an IS NULL or IS NOT NULL predicate.
 // Used for OPTIONAL MATCH patterns where variables may be unbound.
 type NullCheckExpr struct {
@@ -134,6 +156,16 @@ type InListExpr struct {
 }
 
 func (*InListExpr) exprNode() {}
+
+// ListLiteralExpr represents a Cypher list literal used as a property value,
+// e.g. CREATE ({numbers: [1, 2, 3]}). In the SQL storage layer this is encoded
+// as a JSON array string.
+type ListLiteralExpr struct {
+	// Items are the ordered element expressions.
+	Items []Expr
+}
+
+func (*ListLiteralExpr) exprNode() {}
 
 // StringMatchExpr represents STARTS WITH, ENDS WITH, and CONTAINS predicates.
 type StringMatchExpr struct {
@@ -328,8 +360,12 @@ type ReturnPlan struct {
 	OrderBy []SortSpec
 	// Skip is nil when not present.
 	Skip *int64
+	// SkipParam holds the parameter name when SKIP uses a $param reference.
+	SkipParam string
 	// Limit is nil when not present.
 	Limit *int64
+	// LimitParam holds the parameter name when LIMIT uses a $param reference.
+	LimitParam string
 }
 
 func (*ReturnPlan) planNode() {}
