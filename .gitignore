@@ -33,3 +33,4 @@ vendor/
 
 # GoReleaser
 dist/
+.claude/worktrees/agent-a9b49e52a5a54faed
