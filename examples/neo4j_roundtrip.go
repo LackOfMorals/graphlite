@@ -1,16 +1,27 @@
 //go:build ignore
 
 // neo4j_roundtrip shows the pull → modify → push cycle using graphlite as a
-// local processing layer between two graphlite.Driver instances.
+// local processing layer between two drivers.
 //
-//  1. Pull: use CopyFrom to copy a graph from a remote driver into a local
-//     in-memory graphlite instance.
+//  1. Pull: use CopyFrom to copy a graph from a remote Neo4j driver into a
+//     local in-memory graphlite instance.
 //  2. Modify: run Cypher against the local copy to enrich or transform the data.
 //  3. Push: use CopyTo to promote the modified graph to the destination driver.
 //
-// In production, replace the NewDriver calls marked "← swap for real Neo4j"
-// with an adapter that wraps neo4j.NewDriverWithContext and implements
-// graphlite.Driver.
+// The remote and destination variables below use in-memory graphlite instances
+// so this example runs without a live Neo4j server. To point at real Neo4j,
+// replace those two lines with:
+//
+//	import (
+//	    "github.com/neo4j/neo4j-go-driver/v6/neo4j"
+//	    "github.com/LackOfMorals/graphlite/neo4jadapter"
+//	)
+//
+//	neo4jDriver, err := neo4j.NewDriverWithContext(
+//	    "neo4j+s://xxx.databases.neo4j.io",
+//	    neo4j.BasicAuth("neo4j", "password", ""),
+//	)
+//	remote := neo4jadapter.New(neo4jDriver)
 //
 // Run with:
 //
@@ -32,7 +43,8 @@ func main() {
 	ctx := context.Background()
 
 	// ── Step 1: seed the remote source ───────────────────────────────────────
-	// ← swap for real Neo4j adapter in production
+	// Using an in-memory graphlite instance here. In production replace with:
+	//   remote := neo4jadapter.New(neo4jDriver)
 	remote, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	must(err)
 	defer remote.Close(ctx)
@@ -93,9 +105,8 @@ func main() {
 	must(err)
 
 	// ── Step 4: push the enriched graph to the destination ───────────────────
-	// ← swap for a real Neo4j adapter in production.
-	// CopyTo writes every node and relationship; use a fresh database or a
-	// dedicated namespace so existing data is not duplicated.
+	// Using an in-memory graphlite instance here. In production replace with:
+	//   destination := neo4jadapter.New(destinationNeo4jDriver)
 	destination, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	must(err)
 	defer destination.Close(ctx)
@@ -116,18 +127,9 @@ func seed(ctx context.Context, driver graphlite.Driver) {
 		{`CREATE (:Department {name: "Engineering"})`, nil},
 		{`CREATE (:Department {name: "Sales"})`, nil},
 		{`CREATE (:Department {name: "Support"})`, nil},
-		{
-			`CREATE (:Employee {name: "Alice", role: "Engineer", yearsExp: 8})`,
-			nil,
-		},
-		{
-			`CREATE (:Employee {name: "Bob", role: "Engineer", yearsExp: 3})`,
-			nil,
-		},
-		{
-			`CREATE (:Employee {name: "Carol", role: "Sales Rep", yearsExp: 6})`,
-			nil,
-		},
+		{`CREATE (:Employee {name: "Alice", role: "Engineer", yearsExp: 8})`, nil},
+		{`CREATE (:Employee {name: "Bob", role: "Engineer", yearsExp: 3})`, nil},
+		{`CREATE (:Employee {name: "Carol", role: "Sales Rep", yearsExp: 6})`, nil},
 		{
 			`MATCH (e:Employee {name: "Alice"}), (d:Department {name: "Engineering"})
 			 CREATE (e)-[:WORKS_IN]->(d)`,
