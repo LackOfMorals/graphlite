@@ -295,7 +295,7 @@ func TestRapid_NodeRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Open: %v", err)
 		}
-		defer db.Close() //nolint:errcheck
+		defer db.Close(context.Background()) //nolint:errcheck
 
 		n := rapid.IntRange(1, 20).Draw(t, "nodeCount")
 		specs := make([]nodeSpec, n)
@@ -373,7 +373,7 @@ func TestRapid_LabelRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Open: %v", err)
 		}
-		defer db.Close() //nolint:errcheck
+		defer db.Close(context.Background()) //nolint:errcheck
 
 		// Generate a node with 1–5 labels.
 		spec := nodeSpec{
@@ -447,7 +447,7 @@ func TestRapid_JSONImportRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Open: %v", err)
 		}
-		defer db.Close() //nolint:errcheck
+		defer db.Close(context.Background()) //nolint:errcheck
 
 		nodeCount := rapid.IntRange(1, 30).Draw(t, "nodeCount")
 		edgeCount := rapid.IntRange(0, 20).Draw(t, "edgeCount")

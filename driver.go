@@ -128,8 +128,9 @@ func (d *DB) Snapshot(path string) error {
 }
 
 // Close releases all resources held by the database. Subsequent calls on a
-// closed DB return errors.
-func (d *DB) Close() error {
+// closed DB return errors. The context parameter is accepted for interface
+// compatibility with [neo4j.Driver] but is not used.
+func (d *DB) Close(_ context.Context) error {
 	if err := d.st.Close(); err != nil {
 		return fmt.Errorf("graphlite: close: %w", err)
 	}

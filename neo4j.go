@@ -106,7 +106,7 @@ func (d *DriverCompat) ExecuteQueryBookmarkManager() neo4j.BookmarkManager { ret
 func (d *DriverCompat) DB() *DB { return d.db }
 
 // Close closes all resources held by the DriverCompat.
-func (d *DriverCompat) Close(_ context.Context) error { return d.db.Close() }
+func (d *DriverCompat) Close(ctx context.Context) error { return d.db.Close(ctx) }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // compatSession — implements neo4j.Session

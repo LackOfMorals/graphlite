@@ -241,7 +241,7 @@ func TestSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open snapshot: %v", err)
 	}
-	defer snap.Close()
+	defer snap.Close(context.Background())
 
 	names := personNames(t, snap)
 	if !names["Alice"] || !names["Bob"] {
@@ -278,7 +278,7 @@ func TestSnapshot_InMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer db.Close(context.Background())
 	seedGraph(t, db)
 
 	if err := db.Snapshot(snapPath); err != nil {
@@ -289,7 +289,7 @@ func TestSnapshot_InMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open snapshot: %v", err)
 	}
-	defer snap.Close()
+	defer snap.Close(context.Background())
 
 	names := personNames(t, snap)
 	if !names["Alice"] || !names["Bob"] {

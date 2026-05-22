@@ -1,6 +1,7 @@
 package graphlite
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -48,6 +49,6 @@ func NewTestDB(t testing.TB, opts ...Option) *DB {
 	if err != nil {
 		t.Fatalf("graphlite.NewTestDB: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() { _ = db.Close(context.Background()) })
 	return db
 }

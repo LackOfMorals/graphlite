@@ -21,7 +21,7 @@ func openMemDB(t *testing.T) *graphlite.DB {
 	if err != nil {
 		t.Fatalf("Open(:memory:): %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() { _ = db.Close(context.Background()) })
 	return db
 }
 
@@ -59,7 +59,7 @@ func TestOpen_Memory(t *testing.T) {
 	if db == nil {
 		t.Fatal("expected non-nil *DB")
 	}
-	if err := db.Close(); err != nil {
+	if err := db.Close(context.Background()); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 }
@@ -77,7 +77,7 @@ func TestOpen_File(t *testing.T) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		t.Fatal("expected database file to be created")
 	}
-	if err := db.Close(); err != nil {
+	if err := db.Close(context.Background()); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 }
@@ -92,7 +92,7 @@ func TestWithBusyTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open with WithBusyTimeout: %v", err)
 	}
-	defer db.Close()
+	defer db.Close(context.Background())
 }
 
 // TestWithReadOnly verifies that read queries succeed and write queries return
@@ -111,7 +111,7 @@ func TestWithReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open ro: %v", err)
 	}
-	defer ro.Close()
+	defer ro.Close(ctx)
 
 	// Reads on an empty read-only db must succeed (empty result, no error).
 	if _, err := ro.RunQuery(ctx, `MATCH (n:Person) RETURN n.name AS name`, nil); err != nil {
@@ -152,7 +152,7 @@ func TestClose_ReleasesResources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := db.Close(); err != nil {
+	if err := db.Close(context.Background()); err != nil {
 		t.Fatalf("first Close: %v", err)
 	}
 }

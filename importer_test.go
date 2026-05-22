@@ -17,7 +17,7 @@ func openMem(t *testing.T) *graphlite.DB {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() { _ = db.Close(context.Background()) })
 	return db
 }
 

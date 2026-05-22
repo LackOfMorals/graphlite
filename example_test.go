@@ -20,7 +20,7 @@ func ExampleOpen() {
 	if err != nil {
 		panic(err)
 	}
-	defer db.Close()
+	defer db.Close(ctx)
 
 	if _, err := db.RunQuery(ctx, `CREATE (n:Person {name: "Alice"})`, nil); err != nil {
 		panic(err)
@@ -77,7 +77,7 @@ func ExampleWithBusyTimeout() {
 	if err != nil {
 		panic(err)
 	}
-	defer db.Close()
+	defer db.Close(context.Background())
 	fmt.Println("option accepted")
 
 	// Output:
@@ -98,13 +98,13 @@ func ExampleWithReadOnly() {
 	}
 	// In a real scenario you would close rw and reopen the file as read-only.
 	// Here we demonstrate WithReadOnly rejecting writes.
-	_ = rw.Close()
+	_ = rw.Close(ctx)
 
 	ro, err := graphlite.Open(":memory:", graphlite.WithReadOnly())
 	if err != nil {
 		panic(err)
 	}
-	defer ro.Close()
+	defer ro.Close(ctx)
 
 	_, err = ro.RunQuery(ctx, `CREATE (n:Config)`, nil)
 	fmt.Println(err == graphlite.ErrReadOnly)
@@ -121,7 +121,7 @@ func ExampleDB_Import() {
 	if err != nil {
 		panic(err)
 	}
-	defer db.Close()
+	defer db.Close(ctx)
 
 	const data = `{
 		"nodes": [
@@ -178,7 +178,7 @@ func ExampleDB_CopyFrom() {
 	if err != nil {
 		panic(err)
 	}
-	defer dst.Close()
+	defer dst.Close(ctx)
 
 	if err := dst.CopyFrom(ctx, src); err != nil {
 		panic(err)
@@ -209,7 +209,7 @@ func ExampleDB_CopyTo() {
 	if err != nil {
 		panic(err)
 	}
-	defer src.Close()
+	defer src.Close(ctx)
 
 	_, err = src.RunQuery(ctx,
 		`CREATE (:Product {name: "Widget"})-[:SHIPS_TO]->(:Region {name: "EU"})`,
@@ -251,7 +251,7 @@ func ExampleDB_Snapshot() {
 	if err != nil {
 		panic(err)
 	}
-	defer db.Close()
+	defer db.Close(ctx)
 
 	_, err = db.RunQuery(ctx, `CREATE (:Event {name: "Launch"})`, nil)
 	if err != nil {
@@ -274,7 +274,7 @@ func ExampleDB_Snapshot() {
 	if err != nil {
 		panic(err)
 	}
-	defer snap.Close()
+	defer snap.Close(ctx)
 
 	result, err := snap.RunQuery(ctx, `MATCH (e:Event) RETURN e.name AS name`, nil)
 	if err != nil {

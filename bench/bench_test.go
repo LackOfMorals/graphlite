@@ -51,7 +51,7 @@ func getSmallDB(b *testing.B) *graphlite.DB {
 			return
 		}
 		if err := seedNodes(db, 1_000); err != nil {
-			_ = db.Close()
+			_ = db.Close(context.Background())
 			smallErr = fmt.Errorf("seed small db: %w", err)
 			return
 		}
@@ -79,7 +79,7 @@ func get100KDB(b *testing.B) *graphlite.DB {
 			return
 		}
 		if err := seedGraph(db, 100_000, 100_000); err != nil {
-			_ = db.Close()
+			_ = db.Close(context.Background())
 			medium100KErr = fmt.Errorf("seed 100K db: %w", err)
 			return
 		}
@@ -107,7 +107,7 @@ func get1MDB(b *testing.B) *graphlite.DB {
 			return
 		}
 		if err := seedGraph(db, 1_000_000, 500_000); err != nil {
-			_ = db.Close()
+			_ = db.Close(context.Background())
 			large1MErr = fmt.Errorf("seed 1M db: %w", err)
 			return
 		}
@@ -284,7 +284,7 @@ func BenchmarkCreateSingle(b *testing.B) {
 	if err != nil {
 		b.Fatalf("open: %v", err)
 	}
-	b.Cleanup(func() { _ = db.Close() })
+	b.Cleanup(func() { _ = db.Close(context.Background()) })
 	ctx := context.Background()
 	b.ResetTimer()
 	for i := range b.N {
@@ -329,10 +329,10 @@ func BenchmarkCreateBatch_1000(b *testing.B) {
 			b.Fatalf("open: %v", err)
 		}
 		if err := db.Import(ctx, bytes.NewReader(payload), graphlite.FormatJSON); err != nil {
-			_ = db.Close()
+			_ = db.Close(context.Background())
 			b.Fatalf("import: %v", err)
 		}
-		_ = db.Close()
+		_ = db.Close(context.Background())
 	}
 }
 
