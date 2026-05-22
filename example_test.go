@@ -9,7 +9,6 @@ import (
 	"time"
 
 	graphlite "github.com/LackOfMorals/graphlite"
-	neo4j "github.com/neo4j/neo4j-go-driver/v6/neo4j"
 )
 
 // ExampleOpen demonstrates opening an in-memory database and running a query.
@@ -38,29 +37,29 @@ func ExampleOpen() {
 	// Alice
 }
 
-// ExampleNewDriver demonstrates using the neo4j.Driver-compatible API.
+// ExampleNewDriver demonstrates using the graphlite.Driver-compatible API.
 // This is the recommended entry point for code that also runs against Neo4j.
 func ExampleNewDriver() {
 	ctx := context.Background()
 
-	driver, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	driver, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	if err != nil {
 		panic(err)
 	}
 	defer driver.Close(ctx)
 
-	// ExecuteQuery is the simplest neo4j v6 API tier.
-	_, err = neo4j.ExecuteQuery(ctx, driver,
+	// ExecuteQuery is the simplest API tier.
+	_, err = graphlite.ExecuteQuery[*graphlite.EagerResult](ctx, driver,
 		`CREATE (:Person {name: "Bob"})-[:KNOWS]->(:Person {name: "Carol"})`,
-		nil, neo4j.EagerResultTransformer,
+		nil, graphlite.EagerResultTransformer,
 	)
 	if err != nil {
 		panic(err)
 	}
 
-	result, err := neo4j.ExecuteQuery(ctx, driver,
+	result, err := graphlite.ExecuteQuery[*graphlite.EagerResult](ctx, driver,
 		`MATCH (:Person {name: "Bob"})-[:KNOWS]->(f:Person) RETURN f.name AS name`,
-		nil, neo4j.EagerResultTransformer,
+		nil, graphlite.EagerResultTransformer,
 	)
 	if err != nil {
 		panic(err)
@@ -154,21 +153,21 @@ func ExampleDB_Import() {
 }
 
 // ExampleDB_CopyFrom demonstrates seeding a graphlite database from another
-// neo4j.Driver — useful for loading a subset of a real Neo4j graph into a
+// graphlite.Driver — useful for loading a subset of a real Neo4j graph into a
 // local in-memory instance for testing.
 func ExampleDB_CopyFrom() {
 	ctx := context.Background()
 
-	// Source: any neo4j.Driver. Here we use another graphlite instance.
-	src, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	// Source: any graphlite.Driver. Here we use another graphlite instance.
+	src, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	if err != nil {
 		panic(err)
 	}
 	defer src.Close(ctx)
 
-	_, err = neo4j.ExecuteQuery(ctx, src,
+	_, err = graphlite.ExecuteQuery[*graphlite.EagerResult](ctx, src,
 		`CREATE (:City {name: "London"})-[:CONNECTED_TO]->(:City {name: "Paris"})`,
-		nil, neo4j.EagerResultTransformer)
+		nil, graphlite.EagerResultTransformer)
 	if err != nil {
 		panic(err)
 	}
@@ -200,7 +199,7 @@ func ExampleDB_CopyFrom() {
 }
 
 // ExampleDB_CopyTo demonstrates promoting a graphlite database into another
-// neo4j.Driver — useful for pushing locally built graph data to Neo4j.
+// graphlite.Driver — useful for pushing locally built graph data to Neo4j.
 func ExampleDB_CopyTo() {
 	ctx := context.Background()
 
@@ -218,8 +217,8 @@ func ExampleDB_CopyTo() {
 		panic(err)
 	}
 
-	// Destination: any neo4j.Driver. Here we use another graphlite instance.
-	dst, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	// Destination: any graphlite.Driver. Here we use another graphlite instance.
+	dst, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	if err != nil {
 		panic(err)
 	}
@@ -229,9 +228,9 @@ func ExampleDB_CopyTo() {
 		panic(err)
 	}
 
-	result, err := neo4j.ExecuteQuery(ctx, dst,
+	result, err := graphlite.ExecuteQuery[*graphlite.EagerResult](ctx, dst,
 		`MATCH (p:Product)-[:SHIPS_TO]->(r:Region) RETURN p.name AS product, r.name AS region`,
-		nil, neo4j.EagerResultTransformer)
+		nil, graphlite.EagerResultTransformer)
 	if err != nil {
 		panic(err)
 	}

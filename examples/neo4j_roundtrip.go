@@ -1,17 +1,16 @@
 //go:build ignore
 
 // neo4j_roundtrip shows the pull → modify → push cycle using graphlite as a
-// local processing layer between two Neo4j driver instances.
+// local processing layer between two graphlite.Driver instances.
 //
-//  1. Pull: use CopyFrom to copy a graph from a remote Neo4j driver into a
-//     local in-memory graphlite instance.
+//  1. Pull: use CopyFrom to copy a graph from a remote driver into a local
+//     in-memory graphlite instance.
 //  2. Modify: run Cypher against the local copy to enrich or transform the data.
 //  3. Push: use CopyTo to promote the modified graph to the destination driver.
 //
-// In production, swap the NewDriver calls marked "← swap for real Neo4j" with:
-//
-//	neo4j.NewDriverWithContext("bolt://localhost:7687",
-//	    neo4j.BasicAuth("neo4j", "password", ""))
+// In production, replace the NewDriver calls marked "← swap for real Neo4j"
+// with an adapter that wraps neo4j.NewDriverWithContext and implements
+// graphlite.Driver.
 //
 // Run with:
 //
@@ -27,15 +26,14 @@ import (
 	"fmt"
 
 	graphlite "github.com/LackOfMorals/graphlite"
-	neo4j "github.com/neo4j/neo4j-go-driver/v6/neo4j"
 )
 
 func main() {
 	ctx := context.Background()
 
 	// ── Step 1: seed the remote source ───────────────────────────────────────
-	// ← swap for real Neo4j in production
-	remote, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	// ← swap for real Neo4j adapter in production
+	remote, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	must(err)
 	defer remote.Close(ctx)
 
@@ -46,7 +44,7 @@ func main() {
 	// ── Step 2: pull into a local graphlite instance ──────────────────────────
 	local, err := graphlite.Open(":memory:")
 	must(err)
-	defer local.Close()
+	defer local.Close(ctx)
 
 	must(local.CopyFrom(ctx, remote))
 
@@ -95,10 +93,10 @@ func main() {
 	must(err)
 
 	// ── Step 4: push the enriched graph to the destination ───────────────────
-	// ← swap for a real Neo4j instance in production.
+	// ← swap for a real Neo4j adapter in production.
 	// CopyTo writes every node and relationship; use a fresh database or a
 	// dedicated namespace so existing data is not duplicated.
-	destination, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	destination, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	must(err)
 	defer destination.Close(ctx)
 
@@ -109,8 +107,8 @@ func main() {
 	printManagers(ctx, destination)
 }
 
-// seed populates the remote driver with a small org-chart graph.
-func seed(ctx context.Context, driver neo4j.Driver) {
+// seed populates the driver with a small org-chart graph.
+func seed(ctx context.Context, driver graphlite.Driver) {
 	queries := []struct {
 		cypher string
 		params map[string]any
@@ -147,19 +145,19 @@ func seed(ctx context.Context, driver neo4j.Driver) {
 		},
 	}
 	for _, q := range queries {
-		_, err := neo4j.ExecuteQuery(ctx, driver, q.cypher, q.params, neo4j.EagerResultTransformer)
+		_, err := graphlite.ExecuteQuery[*graphlite.EagerResult](ctx, driver, q.cypher, q.params, graphlite.EagerResultTransformer)
 		must(err)
 	}
 }
 
 // printGraph prints employees, their roles, and the department they work in.
-func printGraph(ctx context.Context, driver neo4j.Driver) {
-	result, err := neo4j.ExecuteQuery(ctx, driver,
+func printGraph(ctx context.Context, driver graphlite.Driver) {
+	result, err := graphlite.ExecuteQuery[*graphlite.EagerResult](ctx, driver,
 		`MATCH (e:Employee)-[:WORKS_IN]->(d:Department)
 		 RETURN e.name AS name, e.role AS role, e.yearsExp AS exp,
 		        d.name AS dept, d.region AS region
 		 ORDER BY e.name`,
-		nil, neo4j.EagerResultTransformer,
+		nil, graphlite.EagerResultTransformer,
 	)
 	must(err)
 	for _, rec := range result.Records {
@@ -170,11 +168,11 @@ func printGraph(ctx context.Context, driver neo4j.Driver) {
 }
 
 // printManagers prints MANAGES relationships.
-func printManagers(ctx context.Context, driver neo4j.Driver) {
-	result, err := neo4j.ExecuteQuery(ctx, driver,
+func printManagers(ctx context.Context, driver graphlite.Driver) {
+	result, err := graphlite.ExecuteQuery[*graphlite.EagerResult](ctx, driver,
 		`MATCH (mgr:Employee)-[:MANAGES]->(rep:Employee)
 		 RETURN mgr.name AS manager, rep.name AS report`,
-		nil, neo4j.EagerResultTransformer,
+		nil, graphlite.EagerResultTransformer,
 	)
 	must(err)
 	for _, rec := range result.Records {

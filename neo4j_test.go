@@ -5,81 +5,64 @@ import (
 	"testing"
 
 	graphlite "github.com/LackOfMorals/graphlite"
-	neo4j "github.com/neo4j/neo4j-go-driver/v6/neo4j"
 )
 
-// TestDriverCompatInterfaceAssertion verifies the compile-time interface
-// assertion var _ neo4j.Driver = (*DriverCompat)(nil) in neo4j.go.
-// If DriverCompat drifts from neo4j.Driver this test will fail to compile.
-func TestDriverCompatInterfaceAssertion(t *testing.T) {
-	var _ neo4j.Driver = (*graphlite.DriverCompat)(nil)
+// TestDBImplementsDriver verifies the compile-time assertion in interfaces.go.
+// If *DB drifts from the Driver interface this test will fail to compile.
+func TestDBImplementsDriver(t *testing.T) {
+	var _ graphlite.Driver = (*graphlite.DB)(nil)
 }
 
-// TestNewDriverMemory checks that NewDriver(":memory:", nil) returns a value
-// assignable to neo4j.Driver without error.
+// TestNewDriverMemory checks that NewDriver(":memory:", NoAuth()) returns a
+// value assignable to graphlite.Driver without error.
 func TestNewDriverMemory(t *testing.T) {
-	d, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	d, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	if err != nil {
 		t.Fatalf("NewDriver(:memory:, NoAuth): unexpected error: %v", err)
 	}
 	defer d.Close(context.Background())
 
-	// Must be assignable to neo4j.Driver.
-	var _ neo4j.Driver = d
+	var _ graphlite.Driver = d
 }
 
-// TestNewDriverBasicAuth checks that neo4j.BasicAuth is accepted without error.
-func TestNewDriverBasicAuth(t *testing.T) {
-	auth := neo4j.BasicAuth("user", "pass", "")
-	d, err := graphlite.NewDriver(":memory:", auth)
-	if err != nil {
-		t.Fatalf("NewDriver with BasicAuth: unexpected error: %v", err)
-	}
-	defer d.Close(context.Background())
-}
-
-// TestNewDriverNoAuth checks that neo4j.NoAuth() is accepted without error.
+// TestNewDriverNoAuth checks that NoAuth() is accepted without error.
 func TestNewDriverNoAuth(t *testing.T) {
-	d, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	d, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	if err != nil {
 		t.Fatalf("NewDriver with NoAuth: unexpected error: %v", err)
 	}
 	defer d.Close(context.Background())
 }
 
-// TestNewDriverNilAuth checks that nil auth is accepted without error.
-func TestNewDriverNilAuth(t *testing.T) {
-	d, err := graphlite.NewDriver(":memory:", neo4j.AuthToken{})
+// TestNewDriverZeroAuth checks that a zero-value AuthToken is accepted.
+func TestNewDriverZeroAuth(t *testing.T) {
+	d, err := graphlite.NewDriver(":memory:", graphlite.AuthToken{})
 	if err != nil {
-		t.Fatalf("NewDriver with nil-equivalent auth: unexpected error: %v", err)
+		t.Fatalf("NewDriver with zero AuthToken: unexpected error: %v", err)
 	}
 	defer d.Close(context.Background())
 }
 
-// TestSessionConfigDatabaseName checks that SessionConfig.DatabaseName is
-// accepted and ignored without error.
-func TestSessionConfigDatabaseName(t *testing.T) {
+// TestNewSessionAccepted checks that NewSession returns a non-nil Session.
+func TestNewSessionAccepted(t *testing.T) {
 	ctx := context.Background()
-	d, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	d, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	if err != nil {
 		t.Fatalf("NewDriver: %v", err)
 	}
 	defer d.Close(ctx)
 
-	sess := d.NewSession(ctx, neo4j.SessionConfig{
-		DatabaseName: "my-db",
-	})
+	sess := d.NewSession(ctx)
 	if sess == nil {
 		t.Fatal("NewSession returned nil")
 	}
 	defer sess.Close(ctx)
 }
 
-// TestDriverCloseReleasesResources checks that Close releases all resources
-// cleanly and can be called without error.
+// TestDriverCloseReleasesResources checks that Close releases resources cleanly.
 func TestDriverCloseReleasesResources(t *testing.T) {
 	ctx := context.Background()
-	d, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	d, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	if err != nil {
 		t.Fatalf("NewDriver: %v", err)
 	}
@@ -91,7 +74,7 @@ func TestDriverCloseReleasesResources(t *testing.T) {
 // TestDriverVerifyConnectivity checks that VerifyConnectivity returns nil.
 func TestDriverVerifyConnectivity(t *testing.T) {
 	ctx := context.Background()
-	d, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	d, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	if err != nil {
 		t.Fatalf("NewDriver: %v", err)
 	}
@@ -101,90 +84,26 @@ func TestDriverVerifyConnectivity(t *testing.T) {
 	}
 }
 
-// TestDriverVerifyAuthentication checks that VerifyAuthentication returns nil.
-func TestDriverVerifyAuthentication(t *testing.T) {
-	ctx := context.Background()
-	d, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
-	if err != nil {
-		t.Fatalf("NewDriver: %v", err)
-	}
-	defer d.Close(ctx)
-	auth := neo4j.BasicAuth("user", "pass", "")
-	if err := d.VerifyAuthentication(ctx, &auth); err != nil {
-		t.Fatalf("VerifyAuthentication: unexpected error: %v", err)
-	}
-}
-
-// TestDriverGetServerInfo checks that GetServerInfo returns a valid ServerInfo.
-func TestDriverGetServerInfo(t *testing.T) {
-	ctx := context.Background()
-	d, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
-	if err != nil {
-		t.Fatalf("NewDriver: %v", err)
-	}
-	defer d.Close(ctx)
-	info, err := d.GetServerInfo(ctx)
-	if err != nil {
-		t.Fatalf("GetServerInfo: unexpected error: %v", err)
-	}
-	if info == nil {
-		t.Fatal("GetServerInfo returned nil ServerInfo")
-	}
-}
-
-// TestDriverIsEncrypted checks that IsEncrypted returns false.
-func TestDriverIsEncrypted(t *testing.T) {
-	d, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
-	if err != nil {
-		t.Fatalf("NewDriver: %v", err)
-	}
-	defer d.Close(context.Background())
-	if d.IsEncrypted() {
-		t.Fatal("IsEncrypted should return false for graphlite")
-	}
-}
-
-// TestDriverExecuteQueryBookmarkManager checks that ExecuteQueryBookmarkManager
-// returns a non-nil BookmarkManager.
-func TestDriverExecuteQueryBookmarkManager(t *testing.T) {
-	d, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
-	if err != nil {
-		t.Fatalf("NewDriver: %v", err)
-	}
-	defer d.Close(context.Background())
-	bkMgr := d.ExecuteQueryBookmarkManager()
-	if bkMgr == nil {
-		t.Fatal("ExecuteQueryBookmarkManager returned nil")
-	}
-}
-
-// TestSessionRun checks that session.Run executes a Cypher query and returns
-// a valid neo4j.Result.
+// TestSessionRun checks that session.Run executes Cypher and returns a Result.
 func TestSessionRun(t *testing.T) {
 	ctx := context.Background()
-	d, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	d, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	if err != nil {
 		t.Fatalf("NewDriver: %v", err)
 	}
 	defer d.Close(ctx)
 
-	sess := d.NewSession(ctx, neo4j.SessionConfig{})
+	sess := d.NewSession(ctx)
 	defer sess.Close(ctx)
 
-	// CREATE a node.
 	res, err := sess.Run(ctx, "CREATE (n:Person {name: 'Alice'})", nil)
 	if err != nil {
 		t.Fatalf("session.Run CREATE: %v", err)
 	}
-	sum, err := res.Consume(ctx)
-	if err != nil {
+	if _, err := res.Consume(ctx); err != nil {
 		t.Fatalf("Consume: %v", err)
 	}
-	if sum == nil {
-		t.Fatal("Consume returned nil summary")
-	}
 
-	// MATCH and verify.
 	res2, err := sess.Run(ctx, "MATCH (n:Person) RETURN n.name AS name", nil)
 	if err != nil {
 		t.Fatalf("session.Run MATCH: %v", err)
@@ -205,17 +124,17 @@ func TestSessionRun(t *testing.T) {
 	}
 }
 
-// TestExplicitTransaction checks that BeginTransaction returns a valid
-// neo4j.ExplicitTransaction that can Commit and Rollback.
+// TestExplicitTransaction checks that BeginTransaction returns a Transaction
+// that correctly Commits and Rollbacks.
 func TestExplicitTransaction(t *testing.T) {
 	ctx := context.Background()
-	d, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	d, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	if err != nil {
 		t.Fatalf("NewDriver: %v", err)
 	}
 	defer d.Close(ctx)
 
-	sess := d.NewSession(ctx, neo4j.SessionConfig{})
+	sess := d.NewSession(ctx)
 	defer sess.Close(ctx)
 
 	tx, err := sess.BeginTransaction(ctx)
@@ -223,17 +142,14 @@ func TestExplicitTransaction(t *testing.T) {
 		t.Fatalf("BeginTransaction: %v", err)
 	}
 
-	_, err = tx.Run(ctx, "CREATE (n:Robot {id: 1})", nil)
-	if err != nil {
+	if _, err = tx.Run(ctx, "CREATE (n:Robot {id: 1})", nil); err != nil {
 		t.Fatalf("tx.Run: %v", err)
 	}
 
-	// Rollback — node should not persist.
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatalf("tx.Rollback: %v", err)
 	}
 
-	// Verify node is not in DB.
 	res, err := sess.Run(ctx, "MATCH (n:Robot) RETURN n", nil)
 	if err != nil {
 		t.Fatalf("post-rollback MATCH: %v", err)
@@ -250,16 +166,16 @@ func TestExplicitTransaction(t *testing.T) {
 // TestManagedTransaction checks that ExecuteWrite runs work in a committed tx.
 func TestManagedTransaction(t *testing.T) {
 	ctx := context.Background()
-	d, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	d, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	if err != nil {
 		t.Fatalf("NewDriver: %v", err)
 	}
 	defer d.Close(ctx)
 
-	sess := d.NewSession(ctx, neo4j.SessionConfig{})
+	sess := d.NewSession(ctx)
 	defer sess.Close(ctx)
 
-	_, err = sess.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+	_, err = sess.ExecuteWrite(ctx, func(tx graphlite.ManagedTransaction) (any, error) {
 		_, err := tx.Run(ctx, "CREATE (n:Bot {id: 42})", nil)
 		return nil, err
 	})
@@ -267,7 +183,6 @@ func TestManagedTransaction(t *testing.T) {
 		t.Fatalf("ExecuteWrite: %v", err)
 	}
 
-	// Verify node is in DB.
 	res, err := sess.Run(ctx, "MATCH (n:Bot) RETURN n.id AS id", nil)
 	if err != nil {
 		t.Fatalf("post-write MATCH: %v", err)

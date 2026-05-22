@@ -17,7 +17,6 @@ import (
 	"strings"
 
 	graphlite "github.com/LackOfMorals/graphlite"
-	neo4j "github.com/neo4j/neo4j-go-driver/v6/neo4j"
 )
 
 func main() {
@@ -29,16 +28,16 @@ func main() {
 	fmt.Println("\n=== 2. JSON bulk import ===")
 	importExample(ctx)
 
-	fmt.Println("\n=== 3. Neo4j-compatible API (all three transaction tiers) ===")
-	neo4jCompatExample(ctx)
+	fmt.Println("\n=== 3. graphlite Driver API (all three transaction tiers) ===")
+	driverAPIExample(ctx)
 }
 
 // nativeAPIExample shows the lightweight native graphlite API.
-// Use this when you don't need the neo4j.Driver interface.
+// Use this when you don't need the graphlite.Driver interface.
 func nativeAPIExample(ctx context.Context) {
 	db, err := graphlite.Open(":memory:")
 	must(err)
-	defer db.Close()
+	defer db.Close(ctx)
 
 	// Write: CREATE returns counters, not rows.
 	qr, err := db.RunQuery(ctx,
@@ -83,7 +82,7 @@ func nativeAPIExample(ctx context.Context) {
 func importExample(ctx context.Context) {
 	db, err := graphlite.Open(":memory:")
 	must(err)
-	defer db.Close()
+	defer db.Close(ctx)
 
 	payload := `{
 		"nodes": [
@@ -115,33 +114,29 @@ func importExample(ctx context.Context) {
 	must(qr.Err())
 }
 
-// neo4jCompatExample demonstrates graphlite as a drop-in neo4j.Driver substitute.
+// driverAPIExample demonstrates all three graphlite transaction tiers.
 //
-// In production code, replace the first line with:
-//
-//	driver, err := neo4j.NewDriverWithContext("bolt://localhost:7687", neo4j.BasicAuth(...))
-//
-// In tests, use graphlite.NewDriver(":memory:", nil) — no other changes needed.
-func neo4jCompatExample(ctx context.Context) {
-	// One line change to go from Neo4j Aura → graphlite:
-	driver, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+// In production code that targets real Neo4j, wrap the neo4j driver in a thin
+// adapter that implements graphlite.Driver, then swap the NewDriver call.
+func driverAPIExample(ctx context.Context) {
+	driver, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	must(err)
 	defer driver.Close(ctx)
 
-	// ── Tier 1: neo4j.ExecuteQuery ────────────────────────────────────────────
+	// ── Tier 1: graphlite.ExecuteQuery ────────────────────────────────────────
 	// The simplest API: auto-managed session + transaction + eager result.
-	_, err = neo4j.ExecuteQuery[*neo4j.EagerResult](ctx, driver,
+	_, err = graphlite.ExecuteQuery[*graphlite.EagerResult](ctx, driver,
 		`CREATE (:Developer {name: "Carol", lang: "Go"})`,
 		nil,
-		neo4j.EagerResultTransformer,
+		graphlite.EagerResultTransformer,
 	)
 	must(err)
-	fmt.Println("  Tier 1: node created via neo4j.ExecuteQuery")
+	fmt.Println("  Tier 1: node created via graphlite.ExecuteQuery")
 
-	result, err := neo4j.ExecuteQuery[*neo4j.EagerResult](ctx, driver,
+	result, err := graphlite.ExecuteQuery[*graphlite.EagerResult](ctx, driver,
 		`MATCH (d:Developer) RETURN d.name AS name, d.lang AS lang`,
 		nil,
-		neo4j.EagerResultTransformer,
+		graphlite.EagerResultTransformer,
 	)
 	must(err)
 	for _, rec := range result.Records {
@@ -152,11 +147,11 @@ func neo4jCompatExample(ctx context.Context) {
 
 	// ── Tier 2: session.ExecuteWrite / ExecuteRead ────────────────────────────
 	// Use when you need access to the ManagedTransaction to batch multiple
-	// queries inside a single auto-retried transaction.
-	sess := driver.NewSession(ctx, neo4j.SessionConfig{})
+	// queries inside a single auto-committed transaction.
+	sess := driver.NewSession(ctx)
 	defer sess.Close(ctx)
 
-	_, err = sess.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+	_, err = sess.ExecuteWrite(ctx, func(tx graphlite.ManagedTransaction) (any, error) {
 		_, err := tx.Run(ctx,
 			`CREATE (:Developer {name: "Dave", lang: "Rust"})`,
 			nil,
@@ -166,7 +161,7 @@ func neo4jCompatExample(ctx context.Context) {
 	must(err)
 	fmt.Println("  Tier 2: node created via session.ExecuteWrite")
 
-	names, err := sess.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+	names, err := sess.ExecuteRead(ctx, func(tx graphlite.ManagedTransaction) (any, error) {
 		result, err := tx.Run(ctx,
 			`MATCH (d:Developer) RETURN d.name AS name ORDER BY d.name`,
 			nil,
@@ -185,8 +180,7 @@ func neo4jCompatExample(ctx context.Context) {
 	fmt.Printf("  Tier 2: all developers: %v\n", names)
 
 	// ── Tier 3: explicit BeginTransaction ─────────────────────────────────────
-	// Use when you need manual control over commit / rollback — e.g. to roll
-	// back on a business-logic error without returning an error from the work fn.
+	// Use when you need manual control over commit / rollback.
 	tx, err := sess.BeginTransaction(ctx)
 	must(err)
 
@@ -210,10 +204,10 @@ func neo4jCompatExample(ctx context.Context) {
 	must(tx.Commit(ctx))
 	fmt.Println("  Tier 3: transaction committed — Frank persisted")
 
-	final, err := neo4j.ExecuteQuery[*neo4j.EagerResult](ctx, driver,
+	final, err := graphlite.ExecuteQuery[*graphlite.EagerResult](ctx, driver,
 		`MATCH (d:Developer) RETURN d.name AS name ORDER BY d.name`,
 		nil,
-		neo4j.EagerResultTransformer,
+		graphlite.EagerResultTransformer,
 	)
 	must(err)
 	var allNames []string

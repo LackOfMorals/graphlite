@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	graphlite "github.com/LackOfMorals/graphlite"
-	neo4j "github.com/neo4j/neo4j-go-driver/v6/neo4j"
 )
 
 // seedGraph creates a small graph in db: two Person nodes connected by KNOWS.
@@ -52,13 +51,13 @@ func knowsCount(t *testing.T, db *graphlite.DB) int {
 func TestCopyFrom(t *testing.T) {
 	ctx := context.Background()
 
-	// Source: a DriverCompat seeded with two persons and a relationship.
-	src, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	// Source: seeded with two persons and a relationship.
+	src, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer src.Close(ctx)
-	seedGraph(t, src.DB())
+	seedGraph(t, src)
 
 	// Destination: fresh empty DB.
 	dst := graphlite.NewTestDB(t)
@@ -86,12 +85,12 @@ func TestCopyFrom_Transactional(t *testing.T) {
 	}
 
 	// Normal copy should succeed and add 2 more nodes.
-	srcDriver, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	srcDriver, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer srcDriver.Close(ctx)
-	seedGraph(t, srcDriver.DB())
+	seedGraph(t, srcDriver)
 
 	if err := dst.CopyFrom(ctx, srcDriver); err != nil {
 		t.Fatalf("CopyFrom: %v", err)
@@ -106,7 +105,7 @@ func TestCopyFrom_Transactional(t *testing.T) {
 func TestCopyFrom_EmptySource(t *testing.T) {
 	ctx := context.Background()
 
-	src, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	src, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +123,7 @@ func TestCopyTo(t *testing.T) {
 	src := graphlite.NewTestDB(t)
 	seedGraph(t, src)
 
-	dst, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	dst, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,11 +133,11 @@ func TestCopyTo(t *testing.T) {
 		t.Fatalf("CopyTo: %v", err)
 	}
 
-	names := personNames(t, dst.DB())
+	names := personNames(t, dst)
 	if !names["Alice"] || !names["Bob"] {
 		t.Errorf("expected Alice and Bob in dst, got %v", names)
 	}
-	if n := knowsCount(t, dst.DB()); n != 1 {
+	if n := knowsCount(t, dst); n != 1 {
 		t.Errorf("expected 1 KNOWS relationship in dst, got %d", n)
 	}
 }
@@ -149,7 +148,7 @@ func TestCopyTo_NoTempProperty(t *testing.T) {
 	src := graphlite.NewTestDB(t)
 	seedGraph(t, src)
 
-	dst, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	dst, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +159,7 @@ func TestCopyTo_NoTempProperty(t *testing.T) {
 	}
 
 	// _graphliteId must have been removed.
-	res, err := dst.DB().RunQuery(ctx,
+	res, err := dst.RunQuery(ctx,
 		"MATCH (n) WHERE n._graphliteId IS NOT NULL RETURN count(n) AS c", nil)
 	if err != nil {
 		t.Fatalf("check temp prop: %v", err)
@@ -177,7 +176,7 @@ func TestCopyTo_EmptySource(t *testing.T) {
 
 	src := graphlite.NewTestDB(t)
 
-	dst, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	dst, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,21 +191,21 @@ func TestCopyRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed source.
-	src, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	src, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer src.Close(ctx)
-	seedGraph(t, src.DB())
+	seedGraph(t, src)
 
 	// CopyTo an intermediate graphlite instance.
-	mid, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	mid, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer mid.Close(ctx)
 
-	if err := src.DB().CopyTo(ctx, mid); err != nil {
+	if err := src.CopyTo(ctx, mid); err != nil {
 		t.Fatalf("CopyTo: %v", err)
 	}
 

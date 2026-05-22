@@ -5,24 +5,53 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-
-	neo4j "github.com/neo4j/neo4j-go-driver/v6/neo4j"
 )
 
 // CopyFrom imports all nodes and relationships from src into this database,
-// appending to any existing data. src can be any [neo4j.Driver] — a real Neo4j
-// instance or another graphlite [DriverCompat].
+// appending to any existing data. src can be any [Driver] — a real Neo4j
+// instance wrapped in an adapter or another graphlite [*DB].
 //
 // The entire import runs inside a single graphlite transaction; if any error
 // occurs all changes are rolled back and the database is unchanged.
-func (d *DB) CopyFrom(ctx context.Context, src neo4j.Driver) error {
-	nodeRes, err := neo4j.ExecuteQuery(ctx, src,
-		"MATCH (n) RETURN n", nil, neo4j.EagerResultTransformer)
+func (d *DB) CopyFrom(ctx context.Context, src Driver) error {
+	var nodes []*Node
+	var rels []*Relationship
+
+	sess := src.NewSession(ctx)
+	defer sess.Close(ctx) //nolint:errcheck
+
+	_, err := sess.ExecuteRead(ctx, func(tx ManagedTransaction) (any, error) {
+		res, err := tx.Run(ctx, "MATCH (n) RETURN n", nil)
+		if err != nil {
+			return nil, err
+		}
+		for res.Next(ctx) {
+			n, ok := res.Record().Values()[0].(*Node)
+			if !ok {
+				return nil, fmt.Errorf("graphlite: CopyFrom: unexpected node value type %T", res.Record().Values()[0])
+			}
+			nodes = append(nodes, n)
+		}
+		return nil, res.Err()
+	})
 	if err != nil {
 		return fmt.Errorf("graphlite: CopyFrom: query nodes: %w", err)
 	}
-	edgeRes, err := neo4j.ExecuteQuery(ctx, src,
-		"MATCH ()-[r]->() RETURN r", nil, neo4j.EagerResultTransformer)
+
+	_, err = sess.ExecuteRead(ctx, func(tx ManagedTransaction) (any, error) {
+		res, err := tx.Run(ctx, "MATCH ()-[r]->() RETURN r", nil)
+		if err != nil {
+			return nil, err
+		}
+		for res.Next(ctx) {
+			r, ok := res.Record().Values()[0].(*Relationship)
+			if !ok {
+				return nil, fmt.Errorf("graphlite: CopyFrom: unexpected relationship value type %T", res.Record().Values()[0])
+			}
+			rels = append(rels, r)
+		}
+		return nil, res.Err()
+	})
 	if err != nil {
 		return fmt.Errorf("graphlite: CopyFrom: query edges: %w", err)
 	}
@@ -33,14 +62,9 @@ func (d *DB) CopyFrom(ctx context.Context, src neo4j.Driver) error {
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// elementId → local graphlite ID
-	idMap := make(map[string]int64, len(nodeRes.Records))
+	idMap := make(map[string]int64, len(nodes))
 
-	for _, rec := range nodeRes.Records {
-		n, ok := rec.Values[0].(neo4j.Node)
-		if !ok {
-			return fmt.Errorf("graphlite: CopyFrom: unexpected node value type %T", rec.Values[0])
-		}
+	for _, n := range nodes {
 		propsJSON, err := marshalProps(n.Props)
 		if err != nil {
 			return fmt.Errorf("graphlite: CopyFrom: marshal node props: %w", err)
@@ -52,11 +76,7 @@ func (d *DB) CopyFrom(ctx context.Context, src neo4j.Driver) error {
 		idMap[n.ElementId] = localID
 	}
 
-	for _, rec := range edgeRes.Records {
-		r, ok := rec.Values[0].(neo4j.Relationship)
-		if !ok {
-			return fmt.Errorf("graphlite: CopyFrom: unexpected relationship value type %T", rec.Values[0])
-		}
+	for _, r := range rels {
 		startID, ok := idMap[r.StartElementId]
 		if !ok {
 			return fmt.Errorf("graphlite: CopyFrom: relationship references unknown start node %q", r.StartElementId)
@@ -78,9 +98,9 @@ func (d *DB) CopyFrom(ctx context.Context, src neo4j.Driver) error {
 }
 
 // CopyTo exports all nodes and relationships from this database into dst.
-// dst can be any [neo4j.Driver] — a real Neo4j instance or another graphlite
-// [DriverCompat]. For graphlite-to-graphlite copies, [DB.Export] + [DB.Import]
-// is also an option.
+// dst can be any [Driver] — a real Neo4j instance wrapped in an adapter or
+// another graphlite [*DB]. For graphlite-to-graphlite copies, [DB.Export] +
+// [DB.Import] is also an option.
 //
 // CopyTo issues one CREATE per node and one CREATE per relationship. A
 // temporary node property (_graphliteId) is used to match relationship
@@ -92,7 +112,7 @@ func (d *DB) CopyFrom(ctx context.Context, src neo4j.Driver) error {
 // Note: label names and relationship types must be valid Cypher identifiers
 // (no spaces or special characters). Data stored via graphlite's own Cypher
 // parser always satisfies this constraint.
-func (d *DB) CopyTo(ctx context.Context, dst neo4j.Driver) error {
+func (d *DB) CopyTo(ctx context.Context, dst Driver) error {
 	nodes, err := d.st.ListNodes(ctx)
 	if err != nil {
 		return fmt.Errorf("graphlite: CopyTo: list nodes: %w", err)
@@ -102,6 +122,9 @@ func (d *DB) CopyTo(ctx context.Context, dst neo4j.Driver) error {
 		return fmt.Errorf("graphlite: CopyTo: list edges: %w", err)
 	}
 
+	sess := dst.NewSession(ctx)
+	defer sess.Close(ctx) //nolint:errcheck
+
 	// Phase 1: create nodes with a temporary _graphliteId for relationship matching.
 	for _, n := range nodes {
 		props, err := unmarshalProps(n.Props)
@@ -109,7 +132,11 @@ func (d *DB) CopyTo(ctx context.Context, dst neo4j.Driver) error {
 			return fmt.Errorf("graphlite: CopyTo: unmarshal node %d: %w", n.ID, err)
 		}
 		cypher, params := buildCreateNodeCypher(n.Labels, props, n.ID)
-		if _, err := neo4j.ExecuteQuery(ctx, dst, cypher, params, neo4j.EagerResultTransformer); err != nil {
+		_, err = sess.ExecuteWrite(ctx, func(tx ManagedTransaction) (any, error) {
+			_, err := tx.Run(ctx, cypher, params)
+			return nil, err
+		})
+		if err != nil {
 			return fmt.Errorf("graphlite: CopyTo: create node %d: %w", n.ID, err)
 		}
 	}
@@ -121,16 +148,23 @@ func (d *DB) CopyTo(ctx context.Context, dst neo4j.Driver) error {
 			return fmt.Errorf("graphlite: CopyTo: unmarshal edge %d: %w", e.ID, err)
 		}
 		cypher, params := buildCreateEdgeCypher(e.Type, e.StartID, e.EndID, props)
-		if _, err := neo4j.ExecuteQuery(ctx, dst, cypher, params, neo4j.EagerResultTransformer); err != nil {
+		_, err = sess.ExecuteWrite(ctx, func(tx ManagedTransaction) (any, error) {
+			_, err := tx.Run(ctx, cypher, params)
+			return nil, err
+		})
+		if err != nil {
 			return fmt.Errorf("graphlite: CopyTo: create edge %d: %w", e.ID, err)
 		}
 	}
 
 	// Phase 3: remove temp property.
 	if len(nodes) > 0 {
-		if _, err := neo4j.ExecuteQuery(ctx, dst,
-			"MATCH (n) WHERE n._graphliteId IS NOT NULL REMOVE n._graphliteId",
-			nil, neo4j.EagerResultTransformer); err != nil {
+		_, err = sess.ExecuteWrite(ctx, func(tx ManagedTransaction) (any, error) {
+			_, err := tx.Run(ctx,
+				"MATCH (n) WHERE n._graphliteId IS NOT NULL REMOVE n._graphliteId", nil)
+			return nil, err
+		})
+		if err != nil {
 			return fmt.Errorf("graphlite: CopyTo: remove temp property: %w", err)
 		}
 	}
@@ -138,7 +172,6 @@ func (d *DB) CopyTo(ctx context.Context, dst neo4j.Driver) error {
 }
 
 // buildCreateNodeCypher produces a CREATE statement for a single node.
-// Labels and property keys must be valid Cypher identifiers.
 func buildCreateNodeCypher(labelsStr string, props map[string]any, id int64) (string, map[string]any) {
 	params := map[string]any{"glid": id}
 	propExpr := buildInlinePropExpr(props, params)
@@ -176,7 +209,6 @@ func buildCreateEdgeCypher(edgeType string, startID, endID int64, props map[stri
 }
 
 // buildInlinePropExpr builds "key1: $p0, key2: $p1, ..." and populates params.
-// Keys are sorted for deterministic output.
 func buildInlinePropExpr(props map[string]any, params map[string]any) string {
 	if len(props) == 0 {
 		return ""
@@ -197,7 +229,6 @@ func buildInlinePropExpr(props map[string]any, params map[string]any) string {
 }
 
 // rawLabelExpr converts "Person,Employee" to "Person:Employee" (unquoted).
-// Labels written through graphlite's Cypher parser are always valid identifiers.
 func rawLabelExpr(labelsStr string) string {
 	if labelsStr == "" {
 		return ""
