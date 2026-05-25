@@ -20,6 +20,9 @@ vendor/
 *.db-shm
 *.db-wal
 
+# Claude Code internal state
+.claude/
+
 # Editor and OS files
 .DS_Store
 .idea/
@@ -30,3 +33,4 @@ vendor/
 
 # GoReleaser
 dist/
+.claude/worktrees/agent-a9b49e52a5a54faed

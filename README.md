@@ -1,32 +1,29 @@
 # graphlite
 
-**Embedded property graph database for Go — openCypher over SQLite, Neo4j driver compatible.**
+**Embedded property graph database for Go — openCypher over SQLite, neo4j-shaped API.**
 
-graphlite lets you write application code once against the standard `neo4j-go-driver` API and run it against Neo4j Aura in production or a local in-process graph in tests and development. No Docker, no network, no separate process.
+graphlite gives you a zero-infrastructure, in-process property graph that speaks openCypher. Its public API mirrors the neo4j Go driver — same session, transaction, and `ExecuteQuery` patterns — so code written for graphlite ports easily to real Neo4j with a thin adapter.
 
 ```go
-// One line separates your test graph from your production graph.
+// In tests — no Docker, no network, no shared state
+driver, _ := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 
-// In tests
-driver, _ := graphlite.NewDriver(":memory:", nil)
-
-// In production
-driver, _ := neo4j.NewDriver("neo4j+s://xxx.databases.neo4j.io", auth)
+// In production — wrap your real Neo4j driver in a thin adapter
+driver = &myNeo4jAdapter{neo4jDriver}
 ```
 
-Every query you write against graphlite runs unchanged on Neo4j — same Cypher, same driver API, same result types.
+graphlite defines its own `Driver`, `Session`, `Transaction`, and `Result` interfaces. Because graphlite has no dependency on the neo4j Go driver package, you can import both in the same project without conflict.
 
 ---
 
 ## Why graphlite
 
-The `neo4j-go-driver` is the only API you touch. graphlite implements the same interface — `neo4j.Driver`, sessions, managed transactions, `ExecuteQuery` — as an in-process SQLite-backed graph store. That means:
-
 - **Tests run without infrastructure.** No Docker container to spin up, no port to reserve, no shared state between CI workers.
 - **Development is friction-free.** Clone the repo, run `go test` — it works. No `docker compose up`.
-- **The migration path is one line.** When you're ready to point at a real Neo4j instance, change the constructor. Nothing else moves.
+- **No driver version lock-in.** graphlite defines its own interfaces; you upgrade the neo4j driver independently.
+- **Import both in one project.** Because graphlite does not depend on the neo4j driver package, tests and production code can co-exist in the same build.
 
-graphlite is intentionally embedded-only. It does not implement the Bolt wire protocol and is not designed to run as a standalone server. This is a deliberate scope choice: staying embedded means staying zero-infrastructure, CGO-free, and deployable anywhere Go runs.
+graphlite is intentionally embedded-only. It does not implement the Bolt wire protocol and is not designed to run as a standalone server. Staying embedded means staying zero-infrastructure, CGO-free, and deployable anywhere Go runs.
 
 ---
 
@@ -58,7 +55,6 @@ graphlite achieves **100% pass rate on the openCypher Technology Compatibility K
 | `MERGE` with `ON CREATE SET` / `ON MATCH SET` | ✅ |
 | Bulk import — JSON, CSV (Neo4j format) | ✅ |
 | Bulk export — JSON | ✅ |
-| `neo4j.Driver` drop-in (`DriverCompat`) | ✅ |
 | `shortestPath()` | ❌ |
 
 Unsupported features return `ErrUnsupportedCypher` — they never silently produce wrong results.
@@ -77,37 +73,53 @@ Requires Go 1.24+. No CGO required. Works on Linux (amd64/arm64), macOS (arm64),
 
 ## Switching Between graphlite and Neo4j
 
-The typical pattern is a constructor that reads from environment or build tags:
+graphlite's `Driver`, `Session`, `Transaction`, and `ManagedTransaction` interfaces mirror the neo4j Go driver's public API. To swap graphlite for a real Neo4j instance you write a thin adapter once:
 
 ```go
-func newDriver(ctx context.Context) (neo4j.DriverWithContext, error) {
+// graphlite.Driver interface — implement this for real Neo4j
+type neo4jAdapter struct {
+    d neo4j.DriverWithContext
+}
+
+func (a *neo4jAdapter) NewSession(ctx context.Context) graphlite.Session {
+    return &neo4jSessionAdapter{a.d.NewSession(ctx, neo4j.SessionConfig{})}
+}
+func (a *neo4jAdapter) VerifyConnectivity(ctx context.Context) error {
+    return a.d.VerifyConnectivity(ctx)
+}
+func (a *neo4jAdapter) Close(ctx context.Context) error {
+    return a.d.Close(ctx)
+}
+
+// newDriver selects graphlite or real Neo4j based on environment.
+func newDriver(ctx context.Context) (graphlite.Driver, error) {
     if uri := os.Getenv("NEO4J_URI"); uri != "" {
         auth := neo4j.BasicAuth(os.Getenv("NEO4J_USER"), os.Getenv("NEO4J_PASS"), "")
-        return neo4j.NewDriverWithContext(uri, auth)
+        d, err := neo4j.NewDriverWithContext(uri, auth)
+        return &neo4jAdapter{d}, err
     }
-    // No NEO4J_URI set — use the embedded store.
-    return graphlite.NewDriver(":memory:", nil)
+    return graphlite.NewDriver(":memory:", graphlite.NoAuth())
 }
 ```
 
-Your application code and tests call `newDriver` — they never import graphlite directly. Set `NEO4J_URI` in production and CI-against-real-Neo4j; leave it unset for local unit tests.
+Your application code accepts `graphlite.Driver` — it never imports graphlite or neo4j directly. Set `NEO4J_URI` in production; leave it unset for local unit tests.
 
 A file-backed store persists across process restarts:
 
 ```go
-driver, _ := graphlite.NewDriver("/var/data/graph.db", nil)
+driver, _ := graphlite.NewDriver("/var/data/graph.db", graphlite.NoAuth())
 ```
 
 ---
 
 ## Data Migration
 
-Move graph data between graphlite and any `neo4j.Driver` — including a real Neo4j instance — using `CopyFrom` and `CopyTo`.
+Move graph data between graphlite and any `graphlite.Driver` — including a real Neo4j instance wrapped in an adapter — using `CopyFrom` and `CopyTo`.
 
 ```go
 // Seed a local graphlite instance from a staging Neo4j database.
-staging, _ := neo4j.NewDriverWithContext("neo4j+s://staging.example.com", auth)
-local, _   := graphlite.Open(":memory:")
+staging := &neo4jAdapter{stagingNeo4jDriver}
+local, _ := graphlite.Open(":memory:")
 
 if err := local.CopyFrom(ctx, staging); err != nil {
     log.Fatal(err)
@@ -142,38 +154,35 @@ snap, _ := graphlite.Open("/var/data/graph-checkpoint.db")
 
 ## Quick Start
 
-### Neo4j Driver API (recommended)
+### Driver API (recommended)
 
 ```go
-import (
-    "github.com/LackOfMorals/graphlite"
-    "github.com/neo4j/neo4j-go-driver/v6/neo4j"
-)
+import "github.com/LackOfMorals/graphlite"
 
-driver, err := graphlite.NewDriver(":memory:", nil)
+driver, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 if err != nil {
     log.Fatal(err)
 }
 defer driver.Close(ctx)
 
 // Tier 1 — ExecuteQuery (simplest)
-result, err := neo4j.ExecuteQuery(ctx, driver,
+result, err := graphlite.ExecuteQuery[*graphlite.EagerResult](ctx, driver,
     `MATCH (p:Person {name: $name})-[:KNOWS]->(f:Person) RETURN f.name AS name`,
     map[string]any{"name": "Alice"},
-    neo4j.EagerResultTransformer,
+    graphlite.EagerResultTransformer,
 )
 
 // Tier 2 — Managed transaction
-session := driver.NewSession(ctx, neo4j.SessionConfig{})
+session := driver.NewSession(ctx)
 defer session.Close(ctx)
-names, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+names, err := session.ExecuteRead(ctx, func(tx graphlite.ManagedTransaction) (any, error) {
     result, err := tx.Run(ctx, `MATCH (n:Person) RETURN n.name AS name`, nil)
     if err != nil {
         return nil, err
     }
     var names []string
     for result.Next(ctx) {
-        names = append(names, result.Record().Values[0].(string))
+        names = append(names, result.Record().Values()[0].(string))
     }
     return names, result.Err()
 })
@@ -216,9 +225,9 @@ result, err := db.RunQuery(ctx,
 ```
 graphlite/
 ├── types.go          ← Node, Relationship, Record, errors (root package)
+├── interfaces.go     ← Driver, Session, Transaction, ManagedTransaction, Result, ExecuteQuery
 ├── driver.go         ← graphlite.Open, native API, execution engine, Snapshot
-├── session.go        ← BeginTx, Tx, auto-commit
-├── neo4j.go          ← DriverCompat — satisfies neo4j.Driver
+├── session.go        ← session, Tx, managedTx — implements the interfaces
 ├── importer.go       ← Import/Export (JSON, CSV)
 ├── migrate.go        ← CopyFrom, CopyTo
 ├── cypher/
@@ -286,12 +295,12 @@ This covers the root package and all documented sub-packages. Adding new exporte
 
 | Version | Highlights |
 |---|---|
-| v0.1 | MATCH, CREATE, SET, DELETE, bulk JSON import, `neo4j.Driver` compat |
+| v0.1 | MATCH, CREATE, SET, DELETE, bulk JSON import, neo4j-shaped driver API |
 | v0.2 | OPTIONAL MATCH, WITH, aggregation, COLLECT, DISTINCT, REMOVE, CSV import/export |
 | v0.3 | MERGE (with ON CREATE/ON MATCH), property-based tests, TCK harness |
 | **v1.0** | **CASE expressions, variable-length paths, 100% openCypher TCK pass rate** |
 | v1.1 | CopyFrom / CopyTo migration, Snapshot, functional options (WithBusyTimeout, WithReadOnly, NewTestDB) |
-| post-v1.0 | No breaking changes without a major version bump |
+| v1.2 | Remove neo4j driver dependency; graphlite now defines its own neo4j-shaped interfaces — no more shim files, import both packages without conflict |
 
 ---
 

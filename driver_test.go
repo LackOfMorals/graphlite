@@ -311,10 +311,10 @@ func TestBeginTx_CommitPersists(t *testing.T) {
 		t.Fatalf("BeginTx: %v", err)
 	}
 	if _, err := tx.Run(ctx, `CREATE (n:TxNode {val: "committed"})`, nil); err != nil {
-		_ = tx.Rollback()
+		_ = tx.Rollback(ctx)
 		t.Fatalf("tx.Run: %v", err)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 
@@ -344,10 +344,10 @@ func TestBeginTx_RollbackReverts(t *testing.T) {
 		t.Fatalf("BeginTx: %v", err)
 	}
 	if _, err := tx.Run(ctx, `CREATE (n:RollbackNode {val: "ephemeral"})`, nil); err != nil {
-		_ = tx.Rollback()
+		_ = tx.Rollback(ctx)
 		t.Fatalf("tx.Run: %v", err)
 	}
-	if err := tx.Rollback(); err != nil {
+	if err := tx.Rollback(ctx); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 
@@ -371,7 +371,7 @@ func TestBeginTx_ClosedAfterCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	// A second Run should fail because the Tx is closed.
@@ -390,7 +390,7 @@ func TestBeginTx_ClosedAfterRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
-	if err := tx.Rollback(); err != nil {
+	if err := tx.Rollback(ctx); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	_, err = tx.Run(ctx, `MATCH (n) RETURN n`, nil)

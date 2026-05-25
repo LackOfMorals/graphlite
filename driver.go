@@ -127,9 +127,35 @@ func (d *DB) Snapshot(path string) error {
 	return sn.Snapshot(path)
 }
 
+// NewDriver opens (or creates) a graphlite database at path and returns a *DB
+// that satisfies the [Driver] interface. It is a convenience alias for [Open]
+// for callers that prefer the neo4j-style constructor name.
+//
+// auth is accepted for API familiarity with the Neo4j Go driver but is silently
+// ignored — graphlite has no authentication layer.
+func NewDriver(path string, _ AuthToken, opts ...Option) (*DB, error) {
+	return Open(path, opts...)
+}
+
+// AuthToken is accepted by [NewDriver] for API compatibility with the Neo4j Go
+// driver. graphlite has no authentication layer; all tokens are ignored.
+type AuthToken struct{}
+
+// NoAuth returns an empty AuthToken. It mirrors neo4j.NoAuth() so that
+// call sites need only change the import when switching drivers.
+func NoAuth() AuthToken { return AuthToken{} }
+
+// NewSession creates a new [Session] backed by this database.
+func (d *DB) NewSession(_ context.Context) Session {
+	return &session{db: d}
+}
+
+// VerifyConnectivity always returns nil — graphlite is an in-process database
+// and is always reachable.
+func (d *DB) VerifyConnectivity(_ context.Context) error { return nil }
+
 // Close releases all resources held by the database. Subsequent calls on a
-// closed DB return errors. The context parameter is accepted for interface
-// compatibility with [neo4j.Driver] but is not used.
+// closed DB return errors.
 func (d *DB) Close(_ context.Context) error {
 	if err := d.st.Close(); err != nil {
 		return fmt.Errorf("graphlite: close: %w", err)

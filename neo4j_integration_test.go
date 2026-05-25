@@ -1,8 +1,8 @@
-// Integration tests for the DriverCompat all-three-tier transaction API (task-019).
-// All tests use the DriverCompat exclusively and exercise every v0.1 Cypher
-// feature through at least one of the three transaction tiers:
+// Integration tests for the graphlite all-three-tier transaction API.
+// All tests exercise every v0.1 Cypher feature through at least one of the
+// three transaction tiers:
 //
-//   Tier 1 — neo4j.ExecuteQuery with EagerResultTransformer
+//   Tier 1 — graphlite.ExecuteQuery with EagerResultTransformer
 //   Tier 2 — session.ExecuteRead / session.ExecuteWrite with ManagedTransaction
 //   Tier 3 — session.BeginTransaction with explicit Commit / Rollback
 package graphlite_test
@@ -13,17 +13,16 @@ import (
 	"testing"
 
 	graphlite "github.com/LackOfMorals/graphlite"
-	neo4j "github.com/neo4j/neo4j-go-driver/v6/neo4j"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-// newDriver creates an in-memory DriverCompat and registers cleanup.
-func newDriver(t *testing.T) *graphlite.DriverCompat {
+// newDriver creates an in-memory *DB and registers cleanup.
+func newDriver(t *testing.T) *graphlite.DB {
 	t.Helper()
-	d, err := graphlite.NewDriver(":memory:", neo4j.NoAuth())
+	d, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
 	if err != nil {
 		t.Fatalf("NewDriver: %v", err)
 	}
@@ -32,20 +31,20 @@ func newDriver(t *testing.T) *graphlite.DriverCompat {
 }
 
 // newSession opens a session on d and registers cleanup.
-func newSession(t *testing.T, d *graphlite.DriverCompat) neo4j.Session {
+func newSession(t *testing.T, d graphlite.Driver) graphlite.Session {
 	t.Helper()
 	ctx := context.Background()
-	sess := d.NewSession(ctx, neo4j.SessionConfig{})
+	sess := d.NewSession(ctx)
 	t.Cleanup(func() { _ = sess.Close(ctx) })
 	return sess
 }
 
 // executeQueryEager is a convenience wrapper for the common Tier-1 pattern:
 //
-//	neo4j.ExecuteQuery[*neo4j.EagerResult](ctx, driver, cypher, params, neo4j.EagerResultTransformer)
-func executeQueryEager(t *testing.T, ctx context.Context, d neo4j.Driver, cypher string, params map[string]any) *neo4j.EagerResult {
+//	graphlite.ExecuteQuery[*graphlite.EagerResult](ctx, driver, cypher, params, graphlite.EagerResultTransformer)
+func executeQueryEager(t *testing.T, ctx context.Context, d graphlite.Driver, cypher string, params map[string]any) *graphlite.EagerResult {
 	t.Helper()
-	result, err := neo4j.ExecuteQuery[*neo4j.EagerResult](ctx, d, cypher, params, neo4j.EagerResultTransformer)
+	result, err := graphlite.ExecuteQuery[*graphlite.EagerResult](ctx, d, cypher, params, graphlite.EagerResultTransformer)
 	if err != nil {
 		t.Fatalf("ExecuteQuery %q: %v", cypher, err)
 	}
@@ -53,7 +52,7 @@ func executeQueryEager(t *testing.T, ctx context.Context, d neo4j.Driver, cypher
 }
 
 // requireRecordCount fails if result does not contain exactly n records.
-func requireRecordCount(t *testing.T, result *neo4j.EagerResult, n int) {
+func requireRecordCount(t *testing.T, result *graphlite.EagerResult, n int) {
 	t.Helper()
 	if len(result.Records) != n {
 		t.Fatalf("expected %d records, got %d", n, len(result.Records))
@@ -61,7 +60,7 @@ func requireRecordCount(t *testing.T, result *neo4j.EagerResult, n int) {
 }
 
 // requireGet returns the value for key from record, failing if absent.
-func requireGet(t *testing.T, rec *neo4j.Record, key string) any {
+func requireGet(t *testing.T, rec *graphlite.Record, key string) any {
 	t.Helper()
 	v, ok := rec.Get(key)
 	if !ok {
@@ -71,11 +70,11 @@ func requireGet(t *testing.T, rec *neo4j.Record, key string) any {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Tier 1 — neo4j.ExecuteQuery tests
+// Tier 1 — graphlite.ExecuteQuery tests
 // ─────────────────────────────────────────────────────────────────────────────
 
 // TestTier1_ExecuteQuery_CreateAndMatch exercises the most common Tier-1 pattern:
-// write with ExecuteQuery (write routing = default), then read back.
+// write with ExecuteQuery, then read back.
 func TestTier1_ExecuteQuery_CreateAndMatch(t *testing.T) {
 	ctx := context.Background()
 	d := newDriver(t)
@@ -111,26 +110,17 @@ func TestTier1_ExecuteQuery_WithParams(t *testing.T) {
 	}
 }
 
-// TestTier1_ExecuteQuery_ReadersRouting exercises Tier-1 with explicit
-// ExecuteQueryWithReadersRouting option.
+// TestTier1_ExecuteQuery_ReadersRouting verifies that ExecuteQuery works for
+// reads. graphlite has no reader/writer routing distinction; all paths use the
+// same transaction machinery.
 func TestTier1_ExecuteQuery_ReadersRouting(t *testing.T) {
 	ctx := context.Background()
 	d := newDriver(t)
 
-	// Seed data via write routing (default).
+	// Seed data.
 	executeQueryEager(t, ctx, d, `CREATE (n:Book {title: "Go Programming"})`, nil)
 
-	// Read via readers routing.
-	res, err := neo4j.ExecuteQuery[*neo4j.EagerResult](
-		ctx, d,
-		`MATCH (n:Book) RETURN n.title AS title`,
-		nil,
-		neo4j.EagerResultTransformer,
-		neo4j.ExecuteQueryWithReadersRouting(),
-	)
-	if err != nil {
-		t.Fatalf("ExecuteQuery with ReadersRouting: %v", err)
-	}
+	res := executeQueryEager(t, ctx, d, `MATCH (n:Book) RETURN n.title AS title`, nil)
 	requireRecordCount(t, res, 1)
 }
 
@@ -337,7 +327,7 @@ func TestTier2_ExecuteWrite_CreateAndCommit(t *testing.T) {
 	d := newDriver(t)
 	sess := newSession(t, d)
 
-	_, err := sess.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+	_, err := sess.ExecuteWrite(ctx, func(tx graphlite.ManagedTransaction) (any, error) {
 		_, err := tx.Run(ctx, `CREATE (n:Tier2 {val: "written"})`, nil)
 		return nil, err
 	})
@@ -371,7 +361,7 @@ func TestTier2_ExecuteWrite_RollbackOnError(t *testing.T) {
 	d := newDriver(t)
 	sess := newSession(t, d)
 
-	_, err := sess.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+	_, err := sess.ExecuteWrite(ctx, func(tx graphlite.ManagedTransaction) (any, error) {
 		_, runErr := tx.Run(ctx, `CREATE (n:EphemeralTier2 {x: 1})`, nil)
 		if runErr != nil {
 			return nil, runErr
@@ -405,7 +395,7 @@ func TestTier2_ExecuteRead_ReturnsCallbackResult(t *testing.T) {
 	sess := newSession(t, d)
 
 	// Seed data.
-	_, err := sess.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+	_, err := sess.ExecuteWrite(ctx, func(tx graphlite.ManagedTransaction) (any, error) {
 		_, e := tx.Run(ctx, `CREATE (n:ReadTest {score: 99})`, nil)
 		return nil, e
 	})
@@ -414,7 +404,7 @@ func TestTier2_ExecuteRead_ReturnsCallbackResult(t *testing.T) {
 	}
 
 	// Read via ExecuteRead — return the score from inside the callback.
-	raw, err := sess.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+	raw, err := sess.ExecuteRead(ctx, func(tx graphlite.ManagedTransaction) (any, error) {
 		res, e := tx.Run(ctx, `MATCH (n:ReadTest) RETURN n.score AS score`, nil)
 		if e != nil {
 			return nil, e
@@ -426,7 +416,7 @@ func TestTier2_ExecuteRead_ReturnsCallbackResult(t *testing.T) {
 		if len(recs) == 0 {
 			return nil, fmt.Errorf("no records found")
 		}
-		return recs[0].Values[0], nil
+		return recs[0].Values()[0], nil
 	})
 	if err != nil {
 		t.Fatalf("ExecuteRead: %v", err)
@@ -442,7 +432,7 @@ func TestTier2_ExecuteWrite_WithParams(t *testing.T) {
 	d := newDriver(t)
 	sess := newSession(t, d)
 
-	_, err := sess.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+	_, err := sess.ExecuteWrite(ctx, func(tx graphlite.ManagedTransaction) (any, error) {
 		_, e := tx.Run(ctx,
 			`CREATE (n:Parameterised {key: $k, val: $v})`,
 			map[string]any{"k": "hello", "v": "world"},
@@ -477,7 +467,7 @@ func TestTier2_ExecuteWrite_DeleteRelationship(t *testing.T) {
 	sess := newSession(t, d)
 
 	// Create a two-node relationship.
-	_, err := sess.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+	_, err := sess.ExecuteWrite(ctx, func(tx graphlite.ManagedTransaction) (any, error) {
 		_, e := tx.Run(ctx,
 			`CREATE (a:RelDelTest {id: 1})-[:TEMP]->(b:RelDelTest {id: 2})`, nil)
 		return nil, e
@@ -487,7 +477,7 @@ func TestTier2_ExecuteWrite_DeleteRelationship(t *testing.T) {
 	}
 
 	// Delete just the relationship.
-	_, err = sess.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+	_, err = sess.ExecuteWrite(ctx, func(tx graphlite.ManagedTransaction) (any, error) {
 		_, e := tx.Run(ctx,
 			`MATCH (a:RelDelTest)-[r:TEMP]->(b:RelDelTest) DELETE r`, nil)
 		return nil, e
@@ -634,7 +624,7 @@ func TestTier3_ExplicitTx_WithSetAndDelete(t *testing.T) {
 	sess := newSession(t, d)
 
 	// Seed: two nodes.
-	_, err := sess.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+	_, err := sess.ExecuteWrite(ctx, func(tx graphlite.ManagedTransaction) (any, error) {
 		_, e := tx.Run(ctx, `CREATE (a:SetDelTest {k: "keep"}), (b:SetDelTest {k: "drop"})`, nil)
 		return nil, e
 	})
@@ -688,7 +678,7 @@ func TestAllTiers_WriteReadCycle(t *testing.T) {
 
 	// Tier 2: read — verify initial state.
 	sess := newSession(t, d)
-	val, err := sess.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+	val, err := sess.ExecuteRead(ctx, func(tx graphlite.ManagedTransaction) (any, error) {
 		res, e := tx.Run(ctx, `MATCH (n:CrossTier) RETURN n.status AS status`, nil)
 		if e != nil {
 			return nil, e
@@ -731,8 +721,8 @@ func TestAllTiers_WriteReadCycle(t *testing.T) {
 	}
 }
 
-// TestAllTiers_NodeProjection verifies that whole-node projections via the
-// neo4j driver return proper neo4j.Node values (not raw graphlite *Node).
+// TestAllTiers_NodeProjection verifies that whole-node projections return
+// proper *graphlite.Node values with labels and properties populated.
 func TestAllTiers_NodeProjection(t *testing.T) {
 	ctx := context.Background()
 	d := newDriver(t)
@@ -745,9 +735,9 @@ func TestAllTiers_NodeProjection(t *testing.T) {
 	requireRecordCount(t, res, 1)
 
 	raw := requireGet(t, res.Records[0], "n")
-	node, ok := raw.(neo4j.Node)
+	node, ok := raw.(*graphlite.Node)
 	if !ok {
-		t.Fatalf("expected neo4j.Node, got %T", raw)
+		t.Fatalf("expected *graphlite.Node, got %T", raw)
 	}
 	if len(node.Labels) == 0 || node.Labels[0] != "Projected" {
 		t.Errorf("node.Labels = %v, want [Projected]", node.Labels)
