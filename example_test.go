@@ -37,39 +37,6 @@ func ExampleOpen() {
 	// Alice
 }
 
-// ExampleNewDriver demonstrates using the graphlite.Driver-compatible API.
-// This is the recommended entry point for code that also runs against Neo4j.
-func ExampleNewDriver() {
-	ctx := context.Background()
-
-	driver, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
-	if err != nil {
-		panic(err)
-	}
-	defer driver.Close(ctx)
-
-	// ExecuteQuery is the simplest API tier.
-	_, err = graphlite.ExecuteQuery[*graphlite.EagerResult](ctx, driver,
-		`CREATE (:Person {name: "Bob"})-[:KNOWS]->(:Person {name: "Carol"})`,
-		nil, graphlite.EagerResultTransformer,
-	)
-	if err != nil {
-		panic(err)
-	}
-
-	result, err := graphlite.ExecuteQuery[*graphlite.EagerResult](ctx, driver,
-		`MATCH (:Person {name: "Bob"})-[:KNOWS]->(f:Person) RETURN f.name AS name`,
-		nil, graphlite.EagerResultTransformer,
-	)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println(result.Records[0].AsMap()["name"])
-
-	// Output:
-	// Carol
-}
-
 // ExampleWithBusyTimeout shows how to configure SQLite busy-wait behaviour.
 func ExampleWithBusyTimeout() {
 	db, err := graphlite.Open(":memory:", graphlite.WithBusyTimeout(5*time.Second))

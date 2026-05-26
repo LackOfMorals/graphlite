@@ -195,44 +195,6 @@ func (r *QueryResult) SetCounters(c QueryCounters) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// EagerResult — pre-collected result
-// ─────────────────────────────────────────────────────────────────────────────
-
-// EagerResult is a pre-collected result containing all records and a summary.
-// It is returned by operations that exhaust the result set immediately (e.g.
-// the DriverCompat ExecuteQuery tier using EagerResultTransformer).
-type EagerResult struct {
-	// Keys is the ordered list of projection key names.
-	Keys []string
-	// Records contains all records returned by the query.
-	Records []*Record
-	// Summary contains execution statistics.
-	Summary ResultSummary
-}
-
-// NewEagerResult drains a QueryResult and returns an EagerResult.
-func NewEagerResult(ctx context.Context, qr *QueryResult) (*EagerResult, error) {
-	return newEagerResult(ctx, qr)
-}
-
-// newEagerResult drains a QueryResult and returns an EagerResult.
-func newEagerResult(ctx context.Context, qr *QueryResult) (*EagerResult, error) {
-	recs, err := qr.Collect(ctx)
-	if err != nil {
-		return nil, err
-	}
-	sum, err := qr.Consume(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &EagerResult{
-		Keys:    qr.Keys(),
-		Records: recs,
-		Summary: sum,
-	}, nil
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // ResultSummary and Counters
 // ─────────────────────────────────────────────────────────────────────────────
 

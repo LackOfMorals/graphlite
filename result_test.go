@@ -390,40 +390,6 @@ func TestQueryResult_NoLabels(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// EagerResult tests
-// ─────────────────────────────────────────────────────────────────────────────
-
-func TestEagerResult_Basic(t *testing.T) {
-	db := openTestDB(t)
-	insertNode(t, db, "T", map[string]any{"x": 1})
-	insertNode(t, db, "T", map[string]any{"x": 2})
-
-	rows, err := db.Query(
-		`SELECT json_extract(props, '$.x') AS x FROM nodes ORDER BY id`)
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	qr, err := NewQueryResultFromRows(rows)
-	if err != nil {
-		t.Fatalf("NewQueryResultFromRows: %v", err)
-	}
-
-	er, err := NewEagerResult(context.Background(), qr)
-	if err != nil {
-		t.Fatalf("NewEagerResult: %v", err)
-	}
-	if len(er.Records) != 2 {
-		t.Errorf("expected 2 records, got %d", len(er.Records))
-	}
-	if er.Summary == nil {
-		t.Error("Summary should not be nil")
-	}
-	if len(er.Keys) != 1 || er.Keys[0] != "x" {
-		t.Errorf("unexpected Keys: %v", er.Keys)
-	}
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Counters tests
 // ─────────────────────────────────────────────────────────────────────────────
 

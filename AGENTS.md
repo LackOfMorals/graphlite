@@ -92,3 +92,6 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - `buildMatchForWriteSelect` sorts `scope.Names()` before building columns for deterministic SQL.
 - When deleting files that export methods used in `example_test.go`, also remove the corresponding `Example*` functions — otherwise `go build ./...` fails even if core tests pass.
 - neo4j driver stays in go.mod as indirect dep until task-010 runs `go mod tidy` after all referencing code is gone.
+- `Tx` type lives in `tx.go` (moved from session.go in task-003); context params on Commit/Rollback/Close are removed in task-005.
+- `interfaces.go` is deleted in v2; all session-layer/compat interfaces (Driver, Session, Transaction, ResultTransformer, etc.) are gone.
+- When replacing `NewEagerResult(ctx, qr)` calls, use `qr.Collect(ctx)` to get records directly — no intermediate struct needed.

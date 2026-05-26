@@ -1,43 +1,32 @@
-// Package graphlite is an embedded property graph database for Go.
+// Package graphlite is a zero-infrastructure embedded property graph database
+// for Go.
 //
 // graphlite stores a labelled property graph in a local SQLite file and
-// accepts queries written in openCypher. It implements the neo4j-go-driver
-// v6 API so that application code written against [neo4j.Driver] can switch
-// between a real Neo4j instance and an in-process graphlite database with a
-// one-line change.
+// accepts queries written in openCypher. There is no external process to run,
+// no driver dependency, and no network — just open a file and query.
 //
 // # Quick start
 //
-// Native API — lowest dependency, suitable for tools and scripts:
-//
 //	db, err := graphlite.Open(":memory:")
 //	result, err := db.RunQuery(ctx, `MATCH (n:Person) RETURN n.name AS name`, nil)
+//	for result.Next(ctx) {
+//	    fmt.Println(result.Record().Values()[0])
+//	}
 //
-// Driver compat — drop-in for code already using the Neo4j Go driver:
+// For explicit transaction control:
 //
-//	driver, err := graphlite.NewDriver(":memory:", nil)
-//	result, err := neo4j.ExecuteQuery(ctx, driver, `MATCH (n:Person) RETURN n.name`, nil, neo4j.EagerResultTransformer)
+//	tx, err := db.BeginTx(ctx, false)
+//	result, err := tx.Run(ctx, `CREATE (n:Person {name: $name})`, map[string]any{"name": "Alice"})
+//	err = tx.Commit(ctx)
 //
 // In tests, use [NewTestDB] to open an in-memory database that is closed
 // automatically when the test ends:
 //
 //	db := graphlite.NewTestDB(t)
 //
-// # Switching between graphlite and Neo4j
-//
-// Both implement [neo4j.DriverWithContext]. A constructor that reads from the
-// environment is the recommended pattern:
-//
-//	func newDriver(ctx context.Context) (neo4j.DriverWithContext, error) {
-//	    if uri := os.Getenv("NEO4J_URI"); uri != "" {
-//	        return neo4j.NewDriverWithContext(uri, neo4j.BasicAuth(...))
-//	    }
-//	    return graphlite.NewDriver(":memory:", nil)
-//	}
-//
 // # Options
 //
-// Pass functional options to [Open] or [NewDriver] to tune behaviour:
+// Pass functional options to [Open] to tune behaviour:
 //
 //	db, err := graphlite.Open("graph.db",
 //	    graphlite.WithBusyTimeout(5*time.Second),
@@ -126,33 +115,6 @@ func (d *DB) Snapshot(path string) error {
 	}
 	return sn.Snapshot(path)
 }
-
-// NewDriver opens (or creates) a graphlite database at path and returns a *DB
-// that satisfies the [Driver] interface. It is a convenience alias for [Open]
-// for callers that prefer the neo4j-style constructor name.
-//
-// auth is accepted for API familiarity with the Neo4j Go driver but is silently
-// ignored — graphlite has no authentication layer.
-func NewDriver(path string, _ AuthToken, opts ...Option) (*DB, error) {
-	return Open(path, opts...)
-}
-
-// AuthToken is accepted by [NewDriver] for API compatibility with the Neo4j Go
-// driver. graphlite has no authentication layer; all tokens are ignored.
-type AuthToken struct{}
-
-// NoAuth returns an empty AuthToken. It mirrors neo4j.NoAuth() so that
-// call sites need only change the import when switching drivers.
-func NoAuth() AuthToken { return AuthToken{} }
-
-// NewSession creates a new [Session] backed by this database.
-func (d *DB) NewSession(_ context.Context) Session {
-	return &session{db: d}
-}
-
-// VerifyConnectivity always returns nil — graphlite is an in-process database
-// and is always reachable.
-func (d *DB) VerifyConnectivity(_ context.Context) error { return nil }
 
 // Close releases all resources held by the database. Subsequent calls on a
 // closed DB return errors.

@@ -50,3 +50,39 @@ Key Decisions:
 - Build remained green (interfaces still exist); tests pass 100%
 
 Next Task: task-003 (Remove session layer interfaces and their implementations)
+
+================================================================================
+TASK-003: Remove session layer interfaces and their implementations
+Date: 2026-05-26T01:00:00Z
+================================================================================
+
+Summary:
+Deleted interfaces.go entirely (contained Driver, Session, ManagedTransaction,
+ManagedTransactionWork, Transaction, Result interfaces; ResultTransformer,
+EagerResultTransformer, ExecuteQuery generic helpers). Deleted session.go (contained
+session, managedTx concrete types). Extracted Tx into a new tx.go. Removed NewDriver,
+AuthToken, NoAuth, NewSession, VerifyConnectivity from driver.go. Rewrote the package
+doc comment to describe the v2 native API. Cleaned up test files that referenced deleted
+types: removed ExampleNewDriver from example_test.go, TestEagerResult_Basic from
+result_test.go, and replaced NewEagerResult calls in rapid_test.go with direct Collect
+calls. Also removed EagerResult struct and NewEagerResult/newEagerResult functions from
+result.go. Build and unit tests pass 100%.
+
+Files Changed:
+- interfaces.go (deleted — all session-layer and compat interfaces removed)
+- session.go (deleted — session, managedTx concrete types removed)
+- tx.go (created — Tx type moved from session.go; context params preserved for task-005)
+- driver.go (modified — removed NewDriver, AuthToken, NoAuth, NewSession, VerifyConnectivity; updated package doc)
+- result.go (modified — removed EagerResult struct, NewEagerResult, newEagerResult)
+- example_test.go (modified — removed ExampleNewDriver)
+- result_test.go (modified — removed TestEagerResult_Basic)
+- rapid_test.go (modified — replaced NewEagerResult calls with direct Collect calls)
+- .plans/tasks-graphlite-v2-api-redesign.yml (modified — task-003 status updated)
+
+Key Decisions:
+- Tx was moved to tx.go (not inlined into driver.go) for cleaner separation
+- Context params on Tx.Commit/Rollback/Close preserved; task-005 will remove them
+- interfaces.go deleted entirely (nothing useful remained after all removals)
+- EagerResult removed from result.go (not just interfaces.go) as it was a compat-only type
+
+Next Task: task-004 (Rename QueryResult to Result and free the Result name)

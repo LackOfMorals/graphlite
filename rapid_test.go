@@ -320,19 +320,19 @@ func TestRapid_NodeRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("MATCH (n): %v", err)
 		}
-		result, err := graphlite.NewEagerResult(ctx, qr)
+		records, err := qr.Collect(ctx)
 		if err != nil {
 			t.Fatalf("collect MATCH result: %v", err)
 		}
 
-		if len(result.Records) != n {
-			t.Fatalf("expected %d nodes, got %d", n, len(result.Records))
+		if len(records) != n {
+			t.Fatalf("expected %d nodes, got %d", n, len(records))
 		}
 
 		// Verify each spec against the retrieved nodes. Since SQLite returns nodes
 		// in insertion order (AUTOINCREMENT), we can match by index.
-		nodes := make([]*graphlite.Node, 0, len(result.Records))
-		for _, rec := range result.Records {
+		nodes := make([]*graphlite.Node, 0, len(records))
+		for _, rec := range records {
 			v, ok := rec.Get("n")
 			if !ok {
 				t.Fatalf("record missing key 'n'")
@@ -396,15 +396,15 @@ func TestRapid_LabelRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("MATCH (n): %v", err)
 		}
-		result, err := graphlite.NewEagerResult(ctx, qr2)
+		records2, err := qr2.Collect(ctx)
 		if err != nil {
 			t.Fatalf("collect MATCH result: %v", err)
 		}
-		if len(result.Records) != 1 {
-			t.Fatalf("expected 1 record, got %d", len(result.Records))
+		if len(records2) != 1 {
+			t.Fatalf("expected 1 record, got %d", len(records2))
 		}
 
-		v, ok := result.Records[0].Get("n")
+		v, ok := records2[0].Get("n")
 		if !ok {
 			t.Fatalf("record missing key 'n'")
 		}
@@ -425,11 +425,11 @@ func TestRapid_LabelRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("MATCH by label %q: %v", lbl, err)
 			}
-			res3, err := graphlite.NewEagerResult(ctx, qr3)
+			recs3, err := qr3.Collect(ctx)
 			if err != nil {
 				t.Fatalf("collect MATCH by label %q: %v", lbl, err)
 			}
-			if len(res3.Records) == 0 {
+			if len(recs3) == 0 {
 				t.Fatalf("MATCH (n:%s) returned no results; node has labels %v", lbl, node.Labels)
 			}
 		}
@@ -510,12 +510,12 @@ func TestRapid_JSONImportRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("MATCH (n): %v", err)
 		}
-		res, err := graphlite.NewEagerResult(ctx, qr)
+		nodeRecs, err := qr.Collect(ctx)
 		if err != nil {
 			t.Fatalf("collect MATCH result: %v", err)
 		}
-		if len(res.Records) != nodeCount {
-			t.Fatalf("node count: expected %d, got %d", nodeCount, len(res.Records))
+		if len(nodeRecs) != nodeCount {
+			t.Fatalf("node count: expected %d, got %d", nodeCount, len(nodeRecs))
 		}
 
 		// Verify edge count.
@@ -523,12 +523,12 @@ func TestRapid_JSONImportRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("MATCH ()-[r]->(): %v", err)
 		}
-		res2, err := graphlite.NewEagerResult(ctx, qr2)
+		edgeRecs, err := qr2.Collect(ctx)
 		if err != nil {
 			t.Fatalf("collect edge MATCH result: %v", err)
 		}
-		if len(res2.Records) != edgeCount {
-			t.Fatalf("edge count: expected %d, got %d", edgeCount, len(res2.Records))
+		if len(edgeRecs) != edgeCount {
+			t.Fatalf("edge count: expected %d, got %d", edgeCount, len(edgeRecs))
 		}
 	})
 }

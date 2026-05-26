@@ -49,7 +49,7 @@ tasks:
       `session`, `managedTx` concrete types). Remove `NewDriver`, `AuthToken`, and
       `NoAuth` from `driver.go`. Remove the compile-time interface assertions
       (`var _ Driver = (*DB)(nil)`) that now reference deleted types.
-    status: pending
+    status: completed
     dependencies:
       - task-002
     acceptance_criteria:
@@ -58,7 +58,7 @@ tasks:
       - "`session.go` is deleted"
       - "`driver.go` contains no `NewDriver`, `AuthToken`, or `NoAuth` declarations"
       - "No compile-time assertions reference deleted interface types"
-    completed_at: null
+    completed_at: "2026-05-26T01:00:00Z"
 
   - id: task-004
     title: "Rename QueryResult to Result and free the Result name"
