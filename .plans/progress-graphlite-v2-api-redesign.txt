@@ -245,3 +245,34 @@ Key Decisions:
 - SQLite via modernc.org returns JSON numbers as float64; toInt64 handles float64→int64
 
 Next Task: task-009 (Update test suite for new API surface)
+
+================================================================================
+TASK-009: Update test suite for new API surface
+Date: 2026-05-26T07:00:00Z
+================================================================================
+
+Summary:
+Updated all test files to use the v2.0 API surface. Renamed nine TestQueryResult_*
+functions to TestResult_* in result_test.go to match the renamed type. Fixed
+testdata/integration_test.go: replaced `*graphlite.EagerResult` and
+`graphlite.NewEagerResult` with a local `eagerResult` struct + `collectResult`
+helper that uses `qr.Collect(ctx)` + `qr.Consume(ctx)`. Fixed `db.Close()` →
+`db.Close(context.Background())`. Applied the same treatment to compat/tck_test.go
+(tck build tag). All unit tests pass; vet clean.
+
+Files Changed:
+- result_test.go (modified — renamed TestQueryResult_* → TestResult_* for 9 test functions)
+- testdata/integration_test.go (modified — added eagerResult struct and collectResult helper;
+  replaced graphlite.EagerResult/NewEagerResult; fixed db.Close())
+- compat/tck_test.go (modified — added eagerResult struct and collectResult helper;
+  replaced graphlite.EagerResult/NewEagerResult; fixed db.Close())
+- .plans/tasks-graphlite-v2-api-redesign.yml (modified — task-009 status updated)
+
+Key Decisions:
+- Defined a local `eagerResult` struct in both testdata and compat packages (rather than
+  adding a new exported type to graphlite) — these are test-only helpers, not part of the API
+- `collectResult` calls Collect then Consume (idempotent): Collect gets records; Consume returns
+  the summary struct with counters set on the Result (already present from the write path)
+- No tests were removed for Single/ErrNoRecords/ErrMultipleRecords — they were added in task-007
+
+Next Task: task-010 (Run go mod tidy and verify neo4j driver is fully removed)

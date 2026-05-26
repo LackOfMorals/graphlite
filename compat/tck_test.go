@@ -33,9 +33,25 @@ import (
 // Per-scenario state
 // ─────────────────────────────────────────────────────────────────────────────
 
+// eagerResult holds a fully-collected result with records and execution summary.
+type eagerResult struct {
+	Records []*graphlite.Record
+	Summary graphlite.ResultSummary
+}
+
+// collectResult drains qr into an eagerResult.
+func collectResult(ctx context.Context, qr *graphlite.Result) (*eagerResult, error) {
+	recs, err := qr.Collect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sum, _ := qr.Consume(ctx) // idempotent after Collect; counters are already set
+	return &eagerResult{Records: recs, Summary: sum}, nil
+}
+
 type tckState struct {
 	db         *graphlite.DB
-	lastResult *graphlite.EagerResult
+	lastResult *eagerResult
 	lastError  error
 	// counters accumulated across setup and query steps
 	nodesCreated int
@@ -51,7 +67,7 @@ func newTCKState() *tckState { return &tckState{} }
 
 func (s *tckState) reset() {
 	if s.db != nil {
-		_ = s.db.Close()
+		_ = s.db.Close(context.Background())
 		s.db = nil
 	}
 	s.lastResult = nil
@@ -213,7 +229,7 @@ func (s *tckState) havingExecutedDocString(ctx context.Context, doc *godog.DocSt
 	// executed" steps. The TCK spec treats "And having executed:" as pure setup;
 	// only the "When executing query:" step's side-effects count toward the
 	// "And the side effects should be:" assertions.
-	_, err = graphlite.NewEagerResult(ctx, qr)
+	_, err = collectResult(ctx, qr)
 	if err != nil {
 		return fmt.Errorf("collect result for %q: %w", cypher, err)
 	}
@@ -239,7 +255,7 @@ func (s *tckState) executingControlQueryDocString(ctx context.Context, doc *godo
 		s.lastResult = nil
 		return nil
 	}
-	eager, err := graphlite.NewEagerResult(ctx, qr)
+	eager, err := collectResult(ctx, qr)
 	if err != nil {
 		s.lastError = err
 		s.lastResult = nil
@@ -268,7 +284,7 @@ func (s *tckState) whenExecutingQueryDocString(ctx context.Context, doc *godog.D
 		s.lastResult = nil
 		return nil // capture error; assertion steps will check it
 	}
-	eager, err := graphlite.NewEagerResult(ctx, qr)
+	eager, err := collectResult(ctx, qr)
 	if err != nil {
 		s.lastError = err
 		s.lastResult = nil

@@ -23,7 +23,7 @@ func openDB(t *testing.T) *graphlite.DB {
 // Result cursor tests (via db.RunQuery)
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestQueryResult_Empty(t *testing.T) {
+func TestResult_Empty(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
@@ -42,7 +42,7 @@ func TestQueryResult_Empty(t *testing.T) {
 	}
 }
 
-func TestQueryResult_ScalarColumns(t *testing.T) {
+func TestResult_ScalarColumns(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
@@ -100,7 +100,7 @@ func TestQueryResult_ScalarColumns(t *testing.T) {
 	}
 }
 
-func TestQueryResult_AsMap(t *testing.T) {
+func TestResult_AsMap(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
@@ -121,7 +121,7 @@ func TestQueryResult_AsMap(t *testing.T) {
 	}
 }
 
-func TestQueryResult_Collect(t *testing.T) {
+func TestResult_Collect(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
@@ -144,7 +144,7 @@ func TestQueryResult_Collect(t *testing.T) {
 	}
 }
 
-func TestQueryResult_Keys(t *testing.T) {
+func TestResult_Keys(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
@@ -164,7 +164,7 @@ func TestQueryResult_Keys(t *testing.T) {
 	_, _ = qr.Consume(ctx)
 }
 
-func TestQueryResult_Consume(t *testing.T) {
+func TestResult_Consume(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
@@ -195,7 +195,7 @@ func TestQueryResult_Consume(t *testing.T) {
 // Node / Relationship mapping tests (via db.RunQuery)
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestQueryResult_NodeProjection(t *testing.T) {
+func TestResult_NodeProjection(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
@@ -234,7 +234,7 @@ func TestQueryResult_NodeProjection(t *testing.T) {
 	}
 }
 
-func TestQueryResult_RelationshipProjection(t *testing.T) {
+func TestResult_RelationshipProjection(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
@@ -265,7 +265,7 @@ func TestQueryResult_RelationshipProjection(t *testing.T) {
 	}
 }
 
-func TestQueryResult_NoLabels(t *testing.T) {
+func TestResult_NoLabels(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 

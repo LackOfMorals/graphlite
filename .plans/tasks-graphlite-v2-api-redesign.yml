@@ -172,7 +172,7 @@ tasks:
       (`Session`, `ManagedTransaction`, `EagerResult`, `ResultTransformer`,
       `ExecuteQuery`, `Driver` interface, `QueryResult`). Remove tests for
       deleted symbols. Ensure `go test -tags=unit ./...` passes.
-    status: pending
+    status: completed
     dependencies:
       - task-005
       - task-007
@@ -181,7 +181,7 @@ tasks:
       - "No test file references `QueryResult`, `Session`, `ManagedTransaction`, `Transaction` interface, `EagerResult`, `ResultTransformer`, `ExecuteQuery`, `NewDriver`, `AuthToken`, `NoAuth`, `MapColumnValue`, `SplitLabels`, `NewRecord`, or `NewEagerResult`"
       - "No test file references `BeginTx(ctx, false)` or `tx.Commit(ctx)` / `tx.Rollback(ctx)` / `tx.Close(ctx)`"
       - "Test coverage for `Single`, `ErrNoRecords`, and `ErrMultipleRecords` is added"
-    completed_at: null
+    completed_at: "2026-05-26T07:00:00Z"
 
   - id: task-010
     title: "Run go mod tidy and verify neo4j driver is fully removed"
