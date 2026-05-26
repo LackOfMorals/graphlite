@@ -306,15 +306,15 @@ func TestBeginTx_CommitPersists(t *testing.T) {
 	ctx := context.Background()
 	db := openMemDB(t)
 
-	tx, err := db.BeginTx(ctx, false)
+	tx, err := db.BeginTx(ctx)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
 	if _, err := tx.Run(ctx, `CREATE (n:TxNode {val: "committed"})`, nil); err != nil {
-		_ = tx.Rollback(ctx)
+		_ = tx.Rollback()
 		t.Fatalf("tx.Run: %v", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := tx.Commit(); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 
@@ -339,15 +339,15 @@ func TestBeginTx_RollbackReverts(t *testing.T) {
 	ctx := context.Background()
 	db := openMemDB(t)
 
-	tx, err := db.BeginTx(ctx, false)
+	tx, err := db.BeginTx(ctx)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
 	if _, err := tx.Run(ctx, `CREATE (n:RollbackNode {val: "ephemeral"})`, nil); err != nil {
-		_ = tx.Rollback(ctx)
+		_ = tx.Rollback()
 		t.Fatalf("tx.Run: %v", err)
 	}
-	if err := tx.Rollback(ctx); err != nil {
+	if err := tx.Rollback(); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 
@@ -367,11 +367,11 @@ func TestBeginTx_ClosedAfterCommit(t *testing.T) {
 	ctx := context.Background()
 	db := openMemDB(t)
 
-	tx, err := db.BeginTx(ctx, false)
+	tx, err := db.BeginTx(ctx)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := tx.Commit(); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	// A second Run should fail because the Tx is closed.
@@ -386,11 +386,11 @@ func TestBeginTx_ClosedAfterRollback(t *testing.T) {
 	ctx := context.Background()
 	db := openMemDB(t)
 
-	tx, err := db.BeginTx(ctx, false)
+	tx, err := db.BeginTx(ctx)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
-	if err := tx.Rollback(ctx); err != nil {
+	if err := tx.Rollback(); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	_, err = tx.Run(ctx, `MATCH (n) RETURN n`, nil)

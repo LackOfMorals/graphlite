@@ -15,9 +15,9 @@
 //
 // For explicit transaction control:
 //
-//	tx, err := db.BeginTx(ctx, false)
+//	tx, err := db.BeginTx(ctx)
 //	result, err := tx.Run(ctx, `CREATE (n:Person {name: $name})`, map[string]any{"name": "Alice"})
-//	err = tx.Commit(ctx)
+//	err = tx.Commit()
 //
 // In tests, use [NewTestDB] to open an in-memory database that is closed
 // automatically when the test ends:
@@ -150,10 +150,9 @@ func (d *DB) RunQuery(ctx context.Context, cypherStr string, params map[string]a
 
 // BeginTx starts an explicit transaction and returns a *Tx.
 //
-// The readOnly parameter is accepted for API compatibility but is not enforced
-// at the transaction level — use WithReadOnly() on Open to enforce read-only
-// access across the entire database connection.
-func (d *DB) BeginTx(ctx context.Context, _ bool) (*Tx, error) {
+// Use WithReadOnly() on Open to enforce read-only access across the entire
+// database connection.
+func (d *DB) BeginTx(ctx context.Context) (*Tx, error) {
 	txEx, err := d.st.BeginExecTx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("graphlite: begin transaction: %w", err)

@@ -30,7 +30,7 @@ func (t *Tx) Run(ctx context.Context, cypherStr string, params map[string]any) (
 }
 
 // Commit commits the transaction.
-func (t *Tx) Commit(_ context.Context) error {
+func (t *Tx) Commit() error {
 	if t.done {
 		return fmt.Errorf("graphlite: transaction already closed")
 	}
@@ -42,7 +42,7 @@ func (t *Tx) Commit(_ context.Context) error {
 }
 
 // Rollback aborts the transaction.
-func (t *Tx) Rollback(_ context.Context) error {
+func (t *Tx) Rollback() error {
 	if t.done {
 		return fmt.Errorf("graphlite: transaction already closed")
 	}
@@ -55,9 +55,9 @@ func (t *Tx) Rollback(_ context.Context) error {
 
 // Close rolls back the transaction if it has not already been committed or
 // rolled back. Returns nil if the transaction is already done.
-func (t *Tx) Close(ctx context.Context) error {
+func (t *Tx) Close() error {
 	if t.done {
 		return nil
 	}
-	return t.Rollback(ctx)
+	return t.Rollback()
 }

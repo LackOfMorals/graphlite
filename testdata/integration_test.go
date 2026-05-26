@@ -582,7 +582,7 @@ func TestIntegration_NamedParams_CreateProperty(t *testing.T) {
 	ctx := context.Background()
 
 	// Use a transaction to CREATE with params then query.
-	tx, err := db.BeginTx(ctx, false)
+	tx, err := db.BeginTx(ctx)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
@@ -772,7 +772,7 @@ func TestIntegration_SetProperty_Param(t *testing.T) {
 
 	setup(t, db, `CREATE (n:Config {key: "timeout", value: 30})`)
 
-	tx, err := db.BeginTx(ctx, false)
+	tx, err := db.BeginTx(ctx)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
@@ -946,7 +946,7 @@ func TestIntegration_Transaction_CommitPersists(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
-	tx, err := db.BeginTx(ctx, false)
+	tx, err := db.BeginTx(ctx)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
@@ -972,7 +972,7 @@ func TestIntegration_Transaction_RollbackReverts(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
-	tx, err := db.BeginTx(ctx, false)
+	tx, err := db.BeginTx(ctx)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}

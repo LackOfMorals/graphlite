@@ -114,3 +114,33 @@ Key Decisions:
 - `QueryCounters` and `SetCounters` remain exported; they are removed in task-007
 
 Next Task: task-005 (Remove context parameters from Tx.Commit, Rollback, Close; remove bool from BeginTx)
+
+================================================================================
+TASK-005: Remove context parameters from Tx.Commit, Rollback, Close; remove bool from BeginTx
+Date: 2026-05-26T03:00:00Z
+================================================================================
+
+Summary:
+Removed `context.Context` parameter from `(*Tx) Commit`, `(*Tx) Rollback`, and
+`(*Tx) Close` in `tx.go`. The parameters were already blank identifiers (`_ context.Context`)
+so no behavior changed. Removed the unused `bool` readOnly parameter from
+`(*DB) BeginTx` in `driver.go` — it was also a blank identifier. Updated all
+in-scope callers: driver_test.go and testdata/integration_test.go. Also updated
+the package doc comment in driver.go to reflect the new signatures. The
+`//go:build ignore` example files were left as-is (they use many other deleted
+APIs and are not compiled by `go build ./...`).
+
+Files Changed:
+- tx.go (modified — removed context params from Commit, Rollback, Close)
+- driver.go (modified — removed bool param from BeginTx; updated doc comment)
+- driver_test.go (modified — updated BeginTx, Commit, Rollback call sites)
+- testdata/integration_test.go (modified — updated 4x BeginTx(ctx, false) → BeginTx(ctx))
+- .plans/tasks-graphlite-v2-api-redesign.yml (modified — task-005 status updated)
+
+Key Decisions:
+- `//go:build ignore` example files not updated; they use deleted v1 APIs and
+  are not compiled by `go build ./...` — they will be fully rewritten in task-012
+- importer.go calls Rollback/Commit on store.TxExecer (not graphlite.Tx), no update needed
+- DB.Close ctx param is NOT removed — it's on *DB not *Tx, and is not part of this task
+
+Next Task: task-006 (Add Single(ctx) to Result and new ErrNoRecords / ErrMultipleRecords sentinels)

@@ -88,7 +88,7 @@ tasks:
       `context.Context` parameter — SQLite has no network operation to cancel.
       Update `(*DB) BeginTx` to remove the unused `bool` readOnly parameter.
       Update all internal callers of these methods.
-    status: pending
+    status: completed
     dependencies:
       - task-003
     acceptance_criteria:
@@ -97,7 +97,7 @@ tasks:
       - "`(*Tx) Close() error` has no context parameter"
       - "`(*DB) BeginTx(ctx context.Context) (*Tx, error)` has no bool parameter"
       - "All internal callers updated; `go build ./...` passes"
-    completed_at: null
+    completed_at: "2026-05-26T03:00:00Z"
 
   - id: task-006
     title: "Add Single(ctx) to Result and new ErrNoRecords / ErrMultipleRecords sentinels"
