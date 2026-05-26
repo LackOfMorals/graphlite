@@ -1,0 +1,286 @@
+feature: graphlite-v2-api-redesign
+prd: ./prd-graphlite-v2-api-redesign.md
+created_at: 2026-05-25T00:00:00Z
+updated_at: 2026-05-25T00:00:00Z
+
+tasks:
+  - id: task-001
+    title: "Create feature branch for v2 API redesign"
+    description: |
+      Create a new git branch named `feature/v2-api-redesign` from the current
+      main branch. All subsequent changes in this task list are made on this
+      branch. Verify the branch is checked out and the working tree is clean
+      before proceeding.
+    status: pending
+    dependencies: []
+    acceptance_criteria:
+      - "Branch `feature/v2-api-redesign` exists and is checked out"
+      - "`git status` shows a clean working tree"
+      - "Branch is based on current main (or the active development branch)"
+    completed_at: null
+
+  - id: task-002
+    title: "Delete neo4j-dependent files and packages"
+    description: |
+      Delete `migrate.go`, `migrate_test.go`, and the entire `neo4jadapter/`
+      directory. These are the only files that import the neo4j Go driver, so
+      removing them is the first step toward dropping the dependency. Also
+      remove `neo4j_integration_test.go` and `neo4j_test.go` if they import
+      the neo4j driver directly. The build will be broken after this task —
+      that is expected and resolved by subsequent tasks.
+    status: pending
+    dependencies:
+      - task-001
+    acceptance_criteria:
+      - "`migrate.go` is deleted"
+      - "`migrate_test.go` is deleted"
+      - "`neo4jadapter/` directory is deleted"
+      - "No file in the root package imports `github.com/neo4j/neo4j-go-driver`"
+      - "`neo4j_integration_test.go` and `neo4j_test.go` are deleted or contain no neo4j driver imports"
+    completed_at: null
+
+  - id: task-003
+    title: "Remove session layer interfaces and their implementations"
+    description: |
+      Delete the `Driver`, `Session`, `ManagedTransaction`, `ManagedTransactionWork`,
+      and `Transaction` interfaces from `interfaces.go`. Delete `EagerResult`,
+      `NewEagerResult`, `ResultTransformer[T]`, `EagerResultTransformer()`, and
+      `ExecuteQuery[T]` from `interfaces.go`. Delete `session.go` entirely (contains
+      `session`, `managedTx` concrete types). Remove `NewDriver`, `AuthToken`, and
+      `NoAuth` from `driver.go`. Remove the compile-time interface assertions
+      (`var _ Driver = (*DB)(nil)`) that now reference deleted types.
+    status: pending
+    dependencies:
+      - task-002
+    acceptance_criteria:
+      - "`interfaces.go` contains no `Driver`, `Session`, `Transaction`, `ManagedTransaction`, or `ManagedTransactionWork` declarations"
+      - "`interfaces.go` contains no `EagerResult`, `ResultTransformer`, `EagerResultTransformer`, or `ExecuteQuery` declarations"
+      - "`session.go` is deleted"
+      - "`driver.go` contains no `NewDriver`, `AuthToken`, or `NoAuth` declarations"
+      - "No compile-time assertions reference deleted interface types"
+    completed_at: null
+
+  - id: task-004
+    title: "Rename QueryResult to Result and free the Result name"
+    description: |
+      The v1.x `Result` interface is now deleted (task-003), freeing the name.
+      Rename the concrete `QueryResult` struct and all its methods to `Result`
+      throughout `result.go` and all internal callers in `driver.go`. Update
+      `(*DB) RunQuery` to return `*Result`. Update `(*Tx) Run` to return `*Result`.
+      The `result.go` file should export only `Result` as a concrete type; the
+      old `QueryResult` name must not appear in any exported symbol.
+    status: pending
+    dependencies:
+      - task-003
+    acceptance_criteria:
+      - "No exported symbol named `QueryResult` exists anywhere in the package"
+      - "`type Result struct` is declared in `result.go`"
+      - "`(*DB) RunQuery` return type is `(*Result, error)`"
+      - "`(*Tx) Run` return type is `(*Result, error)`"
+      - "`go build ./...` passes (modulo test files not yet updated)"
+    completed_at: null
+
+  - id: task-005
+    title: "Remove context parameters from Tx.Commit, Rollback, Close; remove bool from BeginTx"
+    description: |
+      Update `(*Tx) Commit`, `(*Tx) Rollback`, and `(*Tx) Close` in `session.go`
+      (now just `tx.go` or kept inline in `driver.go`) to remove the
+      `context.Context` parameter — SQLite has no network operation to cancel.
+      Update `(*DB) BeginTx` to remove the unused `bool` readOnly parameter.
+      Update all internal callers of these methods.
+    status: pending
+    dependencies:
+      - task-003
+    acceptance_criteria:
+      - "`(*Tx) Commit() error` has no context parameter"
+      - "`(*Tx) Rollback() error` has no context parameter"
+      - "`(*Tx) Close() error` has no context parameter"
+      - "`(*DB) BeginTx(ctx context.Context) (*Tx, error)` has no bool parameter"
+      - "All internal callers updated; `go build ./...` passes"
+    completed_at: null
+
+  - id: task-006
+    title: "Add Single(ctx) to Result and new ErrNoRecords / ErrMultipleRecords sentinels"
+    description: |
+      Add `var ErrNoRecords` and `var ErrMultipleRecords` sentinel errors to
+      `types.go`. Implement `(*Result) Single(ctx context.Context) (*Record, error)`
+      on the renamed `Result` type in `result.go`. Single drains up to two records:
+      returns `ErrNoRecords` if zero records are present, returns the record if
+      exactly one, and returns `ErrMultipleRecords` (draining remaining records)
+      if two or more are present. Both sentinels must be checkable with `errors.Is`.
+    status: pending
+    dependencies:
+      - task-004
+    acceptance_criteria:
+      - "`var ErrNoRecords` and `var ErrMultipleRecords` are exported from `types.go`"
+      - "`(*Result) Single(ctx)` is implemented and exported"
+      - "`Single` returns `ErrNoRecords` when the result has no records"
+      - "`Single` returns the record when the result has exactly one record"
+      - "`Single` returns `ErrMultipleRecords` (and drains the cursor) when two or more records are present"
+    completed_at: null
+
+  - id: task-007
+    title: "Unexport internal helpers leaking from result.go"
+    description: |
+      Unexport the following symbols that were previously public but are internal
+      implementation details: `NewQueryResultFromRows` → `newResultFromRows`,
+      `QueryCounters` → `queryCounters`, `SetCounters` → `setCounters`,
+      `MapColumnValue` → `mapColumnValue` (already has a private version),
+      `SplitLabels` → `splitLabels` (already has a private version),
+      `NewRecord` → `newRecord`, `NewEagerResult` (delete, no longer needed).
+      Update all internal callers. Remove any test helpers that relied on these
+      being public, replacing them with tests against the public API.
+    status: pending
+    dependencies:
+      - task-004
+    acceptance_criteria:
+      - "No exported symbol named `NewQueryResultFromRows`, `QueryCounters`, `SetCounters`, `MapColumnValue`, `SplitLabels`, `NewRecord`, or `NewEagerResult` exists"
+      - "Internal callers updated to use unexported versions"
+      - "`go build ./...` passes"
+      - "Tests that previously used exported internal helpers are rewritten against the public API"
+    completed_at: null
+
+  - id: task-008
+    title: "Add generic helpers: GetProperty, GetRecordValue, CollectT, SingleT"
+    description: |
+      Create a new file `helpers.go` in the root package. Define `PropertyValue`
+      and `RecordValue` type-constraint interfaces. Add an unexported `propsGetter`
+      interface (`{ getProps() map[string]any }`) and implement it on both `Node`
+      and `Relationship`. Implement `GetProperty[T PropertyValue]`,
+      `GetRecordValue[T RecordValue]`, `CollectT[T any]`, and `SingleT[T any]`
+      with signatures matching the neo4j driver v6 equivalents. Add tests in a
+      new `helpers_test.go` file.
+    status: pending
+    dependencies:
+      - task-006
+    acceptance_criteria:
+      - "`helpers.go` exists and exports `PropertyValue`, `RecordValue`, `GetProperty`, `GetRecordValue`, `CollectT`, `SingleT`"
+      - "`Node` and `Relationship` implement the unexported `propsGetter` interface"
+      - "`GetProperty` returns correct typed value or error for missing/wrong-type keys"
+      - "`GetRecordValue` returns correct typed value, nil-flag, and error"
+      - "`CollectT` and `SingleT` delegate to `Collect`/`Single` and apply the mapper"
+      - "All four helpers have test coverage in `helpers_test.go`"
+    completed_at: null
+
+  - id: task-009
+    title: "Update test suite for new API surface"
+    description: |
+      Update all test files in the root package and subpackages to use the v2.0
+      API. Replace `BeginTx(ctx, false)` with `BeginTx(ctx)`. Replace
+      `tx.Commit(ctx)`, `tx.Rollback(ctx)`, `tx.Close(ctx)` with their
+      context-free equivalents. Replace any references to deleted types
+      (`Session`, `ManagedTransaction`, `EagerResult`, `ResultTransformer`,
+      `ExecuteQuery`, `Driver` interface, `QueryResult`). Remove tests for
+      deleted symbols. Ensure `go test -tags=unit ./...` passes.
+    status: pending
+    dependencies:
+      - task-005
+      - task-007
+    acceptance_criteria:
+      - "`go test -tags=unit ./...` passes with no failures"
+      - "No test file references `QueryResult`, `Session`, `ManagedTransaction`, `Transaction` interface, `EagerResult`, `ResultTransformer`, `ExecuteQuery`, `NewDriver`, `AuthToken`, `NoAuth`, `MapColumnValue`, `SplitLabels`, `NewRecord`, or `NewEagerResult`"
+      - "No test file references `BeginTx(ctx, false)` or `tx.Commit(ctx)` / `tx.Rollback(ctx)` / `tx.Close(ctx)`"
+      - "Test coverage for `Single`, `ErrNoRecords`, and `ErrMultipleRecords` is added"
+    completed_at: null
+
+  - id: task-010
+    title: "Run go mod tidy and verify neo4j driver is fully removed"
+    description: |
+      Run `go mod tidy` after all neo4j-referencing files are deleted. Verify
+      that `go.mod` and `go.sum` contain no reference to
+      `github.com/neo4j/neo4j-go-driver` at any version, directly or indirectly.
+      Commit the updated `go.mod` and `go.sum`. If any transitive dependency still
+      pulls in the driver, identify and remove it.
+    status: pending
+    dependencies:
+      - task-002
+      - task-009
+    acceptance_criteria:
+      - "`go.mod` contains no line referencing `neo4j/neo4j-go-driver`"
+      - "`go.sum` contains no entry for `neo4j/neo4j-go-driver`"
+      - "`go mod tidy` produces no changes after this task"
+      - "`go build ./...` and `go test -tags=unit ./...` both pass after tidy"
+    completed_at: null
+
+  - id: task-011
+    title: "Rewrite package doc and update all inline comments"
+    description: |
+      Rewrite the package-level doc comment in `driver.go` to reflect the v2.0
+      value proposition: a zero-infrastructure embedded property graph database
+      for Go — no reference to `neo4j.DriverWithContext`, `NewDriver`, or the
+      compat layer. Update inline comments throughout that reference the old
+      session/compat API. Ensure every exported symbol has a doc comment.
+    status: pending
+    dependencies:
+      - task-003
+    acceptance_criteria:
+      - "Package doc in `driver.go` does not mention `neo4j.DriverWithContext`, `DriverCompat`, `NewDriver`, or the compat layer"
+      - "Package doc accurately describes the v2.0 entry point (`Open`, `RunQuery`, `BeginTx`)"
+      - "Every exported symbol in the package has a doc comment"
+      - "`go doc github.com/LackOfMorals/graphlite` output contains no v1.x references"
+    completed_at: null
+
+  - id: task-012
+    title: "Add example programs: backend_switch, copy_from_neo4j, copy_to_neo4j"
+    description: |
+      Create three self-contained example programs under `examples/`, each with
+      its own `go.mod` that imports both graphlite and the neo4j driver. The
+      programs demonstrate: choosing a backend at startup via env var
+      (`examples/backend_switch/`), seeding a local graphlite DB from Neo4j
+      (`examples/copy_from_neo4j/`), and pushing a sub-graph from graphlite to
+      Neo4j (`examples/copy_to_neo4j/`). Each must compile with `go build`.
+    status: pending
+    dependencies:
+      - task-008
+    acceptance_criteria:
+      - "`examples/backend_switch/main.go` and `examples/backend_switch/go.mod` exist and compile"
+      - "`examples/copy_from_neo4j/main.go` and `examples/copy_from_neo4j/go.mod` exist and compile"
+      - "`examples/copy_to_neo4j/main.go` and `examples/copy_to_neo4j/go.mod` exist and compile"
+      - "Each example's `go.mod` imports both `github.com/LackOfMorals/graphlite` and `github.com/neo4j/neo4j-go-driver/v6`"
+      - "Each example includes a brief comment block explaining the pattern it demonstrates"
+    completed_at: null
+
+  - id: task-013
+    title: "Update README to reflect v2.0 value proposition"
+    description: |
+      Rewrite the README to remove all references to `NewDriver`, `DriverCompat`,
+      `CopyFrom`, `CopyTo`, and the "write once against neo4j-go-driver" framing.
+      Replace the opening value proposition with: zero-infrastructure embedded
+      property graph database, openCypher over SQLite, no external process, no
+      driver dependency. Update the Quick Start section to use the native API
+      (`Open`, `RunQuery`, `BeginTx`). Replace the "Switching Between graphlite
+      and Neo4j" section with a pointer to the example programs.
+    status: pending
+    dependencies:
+      - task-012
+    acceptance_criteria:
+      - "README contains no references to `NewDriver`, `DriverCompat`, `CopyFrom`, or `CopyTo`"
+      - "README Quick Start uses `graphlite.Open` and `db.RunQuery` / `db.BeginTx`"
+      - "README links to `examples/` for side-by-side neo4j usage patterns"
+      - "README accurately describes the v2.0 API surface (Open, RunQuery, BeginTx, Result, Record)"
+      - "README retains the Cypher Compatibility table and TCK pass rate"
+    completed_at: null
+
+  - id: task-014
+    title: "Final verification: go vet, TCK, full test suite, exported symbol audit"
+    description: |
+      Run the complete verification checklist: `go vet ./...`, `go test -tags=unit ./...`,
+      the openCypher TCK suite (`go test -tags=tck ./compat/...`), and a manual
+      audit of exported symbols against the PRD API surface reference. Confirm
+      `go.mod` has no neo4j reference. Fix any remaining issues. This task is the
+      gate before the branch is ready for review.
+    status: pending
+    dependencies:
+      - task-009
+      - task-010
+      - task-011
+      - task-012
+      - task-013
+    acceptance_criteria:
+      - "`go vet ./...` produces no output"
+      - "`go test -tags=unit ./...` passes with no failures"
+      - "TCK suite passes 235/235 scenarios"
+      - "No exported symbol exists beyond those listed in the PRD API Surface Reference section"
+      - "`go.mod` contains no reference to `neo4j/neo4j-go-driver`"
+      - "Branch is clean and ready for PR review"
+    completed_at: null
