@@ -171,6 +171,42 @@ func (r *Result) Collect(ctx context.Context) ([]*Record, error) {
 	return recs, nil
 }
 
+// Single returns the one and only record from the result set. It is a
+// convenience method for queries expected to return exactly one row.
+//
+//   - If the result set is empty, Single returns (nil, ErrNoRecords).
+//   - If the result set has exactly one record, Single returns that record and nil.
+//   - If the result set has two or more records, Single drains the cursor and
+//     returns (nil, ErrMultipleRecords).
+//
+// Single always closes the cursor before returning.
+func (r *Result) Single(ctx context.Context) (*Record, error) {
+	if !r.Next(ctx) {
+		// Drain and close.
+		_, _ = r.Consume(ctx)
+		if r.err != nil {
+			return nil, r.err
+		}
+		return nil, ErrNoRecords
+	}
+	rec := r.Record()
+
+	// Check whether a second record exists.
+	if r.Next(ctx) {
+		// Drain remaining records before returning. Any drain/close error is
+		// secondary to ErrMultipleRecords, which is the primary signal here.
+		_, _ = r.Consume(ctx)
+		return nil, ErrMultipleRecords
+	}
+
+	// Exactly one record — close the cursor cleanly.
+	_, _ = r.Consume(ctx)
+	if r.err != nil {
+		return nil, r.err
+	}
+	return rec, nil
+}
+
 // QueryCounters is the exported form of write-operation statistics, used by
 // callers that need to set counter values on a Result (e.g. the execution
 // layer in driver.go after running CREATE / SET / DELETE statements).

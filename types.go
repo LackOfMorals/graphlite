@@ -162,3 +162,11 @@ func (e *ErrImportTooLarge) Error() string {
 // ErrReadOnly is returned when a write query is executed against a database
 // opened with WithReadOnly().
 var ErrReadOnly = fmt.Errorf("graphlite: database is read-only")
+
+// ErrNoRecords is returned by Result.Single when the result set contains no
+// records. It is a sentinel value and can be checked with errors.Is.
+var ErrNoRecords = fmt.Errorf("graphlite: result contains no records")
+
+// ErrMultipleRecords is returned by Result.Single when the result set contains
+// more than one record. It is a sentinel value and can be checked with errors.Is.
+var ErrMultipleRecords = fmt.Errorf("graphlite: result contains multiple records")

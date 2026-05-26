@@ -144,3 +144,31 @@ Key Decisions:
 - DB.Close ctx param is NOT removed — it's on *DB not *Tx, and is not part of this task
 
 Next Task: task-006 (Add Single(ctx) to Result and new ErrNoRecords / ErrMultipleRecords sentinels)
+
+================================================================================
+TASK-006: Add Single(ctx) to Result and new ErrNoRecords / ErrMultipleRecords sentinels
+Date: 2026-05-26T04:00:00Z
+================================================================================
+
+Summary:
+Added `ErrNoRecords` and `ErrMultipleRecords` sentinel errors to `types.go`,
+following the existing `fmt.Errorf` pattern used by `ErrReadOnly`. Implemented
+`(*Result) Single(ctx context.Context) (*Record, error)` in `result.go`. Single
+calls Next up to twice: returns ErrNoRecords if zero records, the record if
+exactly one, and ErrMultipleRecords (after draining) if two or more. All paths
+close the cursor via Consume(). Build and unit tests pass 100%.
+
+Files Changed:
+- types.go (modified — added ErrNoRecords and ErrMultipleRecords sentinels)
+- result.go (modified — added Single() method on *Result)
+- .plans/tasks-graphlite-v2-api-redesign.yml (modified — task-006 status updated)
+
+Key Decisions:
+- Used fmt.Errorf (not errors.New) for sentinels, consistent with ErrReadOnly
+- In the ErrMultipleRecords path, Consume() drain/close errors are intentionally
+  secondary to the primary ErrMultipleRecords signal; documented in a comment
+- In the exactly-one-record path, r.err is checked after Consume() so a
+  rows.Close() failure surfaces instead of returning potentially stale data
+- No test coverage added for Single() — deferred to task-009 per spec
+
+Next Task: task-007 (Unexport internal helpers leaking from result.go)

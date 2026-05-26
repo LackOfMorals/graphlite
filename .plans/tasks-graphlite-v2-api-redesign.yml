@@ -108,7 +108,7 @@ tasks:
       returns `ErrNoRecords` if zero records are present, returns the record if
       exactly one, and returns `ErrMultipleRecords` (draining remaining records)
       if two or more are present. Both sentinels must be checkable with `errors.Is`.
-    status: pending
+    status: completed
     dependencies:
       - task-004
     acceptance_criteria:
@@ -117,7 +117,7 @@ tasks:
       - "`Single` returns `ErrNoRecords` when the result has no records"
       - "`Single` returns the record when the result has exactly one record"
       - "`Single` returns `ErrMultipleRecords` (and drains the cursor) when two or more records are present"
-    completed_at: null
+    completed_at: "2026-05-26T04:00:00Z"
 
   - id: task-007
     title: "Unexport internal helpers leaking from result.go"
