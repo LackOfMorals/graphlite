@@ -269,7 +269,7 @@ tasks:
       audit of exported symbols against the PRD API surface reference. Confirm
       `go.mod` has no neo4j reference. Fix any remaining issues. This task is the
       gate before the branch is ready for review.
-    status: pending
+    status: completed
     dependencies:
       - task-009
       - task-010
@@ -283,4 +283,4 @@ tasks:
       - "No exported symbol exists beyond those listed in the PRD API Surface Reference section"
       - "`go.mod` contains no reference to `neo4j/neo4j-go-driver`"
       - "Branch is clean and ready for PR review"
-    completed_at: null
+    completed_at: "2026-05-26T12:00:00Z"

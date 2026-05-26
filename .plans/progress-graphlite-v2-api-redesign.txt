@@ -412,3 +412,31 @@ Key Decisions:
 - Build and go vet both pass with no output after the change
 
 Next Task: task-014 (Final verification: go vet, TCK, full test suite, exported symbol audit)
+================================================================================
+TASK-014: Final verification: go vet, TCK, full test suite, exported symbol audit
+Date: 2026-05-26T12:00:00Z
+================================================================================
+
+Summary:
+Ran full verification checklist and fixed three issues found during audit:
+- Fixed ExportFormatCSV doc comment (removed reference to unexported helpers)
+- Added json.Number case to toInt64 in helpers.go (doc promised it, switch lacked it)
+- Replaced path-traversal loop in driver.go with slices.Contains
+
+Results:
+- go vet ./...: clean
+- go test -tags=unit ./...: all pass (root, cypher, sql, store packages)
+- go test -tags=tck ./compat/...: pass (235/235 scenarios)
+- go.mod: no neo4j reference
+- go.sum: no neo4j reference
+
+Files Changed:
+- importer.go (fixed ExportFormatCSV doc comment)
+- helpers.go (added encoding/json import; json.Number case in toInt64)
+- driver.go (added slices import; replaced traversal loop with slices.Contains)
+- .plans/tasks-graphlite-v2-api-redesign.yml (task-014 marked completed)
+
+Key Decisions:
+- Added json.Number support to toInt64 rather than just fixing the doc, since it makes the function more correct
+
+Next Task: All tasks complete

@@ -12,8 +12,8 @@ import (
 	"strings"
 )
 
-// ImportFormat identifies the file format accepted by Import.
-type ImportFormat int
+// Format identifies the file format accepted by Import.
+type Format int
 
 const (
 	// FormatJSON is the JSON bulk import format:
@@ -30,20 +30,20 @@ const (
 	//
 	// Node "id" is a file-local string reference; it is not persisted. Edges
 	// reference node "id" values via startId/endId.
-	FormatJSON ImportFormat = 1
+	FormatJSON Format = 1
 
 	// FormatCSVNodes is the CSV bulk import format for node files.
 	// The header row must contain at minimum ":ID" and ":LABEL" columns.
 	// Additional columns become node properties; header format is "name:type"
 	// where type is one of: string (default), int, float, bool.
 	// Example header: :ID,:LABEL,name:string,age:int
-	FormatCSVNodes ImportFormat = 2
+	FormatCSVNodes Format = 2
 
 	// FormatCSVEdges is the CSV bulk import format for edge (relationship) files.
 	// The header row must contain ":START_ID", ":END_ID", and ":TYPE" columns.
 	// Additional columns become edge properties.
 	// Example header: :START_ID,:END_ID,:TYPE,weight:float
-	FormatCSVEdges ImportFormat = 3
+	FormatCSVEdges Format = 3
 )
 
 // ExportFormat identifies the file format produced by Export.
@@ -55,13 +55,11 @@ const (
 	//   {"nodes": [...], "edges": [...]}
 	ExportFormatJSON ExportFormat = 1
 
-	// ExportFormatCSVNodes exports all nodes in the FormatCSVNodes CSV format.
-	// The output header is: :ID,:LABEL,<property columns>
-	ExportFormatCSVNodes ExportFormat = 2
-
-	// ExportFormatCSVEdges exports all edges in the FormatCSVEdges CSV format.
-	// The output header is: :START_ID,:END_ID,:TYPE,<property columns>
-	ExportFormatCSVEdges ExportFormat = 3
+	// ExportFormatCSV exports all nodes followed by all edges in CSV format.
+	// The nodes section uses the FormatCSVNodes layout (:ID,:LABEL,<props>).
+	// The edges section uses the FormatCSVEdges layout (:START_ID,:END_ID,:TYPE,<props>).
+	// The two sections are written back-to-back with no separator.
+	ExportFormatCSV ExportFormat = 2
 )
 
 // importMaxBytes is the maximum number of bytes accepted from the reader.
@@ -102,7 +100,7 @@ type importJSONDocument struct {
 // Security limits (FormatJSON only):
 //   - Maximum input size: 500 MiB (returns ErrImportTooLarge if exceeded)
 //   - Maximum JSON nesting depth: 20 (returns ErrImportDepthExceeded if exceeded)
-func (d *DB) Import(ctx context.Context, r io.Reader, format ImportFormat) error {
+func (d *DB) Import(ctx context.Context, r io.Reader, format Format) error {
 	switch format {
 	case FormatJSON:
 		return d.importJSON(ctx, r)
@@ -118,14 +116,19 @@ func (d *DB) Import(ctx context.Context, r io.Reader, format ImportFormat) error
 // Export writes all nodes and/or edges from the database to w in the requested
 // format.
 //
-// Supported formats: ExportFormatJSON, ExportFormatCSVNodes, ExportFormatCSVEdges.
+// Supported formats: ExportFormatJSON, ExportFormatCSV.
+//
+// ExportFormatCSV writes nodes in FormatCSVNodes layout followed immediately by
+// edges in FormatCSVEdges layout. Use two separate Export calls (with a bytes.Buffer
+// or MultiWriter) if the two sections must be consumed independently.
 func (d *DB) Export(ctx context.Context, w io.Writer, format ExportFormat) error {
 	switch format {
 	case ExportFormatJSON:
 		return d.exportJSON(ctx, w)
-	case ExportFormatCSVNodes:
-		return d.exportCSVNodes(ctx, w)
-	case ExportFormatCSVEdges:
+	case ExportFormatCSV:
+		if err := d.exportCSVNodes(ctx, w); err != nil {
+			return err
+		}
 		return d.exportCSVEdges(ctx, w)
 	default:
 		return fmt.Errorf("graphlite: export: unsupported format %d", format)

@@ -41,6 +41,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/LackOfMorals/graphlite/cypher"
@@ -82,10 +83,8 @@ func Open(path string, opts ...Option) (*DB, error) {
 		if dir, err := filepath.EvalSymlinks(filepath.Dir(cleaned)); err == nil {
 			cleaned = filepath.Join(dir, filepath.Base(cleaned))
 		}
-		for _, part := range strings.Split(cleaned, string(filepath.Separator)) {
-			if part == ".." {
-				return nil, fmt.Errorf("graphlite: Open: path traversal not allowed: %q", path)
-			}
+		if slices.Contains(strings.Split(cleaned, string(filepath.Separator)), "..") {
+			return nil, fmt.Errorf("graphlite: Open: path traversal not allowed: %q", path)
 		}
 	}
 

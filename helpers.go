@@ -2,6 +2,7 @@ package graphlite
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 )
 
@@ -303,6 +304,8 @@ func toInt64(v any) (int64, error) {
 		return int64(n), nil
 	case uint32:
 		return int64(n), nil
+	case json.Number:
+		return n.Int64()
 	default:
 		return 0, fmt.Errorf("not a number: %T", v)
 	}
