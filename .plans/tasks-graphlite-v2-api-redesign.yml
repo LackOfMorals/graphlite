@@ -250,7 +250,7 @@ tasks:
       driver dependency. Update the Quick Start section to use the native API
       (`Open`, `RunQuery`, `BeginTx`). Replace the "Switching Between graphlite
       and Neo4j" section with a pointer to the example programs.
-    status: pending
+    status: completed
     dependencies:
       - task-012
     acceptance_criteria:
@@ -259,7 +259,7 @@ tasks:
       - "README links to `examples/` for side-by-side neo4j usage patterns"
       - "README accurately describes the v2.0 API surface (Open, RunQuery, BeginTx, Result, Record)"
       - "README retains the Cypher Compatibility table and TCK pass rate"
-    completed_at: null
+    completed_at: "2026-05-26T11:00:00Z"
 
   - id: task-014
     title: "Final verification: go vet, TCK, full test suite, exported symbol audit"

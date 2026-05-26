@@ -375,3 +375,40 @@ Key Decisions:
 - go mod tidy was run (not go mod vendor) — these are standalone examples, not the main module
 
 Next Task: task-013
+
+================================================================================
+TASK-013: Update README to reflect v2.0 value proposition
+Date: 2026-05-26T11:00:00Z
+================================================================================
+
+Summary:
+Rewrote README.md to reflect the v2.0 value proposition. Removed all v1.x
+framing: NewDriver, NoAuth, DriverCompat, CopyFrom, CopyTo, ExecuteQuery,
+EagerResult, Session, ManagedTransaction, and the "write once against neo4j-go-driver"
+opening paragraph. Replaced the opening with "zero-infrastructure embedded property
+graph database — openCypher over SQLite, no external process, no driver dependency".
+Rewrote Quick Start to show Open, RunQuery, BeginTx, Collect, Single, and the generic
+helpers. Replaced the "Switching Between graphlite and Neo4j" section with a table
+pointing to the three programs in examples/. Retained the Cypher Compatibility table
+(235/235 TCK pass rate), Architecture section (updated file list to remove deleted
+files and add tx.go, helpers.go, options.go, examples/), Testing section, API Stability
+table (added v2.0 row), and Contributing/License. Added a full API Reference section
+covering DB, Tx, Result methods, generic helpers, and sentinel errors.
+
+Files Changed:
+- README.md (rewritten — all v1.x content removed; accurate v2.0 API documented)
+- .plans/tasks-graphlite-v2-api-redesign.yml (modified — task-013 status updated to completed)
+
+Key Decisions:
+- No v1.x API names appear anywhere in the new README (verified by grep)
+- "Examples: graphlite alongside Neo4j" section uses a table to point to all three
+  example programs with a one-line description of the pattern each demonstrates
+- API Reference section uses a table format for quick lookup; keeps the narrative
+  Quick Start section focused on idiomatic usage patterns
+- `GetRecordValue` signature clarified: second return is true when the record value
+  is nil (null), not when the key is absent
+- Architecture file tree updated: interfaces.go, session.go, migrate.go removed;
+  tx.go, helpers.go, options.go, examples/ added
+- Build and go vet both pass with no output after the change
+
+Next Task: task-014 (Final verification: go vet, TCK, full test suite, exported symbol audit)
