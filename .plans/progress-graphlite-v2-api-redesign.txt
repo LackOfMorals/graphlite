@@ -304,3 +304,34 @@ Key Decisions:
   no further code changes were needed
 
 Next Task: task-011 (Rewrite package doc and update all inline comments)
+
+Next Task: task-011 (Rewrite package doc and update all inline comments)
+
+================================================================================
+TASK-011: Rewrite package doc and update all inline comments
+Date: 2026-05-26T09:00:00Z
+================================================================================
+
+Summary:
+Removed the duplicate package-level doc comment from types.go (it referenced
+"Neo4j Aura" and the v1 compat framing; driver.go already carries the correct
+v2 doc). Updated Node and Relationship type docs to remove "map directly to
+Neo4j driver's Node/Relationship type" and "DriverCompat results can be used
+interchangeably". Updated Option doc to remove deleted NewDriver reference.
+Removed "mirrors the equivalent constraint in the neo4j-go-driver v6 package
+to ease migration" from PropertyValue. All exported symbols have doc comments;
+go doc output is clean of all v1.x references.
+
+Files Changed:
+- types.go (modified — removed duplicate/stale package doc; updated Node and Relationship type docs)
+- options.go (modified — removed NewDriver reference from Option doc)
+- helpers.go (modified — removed neo4j-go-driver migration note from PropertyValue doc)
+
+Key Decisions:
+- types.go had a second `// Package graphlite ...` doc block; removed it entirely
+  (AGENTS.md rule: only one file per package should have a package doc comment)
+- Node and Relationship docs now describe the types on their own terms, not
+  in terms of their neo4j-go-driver equivalents
+- No functional code changed; build, unit tests, go vet, and staticcheck all pass
+
+Next Task: task-012 (Add example programs: backend_switch, copy_from_neo4j, copy_to_neo4j)

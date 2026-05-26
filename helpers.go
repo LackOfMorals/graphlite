@@ -10,8 +10,7 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 // PropertyValue is a type constraint that encompasses all scalar types that may
-// appear as property values in a graphlite graph. It mirrors the equivalent
-// constraint in the neo4j-go-driver v6 package to ease migration.
+// appear as property values in a graphlite graph.
 type PropertyValue interface {
 	~bool |
 		~int | ~int8 | ~int16 | ~int32 | ~int64 |

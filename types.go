@@ -1,13 +1,9 @@
-// Package graphlite provides an embedded, file-based property graph database
-// queryable via a subset of openCypher. It is designed as a zero-infrastructure
-// local substitute for Neo4j Aura in testing and development workflows.
 package graphlite
 
 import "fmt"
 
 // Node represents a graph node with a unique element ID, a set of labels, and
-// a map of properties. All fields map directly to the Neo4j driver's Node type
-// so that DriverCompat results can be used interchangeably.
+// a map of properties.
 type Node struct {
 	// ElementId is the stable string identifier for this node, derived from the
 	// underlying SQLite integer primary key.
@@ -20,8 +16,7 @@ type Node struct {
 	Props map[string]any
 }
 
-// Relationship represents a directed graph edge between two nodes. All fields
-// map directly to the Neo4j driver's Relationship type.
+// Relationship represents a directed graph edge between two nodes.
 type Relationship struct {
 	// ElementId is the stable string identifier for this relationship.
 	ElementId string

@@ -7,7 +7,7 @@ import (
 )
 
 // Option is a functional option for configuring a graphlite database.
-// Pass one or more Options to Open or NewDriver to customise behaviour.
+// Pass one or more Options to [Open] to customise behaviour.
 type Option func(*dbConfig)
 
 type dbConfig struct {

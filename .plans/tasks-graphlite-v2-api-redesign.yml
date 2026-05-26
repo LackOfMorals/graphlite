@@ -210,7 +210,7 @@ tasks:
       for Go — no reference to `neo4j.DriverWithContext`, `NewDriver`, or the
       compat layer. Update inline comments throughout that reference the old
       session/compat API. Ensure every exported symbol has a doc comment.
-    status: pending
+    status: completed
     dependencies:
       - task-003
     acceptance_criteria:
@@ -218,7 +218,7 @@ tasks:
       - "Package doc accurately describes the v2.0 entry point (`Open`, `RunQuery`, `BeginTx`)"
       - "Every exported symbol in the package has a doc comment"
       - "`go doc github.com/LackOfMorals/graphlite` output contains no v1.x references"
-    completed_at: null
+    completed_at: "2026-05-26T09:00:00Z"
 
   - id: task-012
     title: "Add example programs: backend_switch, copy_from_neo4j, copy_to_neo4j"
