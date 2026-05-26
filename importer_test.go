@@ -378,7 +378,7 @@ func TestImport_UnsupportedFormat(t *testing.T) {
 	db := openMem(t)
 	ctx := context.Background()
 
-	err := db.Import(ctx, strings.NewReader(`{}`), graphlite.ImportFormat(99))
+	err := db.Import(ctx, strings.NewReader(`{}`), graphlite.Format(99))
 	if err == nil {
 		t.Fatal("expected error for unsupported format, got nil")
 	}

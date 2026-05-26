@@ -263,7 +263,58 @@ func TestExport_JSON_FieldStructure(t *testing.T) {
 // CSV export tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestExport_CSVNodes_Basic(t *testing.T) {
+// TestExport_CSV_Basic verifies that ExportFormatCSV writes the node section
+// (header :ID,:LABEL,...) followed by the edge section (header :START_ID,...).
+func TestExport_CSV_Basic(t *testing.T) {
+	db := openMem(t)
+	ctx := context.Background()
+
+	seed := `{"nodes":[
+		{"id":"n1","labels":["Person"],"props":{"name":"Alice"}},
+		{"id":"n2","labels":["Person"],"props":{"name":"Bob"}}
+	],"edges":[
+		{"type":"KNOWS","startId":"n1","endId":"n2","props":{}}
+	]}`
+	if err := db.Import(ctx, strings.NewReader(seed), graphlite.FormatJSON); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := db.Export(ctx, &buf, graphlite.ExportFormatCSV); err != nil {
+		t.Fatalf("Export CSV: %v", err)
+	}
+
+	output := buf.String()
+	// Nodes section headers.
+	if !strings.Contains(output, ":ID") {
+		t.Errorf("CSV output missing :ID column, got:\n%s", output)
+	}
+	if !strings.Contains(output, ":LABEL") {
+		t.Errorf("CSV output missing :LABEL column, got:\n%s", output)
+	}
+	// Edges section headers.
+	if !strings.Contains(output, ":START_ID") {
+		t.Errorf("CSV output missing :START_ID column, got:\n%s", output)
+	}
+	if !strings.Contains(output, ":END_ID") {
+		t.Errorf("CSV output missing :END_ID column, got:\n%s", output)
+	}
+	if !strings.Contains(output, ":TYPE") {
+		t.Errorf("CSV output missing :TYPE column, got:\n%s", output)
+	}
+	if !strings.Contains(output, "KNOWS") {
+		t.Errorf("CSV output missing KNOWS edge type, got:\n%s", output)
+	}
+	// node header + 2 node rows + edge header + 1 edge row = 5 lines (ignoring trailing newline).
+	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
+	if len(lines) != 5 {
+		t.Errorf("expected 5 lines (node-header+2 nodes+edge-header+1 edge), got %d:\n%s", len(lines), output)
+	}
+}
+
+// TestExport_CSV_NodesOnly verifies that ExportFormatCSV on a graph with no
+// edges still includes both CSV sections (the edges section being header-only).
+func TestExport_CSV_NodesOnly(t *testing.T) {
 	db := openMem(t)
 	ctx := context.Background()
 
@@ -276,86 +327,21 @@ func TestExport_CSVNodes_Basic(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := db.Export(ctx, &buf, graphlite.ExportFormatCSVNodes); err != nil {
-		t.Fatalf("Export CSV nodes: %v", err)
+	if err := db.Export(ctx, &buf, graphlite.ExportFormatCSV); err != nil {
+		t.Fatalf("Export CSV nodes-only: %v", err)
 	}
 
 	output := buf.String()
-	// Header must be present.
 	if !strings.Contains(output, ":ID") {
 		t.Errorf("CSV output missing :ID column, got:\n%s", output)
 	}
 	if !strings.Contains(output, ":LABEL") {
 		t.Errorf("CSV output missing :LABEL column, got:\n%s", output)
 	}
-	// Two data rows (plus header = 3 lines with trailing newline).
+	// node header + 2 node rows + edge header (no edge rows) = 4 lines.
 	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
-	if len(lines) != 3 {
-		t.Errorf("expected 3 lines (1 header + 2 data), got %d:\n%s", len(lines), output)
-	}
-}
-
-func TestExport_CSVEdges_Basic(t *testing.T) {
-	db := openMem(t)
-	ctx := context.Background()
-
-	seed := `{"nodes":[
-		{"id":"n1","labels":["Person"],"props":{}},
-		{"id":"n2","labels":["Person"],"props":{}}
-	],"edges":[
-		{"type":"KNOWS","startId":"n1","endId":"n2","props":{}}
-	]}`
-	if err := db.Import(ctx, strings.NewReader(seed), graphlite.FormatJSON); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-
-	var buf bytes.Buffer
-	if err := db.Export(ctx, &buf, graphlite.ExportFormatCSVEdges); err != nil {
-		t.Fatalf("Export CSV edges: %v", err)
-	}
-
-	output := buf.String()
-	if !strings.Contains(output, ":START_ID") {
-		t.Errorf("CSV output missing :START_ID, got:\n%s", output)
-	}
-	if !strings.Contains(output, ":END_ID") {
-		t.Errorf("CSV output missing :END_ID, got:\n%s", output)
-	}
-	if !strings.Contains(output, ":TYPE") {
-		t.Errorf("CSV output missing :TYPE, got:\n%s", output)
-	}
-	if !strings.Contains(output, "KNOWS") {
-		t.Errorf("CSV output missing KNOWS edge type, got:\n%s", output)
-	}
-	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
-	if len(lines) != 2 {
-		t.Errorf("expected 2 lines (1 header + 1 data), got %d:\n%s", len(lines), output)
-	}
-}
-
-func TestExport_CSVNodes_ReImport(t *testing.T) {
-	db := openMem(t)
-	ctx := context.Background()
-
-	seed := `{"nodes":[
-		{"id":"n1","labels":["Item"],"props":{"val":"hello"}},
-		{"id":"n2","labels":["Item"],"props":{"val":"world"}}
-	],"edges":[]}`
-	if err := db.Import(ctx, strings.NewReader(seed), graphlite.FormatJSON); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-
-	var buf bytes.Buffer
-	if err := db.Export(ctx, &buf, graphlite.ExportFormatCSVNodes); err != nil {
-		t.Fatalf("Export CSV nodes: %v", err)
-	}
-
-	db2 := openMem(t)
-	if err := db2.Import(ctx, &buf, graphlite.FormatCSVNodes); err != nil {
-		t.Fatalf("re-import CSV nodes: %v", err)
-	}
-	if got := countNodes(t, db2); got != 2 {
-		t.Errorf("re-imported node count: got %d, want 2", got)
+	if len(lines) != 4 {
+		t.Errorf("expected 4 lines (node-header+2 nodes+edge-header), got %d:\n%s", len(lines), output)
 	}
 }
 
