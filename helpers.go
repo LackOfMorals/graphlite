@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -171,22 +172,37 @@ func convertTo[T PropertyValue](raw any) (T, error) {
 		}
 	case uint:
 		if v, err := toInt64(raw); err == nil {
+			if v < 0 {
+				return zero, fmt.Errorf("cannot convert negative value %d to uint", v)
+			}
 			return any(uint(v)).(T), nil
 		}
 	case uint8:
 		if v, err := toInt64(raw); err == nil {
+			if v < 0 || v > math.MaxUint8 {
+				return zero, fmt.Errorf("value %d out of range for uint8", v)
+			}
 			return any(uint8(v)).(T), nil
 		}
 	case uint16:
 		if v, err := toInt64(raw); err == nil {
+			if v < 0 || v > math.MaxUint16 {
+				return zero, fmt.Errorf("value %d out of range for uint16", v)
+			}
 			return any(uint16(v)).(T), nil
 		}
 	case uint32:
 		if v, err := toInt64(raw); err == nil {
+			if v < 0 || v > math.MaxUint32 {
+				return zero, fmt.Errorf("value %d out of range for uint32", v)
+			}
 			return any(uint32(v)).(T), nil
 		}
 	case uint64:
 		if v, err := toInt64(raw); err == nil {
+			if v < 0 {
+				return zero, fmt.Errorf("cannot convert negative value %d to uint64", v)
+			}
 			return any(uint64(v)).(T), nil
 		}
 	case float32:
@@ -258,22 +274,37 @@ func convertToScalar[T RecordValue](raw any) (T, error) {
 		}
 	case uint:
 		if v, err := toInt64(raw); err == nil {
+			if v < 0 {
+				return zero, fmt.Errorf("cannot convert negative value %d to uint", v)
+			}
 			return any(uint(v)).(T), nil
 		}
 	case uint8:
 		if v, err := toInt64(raw); err == nil {
+			if v < 0 || v > math.MaxUint8 {
+				return zero, fmt.Errorf("value %d out of range for uint8", v)
+			}
 			return any(uint8(v)).(T), nil
 		}
 	case uint16:
 		if v, err := toInt64(raw); err == nil {
+			if v < 0 || v > math.MaxUint16 {
+				return zero, fmt.Errorf("value %d out of range for uint16", v)
+			}
 			return any(uint16(v)).(T), nil
 		}
 	case uint32:
 		if v, err := toInt64(raw); err == nil {
+			if v < 0 || v > math.MaxUint32 {
+				return zero, fmt.Errorf("value %d out of range for uint32", v)
+			}
 			return any(uint32(v)).(T), nil
 		}
 	case uint64:
 		if v, err := toInt64(raw); err == nil {
+			if v < 0 {
+				return zero, fmt.Errorf("cannot convert negative value %d to uint64", v)
+			}
 			return any(uint64(v)).(T), nil
 		}
 	case float32:
@@ -288,8 +319,9 @@ func convertToScalar[T RecordValue](raw any) (T, error) {
 	return zero, fmt.Errorf("cannot convert %T to %T", raw, zero)
 }
 
-// toInt64 converts a JSON-decoded numeric value (float64, int64, int, or
-// json.Number) to int64. Returns an error if the value is not numeric.
+// toInt64 converts a JSON-decoded numeric value (float64, int64, int,
+// uint32, uint64, or json.Number) to int64. Returns an error if the value
+// is not numeric or would overflow int64.
 func toInt64(v any) (int64, error) {
 	switch n := v.(type) {
 	case float64:
@@ -300,9 +332,12 @@ func toInt64(v any) (int64, error) {
 		return int64(n), nil
 	case int32:
 		return int64(n), nil
-	case uint64:
-		return int64(n), nil
 	case uint32:
+		return int64(n), nil
+	case uint64:
+		if n > math.MaxInt64 {
+			return 0, fmt.Errorf("uint64 value %d overflows int64", n)
+		}
 		return int64(n), nil
 	case json.Number:
 		return n.Int64()
@@ -322,6 +357,12 @@ func toFloat64(v any) (float64, error) {
 		return float64(n), nil
 	case int32:
 		return float64(n), nil
+	case uint32:
+		return float64(n), nil
+	case uint64:
+		return float64(n), nil
+	case json.Number:
+		return n.Float64()
 	default:
 		return 0, fmt.Errorf("not a number: %T", v)
 	}

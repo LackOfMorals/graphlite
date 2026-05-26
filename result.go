@@ -159,15 +159,16 @@ func (r *Result) Collect(ctx context.Context) ([]*Record, error) {
 		rec := r.Record()
 		recs = append(recs, rec)
 	}
+	if r.rows != nil {
+		if err := r.rows.Close(); err != nil && r.err == nil {
+			r.err = err
+		}
+		r.rows = nil
+	}
+	r.consumed = true
 	if r.err != nil {
 		return nil, r.err
 	}
-	if r.rows != nil {
-		if err := r.rows.Close(); err != nil {
-			return nil, err
-		}
-	}
-	r.consumed = true
 	return recs, nil
 }
 

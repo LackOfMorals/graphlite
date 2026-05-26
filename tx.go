@@ -34,10 +34,10 @@ func (t *Tx) Commit() error {
 	if t.done {
 		return fmt.Errorf("graphlite: transaction already closed")
 	}
-	t.done = true
 	if err := t.rawTx.Commit(); err != nil {
 		return fmt.Errorf("graphlite: commit: %w", err)
 	}
+	t.done = true
 	return nil
 }
 
