@@ -1,0 +1,21 @@
+================================================================================
+TASK-001: Create feature branch for v2 API redesign
+Date: 2026-05-26T00:00:00Z
+================================================================================
+
+Summary:
+Created the `feature/v2-api-redesign` git branch from main. Also created
+AGENTS.md at the project root with build/test/vet feedback commands, package
+layout, architectural constraints, storage schema, and gotchas derived from
+the worktree AGENTS.md.
+
+Files Changed:
+- AGENTS.md (created — project feedback commands and architecture docs)
+- .plans/tasks-graphlite-v2-api-redesign.yml (modified — task-001 status updated)
+
+Key Decisions:
+- Created AGENTS.md at project root (was only in worktrees previously)
+- Used `go test -tags=unit` as the primary unit test command per project convention
+- Noted vendor shim is a v1-only concern; v2 removes the neo4j driver dependency
+
+Next Task: task-002 (Delete neo4j-dependent files and packages)

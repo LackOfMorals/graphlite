@@ -11,13 +11,13 @@ tasks:
       main branch. All subsequent changes in this task list are made on this
       branch. Verify the branch is checked out and the working tree is clean
       before proceeding.
-    status: pending
+    status: completed
     dependencies: []
     acceptance_criteria:
       - "Branch `feature/v2-api-redesign` exists and is checked out"
       - "`git status` shows a clean working tree"
       - "Branch is based on current main (or the active development branch)"
-    completed_at: null
+    completed_at: "2026-05-26T00:00:00Z"
 
   - id: task-002
     title: "Delete neo4j-dependent files and packages"
