@@ -150,7 +150,7 @@ tasks:
       `GetRecordValue[T RecordValue]`, `CollectT[T any]`, and `SingleT[T any]`
       with signatures matching the neo4j driver v6 equivalents. Add tests in a
       new `helpers_test.go` file.
-    status: pending
+    status: completed
     dependencies:
       - task-006
     acceptance_criteria:
@@ -160,7 +160,7 @@ tasks:
       - "`GetRecordValue` returns correct typed value, nil-flag, and error"
       - "`CollectT` and `SingleT` delegate to `Collect`/`Single` and apply the mapper"
       - "All four helpers have test coverage in `helpers_test.go`"
-    completed_at: null
+    completed_at: "2026-05-26T06:00:00Z"
 
   - id: task-009
     title: "Update test suite for new API surface"

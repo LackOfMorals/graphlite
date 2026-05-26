@@ -215,3 +215,33 @@ Key Decisions:
   they will be addressed in task-009
 
 Next Task: task-008 (Add generic helpers: GetProperty, GetRecordValue, CollectT, SingleT)
+
+================================================================================
+TASK-008: Add generic helpers: GetProperty, GetRecordValue, CollectT, SingleT
+Date: 2026-05-26T06:00:00Z
+================================================================================
+
+Summary:
+Created helpers.go with two type-constraint interfaces (PropertyValue, RecordValue),
+an unexported propsGetter interface implemented by both Node and Relationship, and
+four exported generic helpers: GetProperty[T], GetRecordValue[T], CollectT[T], and
+SingleT[T]. Implemented internal convertTo/convertToScalar/toInt64/toFloat64 helpers
+to handle JSON-decoded numeric coercions (float64, int64, int, etc.). Added
+helpers_test.go with 12 tests covering all four helpers, including error paths.
+All unit tests pass; go vet clean.
+
+Files Changed:
+- helpers.go (created — PropertyValue, RecordValue, propsGetter, GetProperty, GetRecordValue, CollectT, SingleT)
+- helpers_test.go (created — 12 tests covering all four helpers)
+- .plans/tasks-graphlite-v2-api-redesign.yml (modified — task-008 status updated)
+
+Key Decisions:
+- propsGetter is unexported; GetProperty takes propsGetter (not interface{}) — callers
+  pass *Node or *Relationship directly, type safety enforced at compile time
+- convertTo uses a type-switch on `any(zero).(type)` to avoid reflection; the switch
+  exhausts all cases of the PropertyValue constraint
+- convertRecordValueTo delegates *Node/*Relationship cases first, then calls convertToScalar
+  for scalar types — avoids duplicating the numeric switch
+- SQLite via modernc.org returns JSON numbers as float64; toInt64 handles float64→int64
+
+Next Task: task-009 (Update test suite for new API surface)
