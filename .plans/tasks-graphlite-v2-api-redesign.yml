@@ -28,7 +28,7 @@ tasks:
       remove `neo4j_integration_test.go` and `neo4j_test.go` if they import
       the neo4j driver directly. The build will be broken after this task —
       that is expected and resolved by subsequent tasks.
-    status: pending
+    status: completed
     dependencies:
       - task-001
     acceptance_criteria:
@@ -37,7 +37,7 @@ tasks:
       - "`neo4jadapter/` directory is deleted"
       - "No file in the root package imports `github.com/neo4j/neo4j-go-driver`"
       - "`neo4j_integration_test.go` and `neo4j_test.go` are deleted or contain no neo4j driver imports"
-    completed_at: null
+    completed_at: "2026-05-26T00:00:00Z"
 
   - id: task-003
     title: "Remove session layer interfaces and their implementations"

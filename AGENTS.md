@@ -90,3 +90,5 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - Only one file per package should have a `// Package foo ...` doc comment.
 - `buildPropsJSON` sorts property keys for deterministic SQL output.
 - `buildMatchForWriteSelect` sorts `scope.Names()` before building columns for deterministic SQL.
+- When deleting files that export methods used in `example_test.go`, also remove the corresponding `Example*` functions — otherwise `go build ./...` fails even if core tests pass.
+- neo4j driver stays in go.mod as indirect dep until task-010 runs `go mod tidy` after all referencing code is gone.

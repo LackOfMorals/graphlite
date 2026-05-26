@@ -19,3 +19,34 @@ Key Decisions:
 - Noted vendor shim is a v1-only concern; v2 removes the neo4j driver dependency
 
 Next Task: task-002 (Delete neo4j-dependent files and packages)
+
+================================================================================
+TASK-002: Delete neo4j-dependent files and packages
+Date: 2026-05-26T00:00:00Z
+================================================================================
+
+Summary:
+Deleted all files that directly import or implement the neo4j-go-driver compat
+layer: migrate.go, migrate_test.go, neo4jadapter/, neo4j_integration_test.go,
+neo4j_test.go. Also removed ExampleDB_CopyFrom and ExampleDB_CopyTo from
+example_test.go (they called the now-deleted CopyFrom/CopyTo methods). Build
+and unit tests pass after removals — the "expected breakage" did not occur
+because the Session/Driver interfaces still exist in interfaces.go (removed
+in task-003).
+
+Files Changed:
+- migrate.go (deleted — CopyFrom/CopyTo methods using Driver/Session/ManagedTransaction)
+- migrate_test.go (deleted — tests for CopyFrom/CopyTo)
+- neo4jadapter/adapter.go (deleted — entire package that imported neo4j-go-driver/v6)
+- neo4j_integration_test.go (deleted — tier 1/2/3 integration tests using old session API)
+- neo4j_test.go (deleted — tests for NewDriver, NoAuth, Session, Transaction interfaces)
+- example_test.go (modified — removed ExampleDB_CopyFrom and ExampleDB_CopyTo)
+- .plans/tasks-graphlite-v2-api-redesign.yml (modified — task-002 status updated)
+
+Key Decisions:
+- example_test.go needed cleanup alongside the deletions (CopyFrom/CopyTo examples
+  called deleted methods); this was done to keep the build green
+- neo4j driver is still in go.mod as indirect dep (go.sum cleanup is task-010)
+- Build remained green (interfaces still exist); tests pass 100%
+
+Next Task: task-003 (Remove session layer interfaces and their implementations)
