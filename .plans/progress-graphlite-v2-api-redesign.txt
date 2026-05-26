@@ -276,3 +276,31 @@ Key Decisions:
 - No tests were removed for Single/ErrNoRecords/ErrMultipleRecords — they were added in task-007
 
 Next Task: task-010 (Run go mod tidy and verify neo4j driver is fully removed)
+
+================================================================================
+TASK-010: Run go mod tidy and verify neo4j driver is fully removed
+Date: 2026-05-26T08:00:00Z
+================================================================================
+
+Summary:
+Ran `go mod tidy` to remove `github.com/neo4j/neo4j-go-driver/v6 v6.1.0` from
+go.mod and its two hash lines from go.sum. Ran `go mod vendor` to sync the
+vendor directory (removed `vendor/github.com/neo4j/` subtree). Verified that
+no live Go code imports the driver — remaining "neo4j" string occurrences are
+only in doc comments (helpers.go) and in `//go:build ignore` example files.
+Build, unit tests, and go vet all pass; `go mod tidy` is idempotent.
+
+Files Changed:
+- go.mod (modified — removed neo4j/neo4j-go-driver/v6 indirect dependency)
+- go.sum (modified — removed two neo4j/neo4j-go-driver/v6 hash lines)
+- vendor/github.com/neo4j/ (deleted — entire subtree removed by go mod vendor)
+- vendor/modules.txt (modified — neo4j entry removed)
+
+Key Decisions:
+- `go mod vendor` was required in addition to `go mod tidy` because the repo
+  uses a vendor directory; without it, `go build` complained about inconsistent
+  vendoring
+- The only remaining "neo4j" string references are in comments, not imports;
+  no further code changes were needed
+
+Next Task: task-011 (Rewrite package doc and update all inline comments)

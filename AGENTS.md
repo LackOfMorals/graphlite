@@ -91,7 +91,7 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - `buildPropsJSON` sorts property keys for deterministic SQL output.
 - `buildMatchForWriteSelect` sorts `scope.Names()` before building columns for deterministic SQL.
 - When deleting files that export methods used in `example_test.go`, also remove the corresponding `Example*` functions — otherwise `go build ./...` fails even if core tests pass.
-- neo4j driver stays in go.mod as indirect dep until task-010 runs `go mod tidy` after all referencing code is gone.
+- neo4j driver fully removed in task-010 via `go mod tidy` + `go mod vendor` (both needed — the repo uses a vendor dir; `go build` fails with "inconsistent vendoring" if only tidy is run).
 - `Tx` type lives in `tx.go` (moved from session.go in task-003); context params on Commit/Rollback/Close were removed in task-005 — all were blank identifiers so no behavior changed.
 - `DB.Close` still takes `context.Context`; only `Tx` methods are context-free.
 - `//go:build ignore` example files (examples/getting_started, examples/neo4j_roundtrip) use deleted v1 APIs and are not compiled by `go build ./...` — they will be rewritten in task-012.

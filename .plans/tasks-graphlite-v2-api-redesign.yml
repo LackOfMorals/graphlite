@@ -191,7 +191,7 @@ tasks:
       `github.com/neo4j/neo4j-go-driver` at any version, directly or indirectly.
       Commit the updated `go.mod` and `go.sum`. If any transitive dependency still
       pulls in the driver, identify and remove it.
-    status: pending
+    status: completed
     dependencies:
       - task-002
       - task-009
@@ -200,7 +200,7 @@ tasks:
       - "`go.sum` contains no entry for `neo4j/neo4j-go-driver`"
       - "`go mod tidy` produces no changes after this task"
       - "`go build ./...` and `go test -tags=unit ./...` both pass after tidy"
-    completed_at: null
+    completed_at: "2026-05-26T08:00:00Z"
 
   - id: task-011
     title: "Rewrite package doc and update all inline comments"
