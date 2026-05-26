@@ -82,9 +82,9 @@ func TestQueryResult_Empty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	qr, err := NewQueryResultFromRows(rows)
+	qr, err := NewResultFromRows(rows)
 	if err != nil {
-		t.Fatalf("NewQueryResultFromRows: %v", err)
+		t.Fatalf("NewResultFromRows: %v", err)
 	}
 
 	ctx := context.Background()
@@ -114,9 +114,9 @@ func TestQueryResult_ScalarColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	qr, err := NewQueryResultFromRows(rows)
+	qr, err := NewResultFromRows(rows)
 	if err != nil {
-		t.Fatalf("NewQueryResultFromRows: %v", err)
+		t.Fatalf("NewResultFromRows: %v", err)
 	}
 
 	ctx := context.Background()
@@ -173,9 +173,9 @@ func TestQueryResult_AsMap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	qr, err := NewQueryResultFromRows(rows)
+	qr, err := NewResultFromRows(rows)
 	if err != nil {
-		t.Fatalf("NewQueryResultFromRows: %v", err)
+		t.Fatalf("NewResultFromRows: %v", err)
 	}
 
 	ctx := context.Background()
@@ -199,9 +199,9 @@ func TestQueryResult_Collect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	qr, err := NewQueryResultFromRows(rows)
+	qr, err := NewResultFromRows(rows)
 	if err != nil {
-		t.Fatalf("NewQueryResultFromRows: %v", err)
+		t.Fatalf("NewResultFromRows: %v", err)
 	}
 
 	recs, err := qr.Collect(context.Background())
@@ -222,9 +222,9 @@ func TestQueryResult_Keys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	qr, err := NewQueryResultFromRows(rows)
+	qr, err := NewResultFromRows(rows)
 	if err != nil {
-		t.Fatalf("NewQueryResultFromRows: %v", err)
+		t.Fatalf("NewResultFromRows: %v", err)
 	}
 	keys := qr.Keys()
 	if len(keys) != 2 || keys[0] != "x" || keys[1] != "id" {
@@ -240,9 +240,9 @@ func TestQueryResult_Consume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	qr, err := NewQueryResultFromRows(rows)
+	qr, err := NewResultFromRows(rows)
 	if err != nil {
-		t.Fatalf("NewQueryResultFromRows: %v", err)
+		t.Fatalf("NewResultFromRows: %v", err)
 	}
 	sum, err := qr.Consume(context.Background())
 	if err != nil {
@@ -275,9 +275,9 @@ func TestQueryResult_NodeProjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	qr, err := NewQueryResultFromRows(rows)
+	qr, err := NewResultFromRows(rows)
 	if err != nil {
-		t.Fatalf("NewQueryResultFromRows: %v", err)
+		t.Fatalf("NewResultFromRows: %v", err)
 	}
 
 	ctx := context.Background()
@@ -325,9 +325,9 @@ func TestQueryResult_RelationshipProjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	qr, err := NewQueryResultFromRows(rows)
+	qr, err := NewResultFromRows(rows)
 	if err != nil {
-		t.Fatalf("NewQueryResultFromRows: %v", err)
+		t.Fatalf("NewResultFromRows: %v", err)
 	}
 
 	ctx := context.Background()
@@ -370,9 +370,9 @@ func TestQueryResult_NoLabels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	qr, err := NewQueryResultFromRows(rows)
+	qr, err := NewResultFromRows(rows)
 	if err != nil {
-		t.Fatalf("NewQueryResultFromRows: %v", err)
+		t.Fatalf("NewResultFromRows: %v", err)
 	}
 
 	ctx := context.Background()
@@ -400,9 +400,9 @@ func TestCounters_WriteOperation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	qr, err := NewQueryResultFromRows(rows)
+	qr, err := NewResultFromRows(rows)
 	if err != nil {
-		t.Fatalf("NewQueryResultFromRows: %v", err)
+		t.Fatalf("NewResultFromRows: %v", err)
 	}
 	// Simulate a write operation that created 2 nodes and 1 relationship.
 	qr.SetCounters(QueryCounters{
@@ -435,9 +435,9 @@ func TestCounters_Zero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	qr, err := NewQueryResultFromRows(rows)
+	qr, err := NewResultFromRows(rows)
 	if err != nil {
-		t.Fatalf("NewQueryResultFromRows: %v", err)
+		t.Fatalf("NewResultFromRows: %v", err)
 	}
 	sum, _ := qr.Consume(context.Background())
 	c := sum.Counters()

@@ -69,7 +69,7 @@ tasks:
       `(*DB) RunQuery` to return `*Result`. Update `(*Tx) Run` to return `*Result`.
       The `result.go` file should export only `Result` as a concrete type; the
       old `QueryResult` name must not appear in any exported symbol.
-    status: pending
+    status: completed
     dependencies:
       - task-003
     acceptance_criteria:
@@ -78,7 +78,7 @@ tasks:
       - "`(*DB) RunQuery` return type is `(*Result, error)`"
       - "`(*Tx) Run` return type is `(*Result, error)`"
       - "`go build ./...` passes (modulo test files not yet updated)"
-    completed_at: null
+    completed_at: "2026-05-26T02:00:00Z"
 
   - id: task-005
     title: "Remove context parameters from Tx.Commit, Rollback, Close; remove bool from BeginTx"

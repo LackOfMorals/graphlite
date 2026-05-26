@@ -16,13 +16,13 @@ type Tx struct {
 	done  bool
 }
 
-// Run executes cypherStr within the transaction and returns a lazy *QueryResult.
+// Run executes cypherStr within the transaction and returns a lazy *Result.
 // The result must be consumed before running another query on the same
 // transaction — SQLite does not support multiple concurrent cursors on one
 // connection.
 //
 // params may be nil if the query has no parameters.
-func (t *Tx) Run(ctx context.Context, cypherStr string, params map[string]any) (*QueryResult, error) {
+func (t *Tx) Run(ctx context.Context, cypherStr string, params map[string]any) (*Result, error) {
 	if t.done {
 		return nil, fmt.Errorf("graphlite: transaction already closed")
 	}

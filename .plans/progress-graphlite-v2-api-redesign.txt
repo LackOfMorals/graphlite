@@ -86,3 +86,31 @@ Key Decisions:
 - EagerResult removed from result.go (not just interfaces.go) as it was a compat-only type
 
 Next Task: task-004 (Rename QueryResult to Result and free the Result name)
+
+================================================================================
+TASK-004: Rename QueryResult to Result and free the Result name
+Date: 2026-05-26T02:00:00Z
+================================================================================
+
+Summary:
+Renamed the concrete `QueryResult` struct to `Result` throughout the codebase.
+Updated all method receivers, internal helpers, and return types. `(*DB) RunQuery`
+and `(*Tx) Run` now return `*Result`. Also renamed `newInMemoryQueryResult` →
+`newInMemoryResult` and `NewQueryResultFromRows` → `NewResultFromRows`. Updated
+`result_test.go` to use the new constructor name so unit tests remain green.
+
+Files Changed:
+- result.go (modified — QueryResult → Result throughout; method receivers, constructors, helpers)
+- driver.go (modified — all QueryResult references updated to Result)
+- tx.go (modified — Run return type updated to *Result)
+- result_test.go (modified — NewQueryResultFromRows → NewResultFromRows in all call sites)
+- sql/translator.go (modified — updated stale comment referencing QueryResult)
+- .plans/tasks-graphlite-v2-api-redesign.yml (modified — task-004 status updated)
+
+Key Decisions:
+- `NewResultFromRows` stays exported for now; task-007 will unexport it to `newResultFromRows`
+- Updated result_test.go mechanically (just the constructor rename) to keep unit tests passing;
+  deeper test cleanup (QueryCounters, SetCounters, MapColumnValue, SplitLabels) deferred to task-007/009
+- `QueryCounters` and `SetCounters` remain exported; they are removed in task-007
+
+Next Task: task-005 (Remove context parameters from Tx.Commit, Rollback, Close; remove bool from BeginTx)

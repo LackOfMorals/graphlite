@@ -126,13 +126,13 @@ func (d *DB) Close(_ context.Context) error {
 }
 
 // RunQuery executes cypherStr in auto-commit mode and returns a lazy
-// QueryResult cursor. The caller must consume or exhaust the result to release
+// Result cursor. The caller must consume or exhaust the result to release
 // underlying resources.
 //
 // params may be nil if the query has no parameters.
 // Returns ErrReadOnly if the database was opened with WithReadOnly and the
 // query contains write statements.
-func (d *DB) RunQuery(ctx context.Context, cypherStr string, params map[string]any) (*QueryResult, error) {
+func (d *DB) RunQuery(ctx context.Context, cypherStr string, params map[string]any) (*Result, error) {
 	if d.readOnly {
 		sqlResult, err := buildSQLResult(cypherStr, params)
 		if err != nil {
@@ -171,7 +171,7 @@ type execer = store.Execer
 
 // runQuery is the execution pipeline for auto-commit mode.
 // beginTxFn is used to start an implicit transaction for atomic MERGE operations.
-func runQuery(ctx context.Context, ex execer, cypherStr string, params map[string]any, beginTxFn func(context.Context) (store.TxExecer, error)) (*QueryResult, error) {
+func runQuery(ctx context.Context, ex execer, cypherStr string, params map[string]any, beginTxFn func(context.Context) (store.TxExecer, error)) (*Result, error) {
 	sqlResult, err := buildSQLResult(cypherStr, params)
 	if err != nil {
 		return nil, err
@@ -181,7 +181,7 @@ func runQuery(ctx context.Context, ex execer, cypherStr string, params map[strin
 
 // runQueryTx is the execution pipeline for transactional mode. beginTxFn is
 // nil because the caller already holds an open transaction.
-func runQueryTx(ctx context.Context, ex execer, cypherStr string, params map[string]any) (*QueryResult, error) {
+func runQueryTx(ctx context.Context, ex execer, cypherStr string, params map[string]any) (*Result, error) {
 	sqlResult, err := buildSQLResult(cypherStr, params)
 	if err != nil {
 		return nil, err
@@ -233,12 +233,12 @@ func buildSQLResult(cypherStr string, params map[string]any) (glsql.Result, erro
 // ─────────────────────────────────────────────────────────────────────────────
 
 // executeStatements runs all Statements in sqlResult against ex. For a single
-// KindSelect it returns a lazy QueryResult; for write statements it executes
-// each in order and returns a QueryResult with counters.
+// KindSelect it returns a lazy Result; for write statements it executes
+// each in order and returns a Result with counters.
 //
 // beginTxFn, when non-nil, is called to start an implicit transaction for
 // atomic MERGE operations. Pass nil when ex is already transaction-scoped.
-func executeStatements(ctx context.Context, ex execer, sqlResult glsql.Result, beginTxFn func(context.Context) (store.TxExecer, error)) (*QueryResult, error) {
+func executeStatements(ctx context.Context, ex execer, sqlResult glsql.Result, beginTxFn func(context.Context) (store.TxExecer, error)) (*Result, error) {
 	stmts := sqlResult.Statements
 	if len(stmts) == 0 {
 		return nil, fmt.Errorf("graphlite: no SQL statements to execute")
@@ -250,7 +250,7 @@ func executeStatements(ctx context.Context, ex execer, sqlResult glsql.Result, b
 		if err != nil {
 			return nil, fmt.Errorf("graphlite: query: %w", err)
 		}
-		qr, err := NewQueryResultFromRows(rows)
+		qr, err := NewResultFromRows(rows)
 		if err != nil {
 			_ = rows.Close()
 			return nil, err
@@ -308,7 +308,7 @@ func executeStatements(ctx context.Context, ex execer, sqlResult glsql.Result, b
 //   - Runs the match SELECT to get matched IDs row by row.
 //   - For each matched row: runs write statements, then runs the final SELECT.
 //   - Collects all result rows across all matched rows.
-func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement) (*QueryResult, error) {
+func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement) (*Result, error) {
 	selectStmt := stmts[len(stmts)-1]
 	writeStmts := stmts[:len(stmts)-1]
 	var ctr QueryCounters
@@ -335,7 +335,7 @@ func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement
 			if err != nil {
 				return nil, err
 			}
-			qr := newInMemoryQueryResult(keys, []*Record{nullRec})
+			qr := newInMemoryResult(keys, []*Record{nullRec})
 			qr.SetCounters(ctr)
 			return qr, nil
 		}
@@ -370,7 +370,7 @@ func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement
 			if err != nil {
 				return nil, fmt.Errorf("graphlite: write-then-select query: %w", err)
 			}
-			rowQR, err := NewQueryResultFromRows(rows)
+			rowQR, err := NewResultFromRows(rows)
 			if err != nil {
 				_ = rows.Close()
 				return nil, err
@@ -385,7 +385,7 @@ func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement
 			allRecords = append(allRecords, recs...)
 		}
 
-		qr := newInMemoryQueryResult(resultKeys, allRecords)
+		qr := newInMemoryResult(resultKeys, allRecords)
 		qr.SetCounters(ctr)
 		return qr, nil
 	}
@@ -407,7 +407,7 @@ func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement
 	if err != nil {
 		return nil, fmt.Errorf("graphlite: write-then-select query: %w", err)
 	}
-	qr, err := NewQueryResultFromRows(rows)
+	qr, err := NewResultFromRows(rows)
 	if err != nil {
 		_ = rows.Close()
 		return nil, err
@@ -421,7 +421,7 @@ func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement
 // The statement sequence may begin with a KindMatchForWrite SELECT that returns
 // matched variable IDs row by row. When encountered, we execute all subsequent
 // write statements once per matched row, accumulating counters across all rows.
-func execWriteStatements(ctx context.Context, ex execer, stmts []glsql.Statement) (*QueryResult, error) {
+func execWriteStatements(ctx context.Context, ex execer, stmts []glsql.Statement) (*Result, error) {
 	// idMap: Cypher variable name → int64 row ID from INSERT or MATCH SELECT.
 	idMap := make(map[string]int64)
 	var ctr QueryCounters
@@ -466,7 +466,7 @@ func execWriteStatements(ctx context.Context, ex execer, stmts []glsql.Statement
 		}
 	}
 
-	qr := &QueryResult{consumed: true}
+	qr := &Result{consumed: true}
 	qr.SetCounters(ctr)
 	return qr, nil
 }

@@ -9,14 +9,14 @@ import (
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
-// QueryResult — lazy streaming result cursor
+// Result — lazy streaming result cursor
 // ─────────────────────────────────────────────────────────────────────────────
 
-// QueryResult is a lazy streaming cursor over a set of query result records.
+// Result is a lazy streaming cursor over a set of query result records.
 // Call Next to advance the cursor, Record to read the current row, and
 // Err to check for iteration errors. Always call Consume or allow the
 // iteration to exhaust the result to release underlying resources.
-type QueryResult struct {
+type Result struct {
 	rows     *sql.Rows
 	keys     []string
 	record   *Record
@@ -30,31 +30,31 @@ type QueryResult struct {
 	inMemoryPos int
 }
 
-// NewQueryResultFromRows constructs a QueryResult, deriving column names from
+// NewResultFromRows constructs a Result, deriving column names from
 // the *sql.Rows itself. Returns an error if column names cannot be read.
-func NewQueryResultFromRows(rows *sql.Rows) (*QueryResult, error) {
+func NewResultFromRows(rows *sql.Rows) (*Result, error) {
 	cols, err := rows.Columns()
 	if err != nil {
 		return nil, fmt.Errorf("graphlite: read column names: %w", err)
 	}
-	return &QueryResult{rows: rows, keys: cols}, nil
+	return &Result{rows: rows, keys: cols}, nil
 }
 
-// newInMemoryQueryResult constructs a QueryResult backed by a pre-collected
+// newInMemoryResult constructs a Result backed by a pre-collected
 // slice of records. Used by the write-then-select execution path when multiple
 // result rows must be assembled from several SELECT calls.
-func newInMemoryQueryResult(keys []string, records []*Record) *QueryResult {
+func newInMemoryResult(keys []string, records []*Record) *Result {
 	if records == nil {
 		records = []*Record{}
 	}
-	return &QueryResult{
+	return &Result{
 		keys:     keys,
 		inMemory: records,
 	}
 }
 
 // Keys returns the projection key names for this result set.
-func (r *QueryResult) Keys() []string {
+func (r *Result) Keys() []string {
 	out := make([]string, len(r.keys))
 	copy(out, r.keys)
 	return out
@@ -62,7 +62,7 @@ func (r *QueryResult) Keys() []string {
 
 // Next advances the cursor to the next record. Returns true if a record is
 // available; false when the result set is exhausted or an error occurred.
-func (r *QueryResult) Next(_ context.Context) bool {
+func (r *Result) Next(_ context.Context) bool {
 	if r.consumed || r.err != nil {
 		return false
 	}
@@ -105,12 +105,12 @@ func (r *QueryResult) Next(_ context.Context) bool {
 
 // Record returns the current record. Returns nil if Next has not been called
 // or if the cursor is exhausted.
-func (r *QueryResult) Record() *Record {
+func (r *Result) Record() *Record {
 	return r.record
 }
 
 // Err returns the first error encountered during iteration.
-func (r *QueryResult) Err() error {
+func (r *Result) Err() error {
 	return r.err
 }
 
@@ -118,7 +118,7 @@ func (r *QueryResult) Err() error {
 // returns the ResultSummary. After Consume returns the cursor is closed.
 // Consume is safe to call on a write result (where rows is nil) and on
 // in-memory results.
-func (r *QueryResult) Consume(_ context.Context) (ResultSummary, error) {
+func (r *Result) Consume(_ context.Context) (ResultSummary, error) {
 	if r.inMemory != nil {
 		r.consumed = true
 		return &resultSummary{counters: r.counters}, r.err
@@ -143,7 +143,7 @@ func (r *QueryResult) Consume(_ context.Context) (ResultSummary, error) {
 // Collect drains all remaining records into a slice and closes the cursor.
 // Collect is safe to call on a write result (where rows is nil) and on
 // in-memory results.
-func (r *QueryResult) Collect(ctx context.Context) ([]*Record, error) {
+func (r *Result) Collect(ctx context.Context) ([]*Record, error) {
 	// Fast path for in-memory results: return remaining records directly.
 	if r.inMemory != nil {
 		recs := r.inMemory[r.inMemoryPos:]
@@ -172,7 +172,7 @@ func (r *QueryResult) Collect(ctx context.Context) ([]*Record, error) {
 }
 
 // QueryCounters is the exported form of write-operation statistics, used by
-// callers that need to set counter values on a QueryResult (e.g. the execution
+// callers that need to set counter values on a Result (e.g. the execution
 // layer in driver.go after running CREATE / SET / DELETE statements).
 type QueryCounters struct {
 	NodesCreated         int
@@ -184,7 +184,7 @@ type QueryCounters struct {
 
 // SetCounters attaches write-operation counters to this result. It is called
 // by the execution layer after executing write statements.
-func (r *QueryResult) SetCounters(c QueryCounters) {
+func (r *Result) SetCounters(c QueryCounters) {
 	r.counters = queryCounters{
 		nodesCreated:         c.NodesCreated,
 		nodesDeleted:         c.NodesDeleted,
