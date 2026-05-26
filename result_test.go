@@ -2,92 +2,35 @@ package graphlite_test
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
-	"fmt"
+	"errors"
 	"testing"
 
-	. "github.com/LackOfMorals/graphlite"
-	_ "modernc.org/sqlite"
+	"github.com/LackOfMorals/graphlite"
 )
 
-// openTestDB opens an in-memory SQLite database with the graphlite schema for
-// use in result-layer tests. It applies the minimal schema needed to run
-// parameterised SELECTs against known data.
-func openTestDB(t *testing.T) *sql.DB {
+// openDB opens an in-memory graphlite database for use in result-layer tests.
+func openDB(t *testing.T) *graphlite.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := graphlite.Open(":memory:")
 	if err != nil {
-		t.Fatalf("openTestDB: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
-	t.Cleanup(func() { db.Close() })
-
-	schema := `
-CREATE TABLE nodes (
-    id     INTEGER PRIMARY KEY AUTOINCREMENT,
-    labels TEXT    NOT NULL DEFAULT '',
-    props  JSON    NOT NULL DEFAULT '{}'
-);
-CREATE TABLE edges (
-    id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    type     TEXT    NOT NULL,
-    start_id INTEGER NOT NULL REFERENCES nodes(id),
-    end_id   INTEGER NOT NULL REFERENCES nodes(id),
-    props    JSON    NOT NULL DEFAULT '{}'
-);
-`
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatalf("openTestDB schema: %v", err)
-	}
+	t.Cleanup(func() { db.Close(context.Background()) })
 	return db
 }
 
-// insertNode inserts a node and returns its ID.
-func insertNode(t *testing.T, db *sql.DB, labels string, props map[string]any) int64 {
-	t.Helper()
-	p, _ := json.Marshal(props)
-	res, err := db.Exec(
-		`INSERT INTO nodes (labels, props) VALUES (?, json(?))`,
-		labels, string(p),
-	)
-	if err != nil {
-		t.Fatalf("insertNode: %v", err)
-	}
-	id, _ := res.LastInsertId()
-	return id
-}
-
-// insertEdge inserts an edge and returns its ID.
-func insertEdge(t *testing.T, db *sql.DB, typ string, startID, endID int64, props map[string]any) int64 {
-	t.Helper()
-	p, _ := json.Marshal(props)
-	res, err := db.Exec(
-		`INSERT INTO edges (type, start_id, end_id, props) VALUES (?, ?, ?, json(?))`,
-		typ, startID, endID, string(p),
-	)
-	if err != nil {
-		t.Fatalf("insertEdge: %v", err)
-	}
-	id, _ := res.LastInsertId()
-	return id
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
-// QueryResult tests
+// Result cursor tests (via db.RunQuery)
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestQueryResult_Empty(t *testing.T) {
-	db := openTestDB(t)
-	rows, err := db.Query("SELECT id, labels, props FROM nodes")
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	qr, err := NewResultFromRows(rows)
-	if err != nil {
-		t.Fatalf("NewResultFromRows: %v", err)
-	}
-
+	db := openDB(t)
 	ctx := context.Background()
+
+	qr, err := db.RunQuery(ctx, `MATCH (n:Person) RETURN n`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
 	if qr.Next(ctx) {
 		t.Error("expected Next to return false on empty result set")
 	}
@@ -100,26 +43,20 @@ func TestQueryResult_Empty(t *testing.T) {
 }
 
 func TestQueryResult_ScalarColumns(t *testing.T) {
-	db := openTestDB(t)
-	insertNode(t, db, "Person", map[string]any{"name": "Alice", "age": 30})
-	insertNode(t, db, "Person", map[string]any{"name": "Bob", "age": 25})
-
-	// Scalar projection: json_extract for name and age.
-	rows, err := db.Query(
-		`SELECT json_extract(props, '$.name') AS name,
-		        json_extract(props, '$.age')  AS age
-		 FROM nodes
-		 WHERE labels = 'Person'
-		 ORDER BY json_extract(props, '$.name')`)
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	qr, err := NewResultFromRows(rows)
-	if err != nil {
-		t.Fatalf("NewResultFromRows: %v", err)
-	}
-
+	db := openDB(t)
 	ctx := context.Background()
+
+	if _, err := db.RunQuery(ctx, `CREATE (:Person {name: "Alice", age: 30})`, nil); err != nil {
+		t.Fatalf("create Alice: %v", err)
+	}
+	if _, err := db.RunQuery(ctx, `CREATE (:Person {name: "Bob", age: 25})`, nil); err != nil {
+		t.Fatalf("create Bob: %v", err)
+	}
+
+	qr, err := db.RunQuery(ctx, `MATCH (n:Person) RETURN n.name AS name, n.age AS age ORDER BY n.name`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
 
 	if !qr.Next(ctx) {
 		t.Fatalf("expected first record, got none; err=%v", qr.Err())
@@ -136,7 +73,6 @@ func TestQueryResult_ScalarColumns(t *testing.T) {
 	if !ok {
 		t.Error("expected age key in record")
 	}
-	// SQLite returns JSON numbers as float64 or int64 depending on query.
 	switch a := age.(type) {
 	case float64:
 		if a != 30 {
@@ -165,20 +101,17 @@ func TestQueryResult_ScalarColumns(t *testing.T) {
 }
 
 func TestQueryResult_AsMap(t *testing.T) {
-	db := openTestDB(t)
-	insertNode(t, db, "Person", map[string]any{"name": "Carol"})
-
-	rows, err := db.Query(
-		`SELECT json_extract(props, '$.name') AS name FROM nodes LIMIT 1`)
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	qr, err := NewResultFromRows(rows)
-	if err != nil {
-		t.Fatalf("NewResultFromRows: %v", err)
-	}
-
+	db := openDB(t)
 	ctx := context.Background()
+
+	if _, err := db.RunQuery(ctx, `CREATE (:Person {name: "Carol"})`, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	qr, err := db.RunQuery(ctx, `MATCH (n:Person) RETURN n.name AS name LIMIT 1`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
 	if !qr.Next(ctx) {
 		t.Fatal("expected one record")
 	}
@@ -189,22 +122,20 @@ func TestQueryResult_AsMap(t *testing.T) {
 }
 
 func TestQueryResult_Collect(t *testing.T) {
-	db := openTestDB(t)
-	insertNode(t, db, "X", map[string]any{"v": 1})
-	insertNode(t, db, "X", map[string]any{"v": 2})
-	insertNode(t, db, "X", map[string]any{"v": 3})
+	db := openDB(t)
+	ctx := context.Background()
 
-	rows, err := db.Query(
-		`SELECT json_extract(props, '$.v') AS v FROM nodes ORDER BY id`)
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	qr, err := NewResultFromRows(rows)
-	if err != nil {
-		t.Fatalf("NewResultFromRows: %v", err)
+	for _, v := range []int{1, 2, 3} {
+		if _, err := db.RunQuery(ctx, `CREATE (:X {v: $v})`, map[string]any{"v": v}); err != nil {
+			t.Fatalf("create: %v", err)
+		}
 	}
 
-	recs, err := qr.Collect(context.Background())
+	qr, err := db.RunQuery(ctx, `MATCH (n:X) RETURN n.v AS v ORDER BY n.v`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
+	recs, err := qr.Collect(ctx)
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
@@ -214,37 +145,38 @@ func TestQueryResult_Collect(t *testing.T) {
 }
 
 func TestQueryResult_Keys(t *testing.T) {
-	db := openTestDB(t)
-	insertNode(t, db, "Z", map[string]any{"x": 1})
+	db := openDB(t)
+	ctx := context.Background()
 
-	rows, err := db.Query(
-		`SELECT json_extract(props, '$.x') AS x, id FROM nodes LIMIT 1`)
-	if err != nil {
-		t.Fatalf("query: %v", err)
+	if _, err := db.RunQuery(ctx, `CREATE (:Z {x: 1})`, nil); err != nil {
+		t.Fatalf("create: %v", err)
 	}
-	qr, err := NewResultFromRows(rows)
+
+	qr, err := db.RunQuery(ctx, `MATCH (n:Z) RETURN n.x AS x, n AS z LIMIT 1`, nil)
 	if err != nil {
-		t.Fatalf("NewResultFromRows: %v", err)
+		t.Fatalf("RunQuery: %v", err)
 	}
 	keys := qr.Keys()
-	if len(keys) != 2 || keys[0] != "x" || keys[1] != "id" {
+	if len(keys) != 2 || keys[0] != "x" || keys[1] != "z" {
 		t.Errorf("unexpected keys %v", keys)
 	}
+	// Drain to avoid resource leak.
+	_, _ = qr.Consume(ctx)
 }
 
 func TestQueryResult_Consume(t *testing.T) {
-	db := openTestDB(t)
-	insertNode(t, db, "A", map[string]any{})
+	db := openDB(t)
+	ctx := context.Background()
 
-	rows, err := db.Query(`SELECT id FROM nodes`)
-	if err != nil {
-		t.Fatalf("query: %v", err)
+	if _, err := db.RunQuery(ctx, `CREATE (:A)`, nil); err != nil {
+		t.Fatalf("create: %v", err)
 	}
-	qr, err := NewResultFromRows(rows)
+
+	qr, err := db.RunQuery(ctx, `MATCH (n:A) RETURN n`, nil)
 	if err != nil {
-		t.Fatalf("NewResultFromRows: %v", err)
+		t.Fatalf("RunQuery: %v", err)
 	}
-	sum, err := qr.Consume(context.Background())
+	sum, err := qr.Consume(ctx)
 	if err != nil {
 		t.Fatalf("Consume: %v", err)
 	}
@@ -260,27 +192,21 @@ func TestQueryResult_Consume(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Node / Relationship mapping tests
+// Node / Relationship mapping tests (via db.RunQuery)
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestQueryResult_NodeProjection(t *testing.T) {
-	db := openTestDB(t)
-	id := insertNode(t, db, "Person,Employee", map[string]any{"name": "Dave", "age": 40})
-
-	// Simulate the translator's whole-node VarExpr projection.
-	nodeSQL := fmt.Sprintf(
-		`SELECT json_object('id', n.id, 'labels', n.labels, 'props', json(n.props)) AS n
-		 FROM nodes n WHERE n.id = %d`, id)
-	rows, err := db.Query(nodeSQL)
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	qr, err := NewResultFromRows(rows)
-	if err != nil {
-		t.Fatalf("NewResultFromRows: %v", err)
-	}
-
+	db := openDB(t)
 	ctx := context.Background()
+
+	if _, err := db.RunQuery(ctx, `CREATE (:Person:Employee {name: "Dave", age: 40})`, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	qr, err := db.RunQuery(ctx, `MATCH (n:Person) RETURN n`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
 	if !qr.Next(ctx) {
 		t.Fatalf("expected one record; err=%v", qr.Err())
 	}
@@ -288,12 +214,9 @@ func TestQueryResult_NodeProjection(t *testing.T) {
 	if !ok {
 		t.Fatal("expected key 'n' in record")
 	}
-	node, ok := val.(*Node)
+	node, ok := val.(*graphlite.Node)
 	if !ok {
 		t.Fatalf("expected *Node got %T: %v", val, val)
-	}
-	if node.ElementId != fmt.Sprintf("%d", id) {
-		t.Errorf("ElementId: want %d got %s", id, node.ElementId)
 	}
 	// Labels
 	wantLabels := []string{"Person", "Employee"}
@@ -312,25 +235,17 @@ func TestQueryResult_NodeProjection(t *testing.T) {
 }
 
 func TestQueryResult_RelationshipProjection(t *testing.T) {
-	db := openTestDB(t)
-	idA := insertNode(t, db, "Person", map[string]any{"name": "Alice"})
-	idB := insertNode(t, db, "Person", map[string]any{"name": "Bob"})
-	relID := insertEdge(t, db, "KNOWS", idA, idB, map[string]any{"since": 2020})
-
-	// Simulate the translator's whole-rel VarExpr projection.
-	relSQL := fmt.Sprintf(
-		`SELECT json_object('id', r.id, 'type', r.type, 'start_id', r.start_id, 'end_id', r.end_id, 'props', json(r.props)) AS r
-		 FROM edges r WHERE r.id = %d`, relID)
-	rows, err := db.Query(relSQL)
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	qr, err := NewResultFromRows(rows)
-	if err != nil {
-		t.Fatalf("NewResultFromRows: %v", err)
-	}
-
+	db := openDB(t)
 	ctx := context.Background()
+
+	if _, err := db.RunQuery(ctx, `CREATE (:Person {name:"Alice"})-[:KNOWS {since: 2020}]->(:Person {name:"Bob"})`, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	qr, err := db.RunQuery(ctx, `MATCH (:Person)-[r:KNOWS]->(:Person) RETURN r`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
 	if !qr.Next(ctx) {
 		t.Fatalf("expected one record; err=%v", qr.Err())
 	}
@@ -338,21 +253,12 @@ func TestQueryResult_RelationshipProjection(t *testing.T) {
 	if !ok {
 		t.Fatal("expected key 'r' in record")
 	}
-	rel, ok := val.(*Relationship)
+	rel, ok := val.(*graphlite.Relationship)
 	if !ok {
 		t.Fatalf("expected *Relationship got %T: %v", val, val)
 	}
-	if rel.ElementId != fmt.Sprintf("%d", relID) {
-		t.Errorf("ElementId: want %d got %s", relID, rel.ElementId)
-	}
 	if rel.Type != "KNOWS" {
 		t.Errorf("Type: want KNOWS got %s", rel.Type)
-	}
-	if rel.StartElementId != fmt.Sprintf("%d", idA) {
-		t.Errorf("StartElementId: want %d got %s", idA, rel.StartElementId)
-	}
-	if rel.EndElementId != fmt.Sprintf("%d", idB) {
-		t.Errorf("EndElementId: want %d got %s", idB, rel.EndElementId)
 	}
 	if rel.Props["since"] == nil {
 		t.Error("expected props[since] to be non-nil")
@@ -360,27 +266,22 @@ func TestQueryResult_RelationshipProjection(t *testing.T) {
 }
 
 func TestQueryResult_NoLabels(t *testing.T) {
-	db := openTestDB(t)
-	id := insertNode(t, db, "", map[string]any{})
-
-	nodeSQL := fmt.Sprintf(
-		`SELECT json_object('id', n.id, 'labels', n.labels, 'props', json(n.props)) AS n
-		 FROM nodes n WHERE n.id = %d`, id)
-	rows, err := db.Query(nodeSQL)
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	qr, err := NewResultFromRows(rows)
-	if err != nil {
-		t.Fatalf("NewResultFromRows: %v", err)
-	}
-
+	db := openDB(t)
 	ctx := context.Background()
+
+	if _, err := db.RunQuery(ctx, `CREATE (n)`, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	qr, err := db.RunQuery(ctx, `MATCH (n) RETURN n`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
 	if !qr.Next(ctx) {
 		t.Fatalf("expected one record; err=%v", qr.Err())
 	}
 	val, _ := qr.Record().Get("n")
-	node, ok := val.(*Node)
+	node, ok := val.(*graphlite.Node)
 	if !ok {
 		t.Fatalf("expected *Node got %T", val)
 	}
@@ -390,36 +291,24 @@ func TestQueryResult_NoLabels(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Counters tests
+// Counters tests (via write queries)
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestCounters_WriteOperation(t *testing.T) {
-	db := openTestDB(t)
+	db := openDB(t)
+	ctx := context.Background()
 
-	rows, err := db.Query(`SELECT id FROM nodes WHERE 1=0`) // empty result
+	qr, err := db.RunQuery(ctx, `CREATE (:X), (:X)`, nil)
 	if err != nil {
-		t.Fatalf("query: %v", err)
+		t.Fatalf("RunQuery: %v", err)
 	}
-	qr, err := NewResultFromRows(rows)
-	if err != nil {
-		t.Fatalf("NewResultFromRows: %v", err)
-	}
-	// Simulate a write operation that created 2 nodes and 1 relationship.
-	qr.SetCounters(QueryCounters{
-		NodesCreated:         2,
-		RelationshipsCreated: 1,
-	})
-
-	sum, err := qr.Consume(context.Background())
+	sum, err := qr.Consume(ctx)
 	if err != nil {
 		t.Fatalf("Consume: %v", err)
 	}
 	c := sum.Counters()
 	if c.NodesCreated() != 2 {
 		t.Errorf("NodesCreated: want 2 got %d", c.NodesCreated())
-	}
-	if c.RelationshipsCreated() != 1 {
-		t.Errorf("RelationshipsCreated: want 1 got %d", c.RelationshipsCreated())
 	}
 	if !c.ContainsUpdates() {
 		t.Error("ContainsUpdates should be true")
@@ -429,17 +318,33 @@ func TestCounters_WriteOperation(t *testing.T) {
 	}
 }
 
+func TestCounters_CreateRelationship(t *testing.T) {
+	db := openDB(t)
+	ctx := context.Background()
+
+	qr, err := db.RunQuery(ctx, `CREATE (:A)-[:LINK]->(:B)`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
+	sum, err := qr.Consume(ctx)
+	if err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+	c := sum.Counters()
+	if c.RelationshipsCreated() != 1 {
+		t.Errorf("RelationshipsCreated: want 1 got %d", c.RelationshipsCreated())
+	}
+}
+
 func TestCounters_Zero(t *testing.T) {
-	db := openTestDB(t)
-	rows, err := db.Query(`SELECT id FROM nodes WHERE 1=0`)
+	db := openDB(t)
+	ctx := context.Background()
+
+	qr, err := db.RunQuery(ctx, `MATCH (n:NoSuchLabel) RETURN n`, nil)
 	if err != nil {
-		t.Fatalf("query: %v", err)
+		t.Fatalf("RunQuery: %v", err)
 	}
-	qr, err := NewResultFromRows(rows)
-	if err != nil {
-		t.Fatalf("NewResultFromRows: %v", err)
-	}
-	sum, _ := qr.Consume(context.Background())
+	sum, _ := qr.Consume(ctx)
 	c := sum.Counters()
 	if c.ContainsUpdates() {
 		t.Error("ContainsUpdates should be false for zero counters")
@@ -447,92 +352,85 @@ func TestCounters_Zero(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Column mapper unit tests
+// Single / ErrNoRecords / ErrMultipleRecords tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestMapColumnValue_NonJSON(t *testing.T) {
-	// Non-JSON strings are returned unchanged.
-	got := MapColumnValue("hello")
-	if got != "hello" {
-		t.Errorf("expected hello got %v", got)
+func TestSingle_ExactlyOne(t *testing.T) {
+	db := openDB(t)
+	ctx := context.Background()
+
+	if _, err := db.RunQuery(ctx, `CREATE (:Unique {id: 1})`, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	qr, err := db.RunQuery(ctx, `MATCH (n:Unique) RETURN n`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
+	rec, err := qr.Single(ctx)
+	if err != nil {
+		t.Fatalf("Single: unexpected error: %v", err)
+	}
+	if rec == nil {
+		t.Fatal("Single: expected record, got nil")
 	}
 }
 
-func TestMapColumnValue_NodeJSON(t *testing.T) {
-	// Props is a nested JSON object, as SQLite returns it via json_object(..., json(props)).
-	j := `{"id":1,"labels":"Person","props":{"name":"Alice"}}`
-	got := MapColumnValue(j)
-	if _, ok := got.(*Node); !ok {
-		t.Errorf("expected *Node got %T: %v", got, got)
+func TestSingle_ErrNoRecords(t *testing.T) {
+	db := openDB(t)
+	ctx := context.Background()
+
+	qr, err := db.RunQuery(ctx, `MATCH (n:Empty) RETURN n`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
+	_, err = qr.Single(ctx)
+	if !errors.Is(err, graphlite.ErrNoRecords) {
+		t.Errorf("expected ErrNoRecords, got %v", err)
 	}
 }
 
-func TestMapColumnValue_RelJSON(t *testing.T) {
-	// Props is a nested JSON object.
-	j := `{"id":5,"type":"KNOWS","start_id":1,"end_id":2,"props":{}}`
-	got := MapColumnValue(j)
-	if _, ok := got.(*Relationship); !ok {
-		t.Errorf("expected *Relationship got %T: %v", got, got)
+func TestSingle_ErrMultipleRecords(t *testing.T) {
+	db := openDB(t)
+	ctx := context.Background()
+
+	if _, err := db.RunQuery(ctx, `CREATE (:Multi), (:Multi)`, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	qr, err := db.RunQuery(ctx, `MATCH (n:Multi) RETURN n`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
+	_, err = qr.Single(ctx)
+	if !errors.Is(err, graphlite.ErrMultipleRecords) {
+		t.Errorf("expected ErrMultipleRecords, got %v", err)
 	}
 }
 
-func TestMapColumnValue_RegularJSONObject(t *testing.T) {
-	// A JSON object that is neither a node nor a rel shape should be returned
-	// as the original string (no panic).
-	j := `{"foo":"bar"}`
-	got := MapColumnValue(j)
-	if _, ok := got.(*Node); ok {
-		t.Error("should not be decoded as Node")
-	}
-	if _, ok := got.(*Relationship); ok {
-		t.Error("should not be decoded as Relationship")
-	}
-	// The original string should be returned.
-	if got != j {
-		t.Errorf("expected original string back, got %v", got)
-	}
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Record helper tests
+// ─────────────────────────────────────────────────────────────────────────────
 
-func TestMapColumnValue_ByteSlice(t *testing.T) {
-	// []byte input (as returned by some SQLite drivers for JSON columns).
-	// Props is a nested JSON object, not a string.
-	j := `{"id":3,"labels":"X","props":{}}`
-	got := MapColumnValue([]byte(j))
-	if _, ok := got.(*Node); !ok {
-		t.Errorf("expected *Node got %T", got)
-	}
-}
-
-func TestSplitLabels(t *testing.T) {
-	cases := []struct {
-		in   string
-		want []string
-	}{
-		{"", nil},
-		{"Person", []string{"Person"}},
-		{"Person,Employee", []string{"Person", "Employee"}},
-		{"A,B,C", []string{"A", "B", "C"}},
-	}
-	for _, tc := range cases {
-		got := SplitLabels(tc.in)
-		if len(got) != len(tc.want) {
-			t.Errorf("SplitLabels(%q): len want %d got %d: %v", tc.in, len(tc.want), len(got), got)
-			continue
-		}
-		for i := range tc.want {
-			if got[i] != tc.want[i] {
-				t.Errorf("SplitLabels(%q)[%d]: want %q got %q", tc.in, i, tc.want[i], got[i])
-			}
-		}
-	}
-}
-
-// Ensure Record.Get returns false for missing keys.
+// Ensure Record.Get returns false for missing keys (via a query-created record).
 func TestRecord_MissingKey(t *testing.T) {
-	rec := NewRecord([]string{"a", "b"}, []any{1, 2})
+	db := openDB(t)
+	ctx := context.Background()
+
+	if _, err := db.RunQuery(ctx, `CREATE (:T {a: 1})`, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	qr, err := db.RunQuery(ctx, `MATCH (n:T) RETURN n.a AS a`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
+	if !qr.Next(ctx) {
+		t.Fatal("expected one record")
+	}
+	rec := qr.Record()
 	_, ok := rec.Get("missing")
 	if ok {
 		t.Error("expected false for missing key")
 	}
+	_, _ = qr.Consume(ctx)
 }
-

@@ -130,7 +130,7 @@ tasks:
       `NewRecord` → `newRecord`, `NewEagerResult` (delete, no longer needed).
       Update all internal callers. Remove any test helpers that relied on these
       being public, replacing them with tests against the public API.
-    status: pending
+    status: completed
     dependencies:
       - task-004
     acceptance_criteria:
@@ -138,7 +138,7 @@ tasks:
       - "Internal callers updated to use unexported versions"
       - "`go build ./...` passes"
       - "Tests that previously used exported internal helpers are rewritten against the public API"
-    completed_at: null
+    completed_at: "2026-05-26T05:00:00Z"
 
   - id: task-008
     title: "Add generic helpers: GetProperty, GetRecordValue, CollectT, SingleT"

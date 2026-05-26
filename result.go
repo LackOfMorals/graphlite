@@ -30,9 +30,9 @@ type Result struct {
 	inMemoryPos int
 }
 
-// NewResultFromRows constructs a Result, deriving column names from
+// newResultFromRows constructs a Result, deriving column names from
 // the *sql.Rows itself. Returns an error if column names cannot be read.
-func NewResultFromRows(rows *sql.Rows) (*Result, error) {
+func newResultFromRows(rows *sql.Rows) (*Result, error) {
 	cols, err := rows.Columns()
 	if err != nil {
 		return nil, fmt.Errorf("graphlite: read column names: %w", err)
@@ -99,7 +99,7 @@ func (r *Result) Next(_ context.Context) bool {
 	for i, v := range rawVals {
 		vals[i] = mapColumnValue(v)
 	}
-	r.record = NewRecord(r.keys, vals)
+	r.record = newRecord(r.keys, vals)
 	return true
 }
 
@@ -207,27 +207,10 @@ func (r *Result) Single(ctx context.Context) (*Record, error) {
 	return rec, nil
 }
 
-// QueryCounters is the exported form of write-operation statistics, used by
-// callers that need to set counter values on a Result (e.g. the execution
-// layer in driver.go after running CREATE / SET / DELETE statements).
-type QueryCounters struct {
-	NodesCreated         int
-	NodesDeleted         int
-	RelationshipsCreated int
-	RelationshipsDeleted int
-	PropertiesSet        int
-}
-
-// SetCounters attaches write-operation counters to this result. It is called
+// setCounters attaches write-operation counters to this result. It is called
 // by the execution layer after executing write statements.
-func (r *Result) SetCounters(c QueryCounters) {
-	r.counters = queryCounters{
-		nodesCreated:         c.NodesCreated,
-		nodesDeleted:         c.NodesDeleted,
-		relationshipsCreated: c.RelationshipsCreated,
-		relationshipsDeleted: c.RelationshipsDeleted,
-		propertiesSet:        c.PropertiesSet,
-	}
+func (r *Result) setCounters(c queryCounters) {
+	r.counters = c
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -294,13 +277,6 @@ func (c *counters) ContainsUpdates() bool {
 // ─────────────────────────────────────────────────────────────────────────────
 // Column value mapper
 // ─────────────────────────────────────────────────────────────────────────────
-
-// MapColumnValue is the exported form of mapColumnValue, exposed for testing.
-// Production callers should use mapColumnValue directly.
-func MapColumnValue(v any) any { return mapColumnValue(v) }
-
-// SplitLabels is the exported form of splitLabels, exposed for testing.
-func SplitLabels(s string) []string { return splitLabels(s) }
 
 // mapColumnValue converts a raw SQLite column value to a graph type.
 //

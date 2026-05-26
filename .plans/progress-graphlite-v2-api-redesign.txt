@@ -172,3 +172,46 @@ Key Decisions:
 - No test coverage added for Single() — deferred to task-009 per spec
 
 Next Task: task-007 (Unexport internal helpers leaking from result.go)
+
+================================================================================
+TASK-007: Unexport internal helpers leaking from result.go
+Date: 2026-05-26T05:00:00Z
+================================================================================
+
+Summary:
+Unexported all internal helpers that were leaking as public symbols.
+`NewResultFromRows` → `newResultFromRows`; `QueryCounters` struct removed and
+merged into the existing unexported `queryCounters`; `SetCounters` → `setCounters`
+(takes `queryCounters` directly, no more copying through a public struct);
+`MapColumnValue` and `SplitLabels` exported wrappers deleted; `NewRecord` →
+`newRecord`. Updated all internal callers in `driver.go` and `result.go`.
+Rewrote `result_test.go` entirely to use `graphlite.Open` + `db.RunQuery` instead
+of the removed `NewResultFromRows` backdoor. Rewrote `types_test.go` to build
+`Record` values through query results rather than `graphlite.NewRecord`.
+Added test coverage for `Single`, `ErrNoRecords`, and `ErrMultipleRecords` in
+`result_test.go`. All unit tests pass; `go vet` clean.
+
+Files Changed:
+- result.go (modified — renamed NewResultFromRows→newResultFromRows; removed
+  QueryCounters, SetCounters, MapColumnValue, SplitLabels; renamed SetCounters→setCounters;
+  updated internal NewRecord→newRecord call)
+- types.go (modified — renamed NewRecord→newRecord)
+- driver.go (modified — all references to renamed symbols updated: newResultFromRows,
+  queryCounters, setCounters, nodesCreated/nodesDeleted/etc. field names, newRecord)
+- result_test.go (rewritten — all tests now use graphlite.Open+RunQuery; added
+  Single/ErrNoRecords/ErrMultipleRecords coverage)
+- types_test.go (rewritten — Record tests use query-created records; removed
+  TestRecord_NewRecord_PanicOnLengthMismatch as newRecord is now internal)
+
+Key Decisions:
+- `QueryCounters` struct removed entirely; `driver.go` now increments fields on
+  `queryCounters` directly (e.g. `ctr.nodesCreated++`) — no need for a separate
+  public struct just for field-by-field copying
+- `result_test.go` and `types_test.go` fully rewritten to go through the public API;
+  tests for `MapColumnValue`/`SplitLabels` deleted (covered indirectly by node/rel
+  projection tests in the new result_test.go)
+- `testdata/integration_test.go` and `compat/tck_test.go` still reference `NewEagerResult`
+  but those are outside `./...` scope (testdata excluded by Go; compat is -tags=tck only);
+  they will be addressed in task-009
+
+Next Task: task-008 (Add generic helpers: GetProperty, GetRecordValue, CollectT, SingleT)

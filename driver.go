@@ -249,7 +249,7 @@ func executeStatements(ctx context.Context, ex execer, sqlResult glsql.Result, b
 		if err != nil {
 			return nil, fmt.Errorf("graphlite: query: %w", err)
 		}
-		qr, err := NewResultFromRows(rows)
+		qr, err := newResultFromRows(rows)
 		if err != nil {
 			_ = rows.Close()
 			return nil, err
@@ -310,7 +310,7 @@ func executeStatements(ctx context.Context, ex execer, sqlResult glsql.Result, b
 func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement) (*Result, error) {
 	selectStmt := stmts[len(stmts)-1]
 	writeStmts := stmts[:len(stmts)-1]
-	var ctr QueryCounters
+	var ctr queryCounters
 
 	// Check if the write batch starts with a KindMatchForWrite.
 	var matchStmt *glsql.Statement
@@ -335,7 +335,7 @@ func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement
 				return nil, err
 			}
 			qr := newInMemoryResult(keys, []*Record{nullRec})
-			qr.SetCounters(ctr)
+			qr.setCounters(ctr)
 			return qr, nil
 		}
 
@@ -369,7 +369,7 @@ func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement
 			if err != nil {
 				return nil, fmt.Errorf("graphlite: write-then-select query: %w", err)
 			}
-			rowQR, err := NewResultFromRows(rows)
+			rowQR, err := newResultFromRows(rows)
 			if err != nil {
 				_ = rows.Close()
 				return nil, err
@@ -385,7 +385,7 @@ func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement
 		}
 
 		qr := newInMemoryResult(resultKeys, allRecords)
-		qr.SetCounters(ctr)
+		qr.setCounters(ctr)
 		return qr, nil
 	}
 
@@ -406,12 +406,12 @@ func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement
 	if err != nil {
 		return nil, fmt.Errorf("graphlite: write-then-select query: %w", err)
 	}
-	qr, err := NewResultFromRows(rows)
+	qr, err := newResultFromRows(rows)
 	if err != nil {
 		_ = rows.Close()
 		return nil, err
 	}
-	qr.SetCounters(ctr)
+	qr.setCounters(ctr)
 	return qr, nil
 }
 
@@ -423,7 +423,7 @@ func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement
 func execWriteStatements(ctx context.Context, ex execer, stmts []glsql.Statement) (*Result, error) {
 	// idMap: Cypher variable name → int64 row ID from INSERT or MATCH SELECT.
 	idMap := make(map[string]int64)
-	var ctr QueryCounters
+	var ctr queryCounters
 
 	// Separate the leading KindMatchForWrite statement (if any) from the rest.
 	var matchStmt *glsql.Statement
@@ -466,7 +466,7 @@ func execWriteStatements(ctx context.Context, ex execer, stmts []glsql.Statement
 	}
 
 	qr := &Result{consumed: true}
-	qr.SetCounters(ctr)
+	qr.setCounters(ctr)
 	return qr, nil
 }
 
@@ -494,7 +494,7 @@ func buildOptionalNullRow(ctx context.Context, ex execer, stmt glsql.Statement) 
 		return nil, nil, fmt.Errorf("graphlite: optional null row columns: %w", err)
 	}
 	vals := make([]any, len(cols))
-	return NewRecord(cols, vals), cols, nil
+	return newRecord(cols, vals), cols, nil
 }
 
 // collectMatchRows executes a KindMatchForWrite SELECT, drains all rows into
@@ -539,7 +539,7 @@ func collectMatchRows(ctx context.Context, ex execer, stmt *glsql.Statement) ([]
 //
 // MERGE statements (KindMergeCheck + KindMergeInsert + tagged KindUpdate) are
 // handled by execMergeBatch when a KindMergeCheck statement is encountered.
-func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idMap map[string]int64, ctr *QueryCounters) error {
+func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idMap map[string]int64, ctr *queryCounters) error {
 	i := 0
 	for i < len(stmts) {
 		stmt := stmts[i]
@@ -585,8 +585,8 @@ func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 			if stmt.CreatedVar != "" {
 				idMap[stmt.CreatedVar] = lastID
 			}
-			ctr.NodesCreated++
-			ctr.PropertiesSet += s.NumProps
+			ctr.nodesCreated++
+			ctr.propertiesSet += s.NumProps
 
 		case glsql.KindInsertEdge:
 			res, err := ex.ExecContext(ctx, s.SQL, s.Args...)
@@ -602,14 +602,14 @@ func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 				}
 				idMap[stmt.CreatedVar] = lastID
 			}
-			ctr.RelationshipsCreated++
-			ctr.PropertiesSet += s.NumProps
+			ctr.relationshipsCreated++
+			ctr.propertiesSet += s.NumProps
 
 		case glsql.KindUpdate:
 			if _, err := ex.ExecContext(ctx, s.SQL, s.Args...); err != nil {
 				return fmt.Errorf("graphlite: update: %w", err)
 			}
-			ctr.PropertiesSet++
+			ctr.propertiesSet++
 
 		case glsql.KindDeleteEdges:
 			res, err := ex.ExecContext(ctx, s.SQL, s.Args...)
@@ -620,7 +620,7 @@ func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 			if err != nil {
 				return fmt.Errorf("graphlite: delete edges rows affected: %w", err)
 			}
-			ctr.RelationshipsDeleted += int(n)
+			ctr.relationshipsDeleted += int(n)
 
 		case glsql.KindDeleteNodes:
 			res, err := ex.ExecContext(ctx, s.SQL, s.Args...)
@@ -631,7 +631,7 @@ func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 			if err != nil {
 				return fmt.Errorf("graphlite: delete nodes rows affected: %w", err)
 			}
-			ctr.NodesDeleted += int(n)
+			ctr.nodesDeleted += int(n)
 
 		default:
 			if _, err := ex.ExecContext(ctx, s.SQL, s.Args...); err != nil {
@@ -657,7 +657,7 @@ func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 // If the check finds no row → run INSERT + ON CREATE SETs (skip ON MATCH SETs).
 // All actions run within the caller's execer scope (either a TxExecer already
 // in a transaction, or a plain Execer when beginTxFn wraps the MERGE).
-func execMergeBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idMap map[string]int64, ctr *QueryCounters) (consumed int, err error) {
+func execMergeBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idMap map[string]int64, ctr *queryCounters) (consumed int, err error) {
 	if len(stmts) == 0 || stmts[0].Kind != glsql.KindMergeCheck {
 		return 0, fmt.Errorf("graphlite: execMergeBatch called on non-MergeCheck statement")
 	}
@@ -727,7 +727,7 @@ func execMergeBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 			if _, err := ex.ExecContext(ctx, resolved.Statements[0].SQL, resolved.Statements[0].Args...); err != nil {
 				return consumed, fmt.Errorf("graphlite: MERGE ON MATCH SET: %w", err)
 			}
-			ctr.PropertiesSet++
+			ctr.propertiesSet++
 		}
 	} else {
 		// ── ON CREATE branch ──────────────────────────────────────────────────
@@ -752,8 +752,8 @@ func execMergeBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 		if varName != "" {
 			idMap[varName] = lastID
 		}
-		ctr.NodesCreated++
-		ctr.PropertiesSet += insertStmt.NumProps
+		ctr.nodesCreated++
+		ctr.propertiesSet += insertStmt.NumProps
 
 		for _, s := range onCreateStmts {
 			realVar := strings.TrimPrefix(s.CreatedVar, "oncreate:")
@@ -765,7 +765,7 @@ func execMergeBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 			if _, err := ex.ExecContext(ctx, resolved.Statements[0].SQL, resolved.Statements[0].Args...); err != nil {
 				return consumed, fmt.Errorf("graphlite: MERGE ON CREATE SET: %w", err)
 			}
-			ctr.PropertiesSet++
+			ctr.propertiesSet++
 		}
 	}
 

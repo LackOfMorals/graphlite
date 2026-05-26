@@ -47,11 +47,11 @@ type Record struct {
 	values []any
 }
 
-// NewRecord constructs a Record from parallel slices of keys and values.
-// The two slices must have the same length; if they do not, NewRecord panics.
-func NewRecord(keys []string, values []any) *Record {
+// newRecord constructs a Record from parallel slices of keys and values.
+// The two slices must have the same length; if they do not, newRecord panics.
+func newRecord(keys []string, values []any) *Record {
 	if len(keys) != len(values) {
-		panic(fmt.Sprintf("graphlite: NewRecord: keys length %d != values length %d", len(keys), len(values)))
+		panic(fmt.Sprintf("graphlite: newRecord: keys length %d != values length %d", len(keys), len(values)))
 	}
 	k := make([]string, len(keys))
 	v := make([]any, len(values))
