@@ -247,7 +247,7 @@ func TestListNodesByLabelIndexHint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var found bool
 	for rows.Next() {

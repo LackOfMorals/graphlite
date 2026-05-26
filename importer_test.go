@@ -356,7 +356,7 @@ func TestImport_TooLarge(t *testing.T) {
 		}
 		// Close without valid JSON — decoder will fail, but we should have
 		// already set exceeded=true.
-		pw.Close()
+		_ = pw.Close()
 	}()
 
 	err := db.Import(ctx, pr, graphlite.FormatJSON)

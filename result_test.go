@@ -15,7 +15,7 @@ func openDB(t *testing.T) *graphlite.DB {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	t.Cleanup(func() { db.Close(context.Background()) })
+	t.Cleanup(func() { _ = db.Close(context.Background()) })
 	return db
 }
 

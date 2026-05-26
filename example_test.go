@@ -19,7 +19,7 @@ func ExampleOpen() {
 	if err != nil {
 		panic(err)
 	}
-	defer db.Close(ctx)
+	defer func() { _ = db.Close(ctx) }()
 
 	if _, err := db.RunQuery(ctx, `CREATE (n:Person {name: "Alice"})`, nil); err != nil {
 		panic(err)
@@ -43,7 +43,7 @@ func ExampleWithBusyTimeout() {
 	if err != nil {
 		panic(err)
 	}
-	defer db.Close(context.Background())
+	defer func() { _ = db.Close(context.Background()) }()
 	fmt.Println("option accepted")
 
 	// Output:
@@ -70,7 +70,7 @@ func ExampleWithReadOnly() {
 	if err != nil {
 		panic(err)
 	}
-	defer ro.Close(ctx)
+	defer func() { _ = ro.Close(ctx) }()
 
 	_, err = ro.RunQuery(ctx, `CREATE (n:Config)`, nil)
 	fmt.Println(err == graphlite.ErrReadOnly)
@@ -87,7 +87,7 @@ func ExampleDB_Import() {
 	if err != nil {
 		panic(err)
 	}
-	defer db.Close(ctx)
+	defer func() { _ = db.Close(ctx) }()
 
 	const data = `{
 		"nodes": [
@@ -128,7 +128,7 @@ func ExampleDB_Snapshot() {
 	if err != nil {
 		panic(err)
 	}
-	defer db.Close(ctx)
+	defer func() { _ = db.Close(ctx) }()
 
 	_, err = db.RunQuery(ctx, `CREATE (:Event {name: "Launch"})`, nil)
 	if err != nil {
@@ -139,7 +139,7 @@ func ExampleDB_Snapshot() {
 	if err != nil {
 		panic(err)
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	snapPath := filepath.Join(dir, "snap.db")
 	if err := db.Snapshot(snapPath); err != nil {
@@ -151,7 +151,7 @@ func ExampleDB_Snapshot() {
 	if err != nil {
 		panic(err)
 	}
-	defer snap.Close(ctx)
+	defer func() { _ = snap.Close(ctx) }()
 
 	result, err := snap.RunQuery(ctx, `MATCH (e:Event) RETURN e.name AS name`, nil)
 	if err != nil {

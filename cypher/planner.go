@@ -223,9 +223,6 @@ func planQuery(q *Query, scope *BindingScope) (LogicalPlan, error) {
 	} else {
 		// No write plans or no RETURN: use the original assembly logic.
 		if returnPlan != nil {
-			if base == nil {
-				// RETURN without a MATCH — treat as a standalone projection with nil source.
-			}
 			returnPlan.Source = base
 			base = returnPlan
 		}
@@ -1025,11 +1022,11 @@ func isIdentifier(s string) bool {
 	}
 	for i, c := range s {
 		if i == 0 {
-			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
+			if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && c != '_' {
 				return false
 			}
 		} else {
-			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+			if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' {
 				return false
 			}
 		}

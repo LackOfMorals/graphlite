@@ -92,7 +92,7 @@ func TestWithBusyTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open with WithBusyTimeout: %v", err)
 	}
-	defer db.Close(context.Background())
+	defer func() { _ = db.Close(context.Background()) }()
 }
 
 // TestWithReadOnly verifies that read queries succeed and write queries return
@@ -111,7 +111,7 @@ func TestWithReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open ro: %v", err)
 	}
-	defer ro.Close(ctx)
+	defer func() { _ = ro.Close(ctx) }()
 
 	// Reads on an empty read-only db must succeed (empty result, no error).
 	if _, err := ro.RunQuery(ctx, `MATCH (n:Person) RETURN n.name AS name`, nil); err != nil {

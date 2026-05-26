@@ -488,7 +488,7 @@ func buildOptionalNullRow(ctx context.Context, ex execer, stmt glsql.Statement) 
 		return nil, nil, fmt.Errorf("graphlite: optional null row: %w", err)
 	}
 	cols, err := rows.Columns()
-	rows.Close()
+	_ = rows.Close()
 	if err != nil {
 		return nil, nil, fmt.Errorf("graphlite: optional null row columns: %w", err)
 	}
@@ -507,7 +507,7 @@ func collectMatchRows(ctx context.Context, ex execer, stmt *glsql.Statement) ([]
 	}
 	cols, err := rows.Columns()
 	if err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return nil, nil, fmt.Errorf("graphlite: match-for-write columns: %w", err)
 	}
 	var result [][]any
@@ -518,7 +518,7 @@ func collectMatchRows(ctx context.Context, ex execer, stmt *glsql.Statement) ([]
 			ptrs[i] = &vals[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, nil, fmt.Errorf("graphlite: match-for-write scan: %w", err)
 		}
 		row := make([]any, len(cols))
@@ -526,10 +526,10 @@ func collectMatchRows(ctx context.Context, ex execer, stmt *glsql.Statement) ([]
 		result = append(result, row)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return nil, nil, fmt.Errorf("graphlite: match-for-write iterate: %w", err)
 	}
-	rows.Close()
+	_ = rows.Close()
 	return result, cols, nil
 }
 

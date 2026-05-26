@@ -334,7 +334,7 @@ func listNodes(ctx context.Context, q querier) ([]*NodeRow, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: list nodes: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanNodeRows(rows)
 }
 
@@ -354,7 +354,7 @@ func listNodesByLabel(ctx context.Context, q querier, labelName string) ([]*Node
 	if err != nil {
 		return nil, fmt.Errorf("store: list nodes by label %q: %w", labelName, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanNodeRows(rows)
 }
 
@@ -408,7 +408,7 @@ func listEdges(ctx context.Context, q querier) ([]*EdgeRow, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: list edges: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanEdgeRows(rows)
 }
 
@@ -419,7 +419,7 @@ func listEdgesByType(ctx context.Context, q querier, edgeType string) ([]*EdgeRo
 	if err != nil {
 		return nil, fmt.Errorf("store: list edges by type %q: %w", edgeType, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanEdgeRows(rows)
 }
 
@@ -430,7 +430,7 @@ func listEdgesByStartNode(ctx context.Context, q querier, startID int64) ([]*Edg
 	if err != nil {
 		return nil, fmt.Errorf("store: list edges by start_id %d: %w", startID, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanEdgeRows(rows)
 }
 
@@ -441,7 +441,7 @@ func listEdgesByEndNode(ctx context.Context, q querier, endID int64) ([]*EdgeRow
 	if err != nil {
 		return nil, fmt.Errorf("store: list edges by end_id %d: %w", endID, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanEdgeRows(rows)
 }
 
