@@ -335,3 +335,43 @@ Key Decisions:
 - No functional code changed; build, unit tests, go vet, and staticcheck all pass
 
 Next Task: task-012 (Add example programs: backend_switch, copy_from_neo4j, copy_to_neo4j)
+
+================================================================================
+TASK-012: Add example programs: backend_switch, copy_from_neo4j, copy_to_neo4j
+Date: 2026-05-26T10:00:00Z
+================================================================================
+
+Summary:
+Created three self-contained example programs under examples/, each with its own
+go.mod that imports both graphlite (via local replace directive) and neo4j-go-driver/v6.
+Ran go mod tidy in each directory to generate go.sum files. All three compile cleanly
+with `go build .`. Root package build, unit tests, and go vet all pass.
+
+Files Changed:
+- examples/backend_switch/main.go (created)
+- examples/backend_switch/go.mod (created)
+- examples/backend_switch/go.sum (created by go mod tidy)
+- examples/copy_from_neo4j/main.go (created)
+- examples/copy_from_neo4j/go.mod (created)
+- examples/copy_from_neo4j/go.sum (created by go mod tidy)
+- examples/copy_to_neo4j/main.go (created)
+- examples/copy_to_neo4j/go.mod (created)
+- examples/copy_to_neo4j/go.sum (created by go mod tidy)
+
+Key Decisions:
+- Each example is a standalone module (not part of the root graphlite module) so that
+  it can import neo4j-go-driver/v6 without adding that dependency to the root go.mod
+- The replace directive `replace github.com/LackOfMorals/graphlite => ../..` allows
+  each example to use the local graphlite source without a published release
+- backend_switch uses GRAPHLITE_BACKEND env var to dispatch between graphlite and Neo4j;
+  both paths run the same MATCH query, demonstrating the switchable-backend pattern
+- copy_from_neo4j preserves Neo4j element IDs as `_neo4j_id` properties so that
+  relationship endpoints can be matched after copying all nodes
+- copy_to_neo4j uses MERGE on `_graphlite_id` so that repeated runs are idempotent;
+  reads the full node/relationship graph via `MATCH (n) RETURN n` and
+  `MATCH (a)-[r]->(b) RETURN a, r, b`
+- neo4j driver v6 `NoAuth()` returns `auth.Token` which implements `auth.TokenManager`;
+  examples use `neo4j.BasicAuth` for a more realistic production pattern
+- go mod tidy was run (not go mod vendor) — these are standalone examples, not the main module
+
+Next Task: task-013

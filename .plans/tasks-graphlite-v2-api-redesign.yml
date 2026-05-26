@@ -229,7 +229,7 @@ tasks:
       (`examples/backend_switch/`), seeding a local graphlite DB from Neo4j
       (`examples/copy_from_neo4j/`), and pushing a sub-graph from graphlite to
       Neo4j (`examples/copy_to_neo4j/`). Each must compile with `go build`.
-    status: pending
+    status: completed
     dependencies:
       - task-008
     acceptance_criteria:
@@ -238,7 +238,7 @@ tasks:
       - "`examples/copy_to_neo4j/main.go` and `examples/copy_to_neo4j/go.mod` exist and compile"
       - "Each example's `go.mod` imports both `github.com/LackOfMorals/graphlite` and `github.com/neo4j/neo4j-go-driver/v6`"
       - "Each example includes a brief comment block explaining the pattern it demonstrates"
-    completed_at: null
+    completed_at: "2026-05-26T10:00:00Z"
 
   - id: task-013
     title: "Update README to reflect v2.0 value proposition"
