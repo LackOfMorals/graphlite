@@ -261,7 +261,7 @@ tasks:
       `BenchmarkBuildSQLResult_CacheHit`, and `BenchmarkMatchByLabel`. Each benchmark must call
       `b.ReportAllocs()`. This benchmark suite must exist before the performance optimisation
       tasks (task-016 through task-020) so that before/after numbers can be captured.
-    status: pending
+    status: completed
     dependencies: []
     acceptance_criteria:
       - 'All six benchmarks exist and compile'
@@ -269,7 +269,7 @@ tasks:
       - 'Each benchmark calls `b.ReportAllocs()`'
       - '`BenchmarkMatchByLabel` uses a 10,000-node graph with 50% label match'
       - '`BenchmarkCollectLargeResult` uses a 10,000-node graph'
-    completed_at: null
+    completed_at: '2026-05-27T14:00:00Z'
 
   - id: task-016
     title: 'Add query plan cache to avoid redundant ANTLR parses'

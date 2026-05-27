@@ -325,3 +325,32 @@ Key Decisions:
 - needs: [build-and-test] added to ensure vuln scan only runs on builds that passed.
 
 Next Task: task-012 (already completed)
+
+================================================================================
+TASK-015: Add benchmark suite for core hot paths
+Date: 2026-05-27T14:00:00Z
+================================================================================
+
+Summary:
+Added six required benchmarks to `bench/bench_test.go`: BenchmarkRunQuerySimpleSelect,
+BenchmarkRunQueryCreateNode, BenchmarkCollectLargeResult, BenchmarkImportJSON,
+BenchmarkBuildSQLResult_CacheHit, and BenchmarkMatchByLabel. Also added a shared
+10K-node fixture (get10KDB / seedMixedNodes) used by BenchmarkMatchByLabel and
+BenchmarkCollectLargeResult. All six benchmarks call b.ReportAllocs() and run
+successfully with `go test -bench=. -benchmem ./bench/...`.
+
+Files Changed:
+- bench/bench_test.go (added get10KDB fixture, seedMixedNodes helper, and all 6 required benchmarks)
+
+Key Decisions:
+- 10K fixture uses 50/50 Person/Employee split (first 5K Person, last 5K Employee) to give
+  BenchmarkMatchByLabel a deterministic 50% match rate with exact count validation (5000).
+- BenchmarkCollectLargeResult validates len(recs)==10000 to catch regressions immediately.
+- BenchmarkBuildSQLResult_CacheHit uses Consume (not Collect) to focus on pipeline overhead
+  rather than row-iteration overhead; named for the task-016 cache-hit baseline comparison.
+- BenchmarkRunQueryCreateNode opens a fresh DB per b.Run (not a shared fixture) to avoid
+  unbounded DB growth across benchmark iterations.
+- All 6 benchmarks call b.ReportAllocs() before b.ResetTimer() per standard Go pattern.
+- Existing benchmarks did not call b.ReportAllocs(); new ones explicitly do per task spec.
+
+Next Task: task-016
