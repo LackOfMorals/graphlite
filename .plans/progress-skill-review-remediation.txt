@@ -123,3 +123,29 @@ Key Decisions:
 - buildPropsJSON now validates keys, closing the CREATE/MERGE injection path
 
 Next Task: task-006
+
+================================================================================
+TASK-006: Apply hard cap to user-supplied MaxHops
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Added `WithMaxPathHops(n int)` option to both `options.go` (DB-level) and
+`sql/translator.go` (translator-level via TranslatorOption). The cap is enforced
+in `buildFromClauseForVarLengthRel`: explicit MaxHops > hopCap returns an error.
+Unbounded [*] paths continue to be clamped to safetyLimit. maxPathHops propagates
+DB → Tx → buildSQLResult → NewTranslator. Reviewer fixes applied: n<=0 is a no-op
+with documentation; error message no longer hardcodes package name.
+
+Files Changed:
+- options.go (WithMaxPathHops option; n<=0 is no-op with docs)
+- driver.go (maxPathHops field on DB; propagation through runQuery/BeginTx)
+- tx.go (maxPathHops field; passed to runQueryTx)
+- sql/translator.go (TranslatorOption/WithMaxPathHops; hopCap enforcement; generic error message)
+- sql/translator_test.go (tests: explicit cap rejection, WithMaxPathHops raises cap, unbounded still clamped)
+
+Key Decisions:
+- n<=0 is silently treated as "use default 15" (documented); returning an error at Open time for n<=0 would be too strict for zero-value struct initialization patterns
+- Error message says "use WithMaxPathHops" without package prefix to avoid stale cross-package references
+
+Next Task: task-007

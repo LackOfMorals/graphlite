@@ -126,11 +126,33 @@ type Translator struct {
 	// unqualified column names (e.g. "props" instead of "n0.props") since
 	// UPDATE statements cannot use table aliases.
 	updateVar string
+	// maxPathHops is the upper bound on explicit MaxHops in variable-length
+	// path patterns. 0 means "use the built-in safetyLimit of 15".
+	maxPathHops int
+}
+
+// TranslatorOption is a functional option for configuring a [Translator].
+type TranslatorOption func(*Translator)
+
+// WithMaxPathHops sets the maximum number of hops that an explicit variable-
+// length path bound (e.g. [*1..1000]) may request. Queries whose explicit
+// upper bound exceeds this value return a translation error. A value of 0
+// (the default) uses the built-in safety cap of 15.
+//
+// This option mirrors the graphlite.WithMaxPathHops DB option and exists so
+// that the translator can be tested independently of a full DB.
+func WithMaxPathHops(n int) TranslatorOption {
+	return func(t *Translator) { t.maxPathHops = n }
 }
 
 // NewTranslator creates a Translator that uses the given Dialect.
-func NewTranslator(d Dialect) *Translator {
-	return &Translator{dialect: d}
+// Pass TranslatorOption values to customise behaviour.
+func NewTranslator(d Dialect, opts ...TranslatorOption) *Translator {
+	tr := &Translator{dialect: d}
+	for _, o := range opts {
+		o(tr)
+	}
+	return tr
 }
 
 // validatePropKey checks that a property key name is safe to embed in a JSON
@@ -966,10 +988,26 @@ func (t *Translator) buildFromClauseForVarLengthRel(vlp *cypher.VariableLengthRe
 		recEndID = "e.start_id"
 	}
 
+	// Determine the effective hop cap for this query.
+	// t.maxPathHops == 0 means "use the built-in safetyLimit".
+	hopCap := safetyLimit
+	if t.maxPathHops > 0 {
+		hopCap = t.maxPathHops
+	}
+
 	// Depth guard in the recursive case.
 	maxHops := vlp.MaxHops
 	if maxHops == 0 {
-		maxHops = safetyLimit // practical cap for unbounded paths
+		maxHops = hopCap // practical cap for unbounded paths
+	} else if maxHops > hopCap {
+		// Explicit upper bound exceeds the configured cap — reject the query
+		// rather than silently truncating results, so callers are aware of the
+		// limit. Use WithMaxPathHops (on DB) to raise the cap deliberately.
+		return fromClause{}, fmt.Errorf(
+			"sql: variable-length path upper bound %d exceeds the maximum allowed hops (%d); "+
+				"use WithMaxPathHops to raise the limit",
+			maxHops, hopCap,
+		)
 	}
 	// The recursive WHERE condition stops expansion when depth reaches the cap.
 	// "depth < maxHops" allows the recursive case to add one more hop (depth+1).

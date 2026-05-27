@@ -84,7 +84,7 @@ tasks:
       a descriptive error if validation fails. Document which characters are rejected and why
       in a comment. This prevents malformed JSON path injection via bracket characters or null
       bytes in property key names.
-    status: in_progress
+    status: completed
     dependencies: [task-004]
     acceptance_criteria:
       - 'A property key containing `]` causes `exprToSQL` to return an error'
@@ -92,7 +92,7 @@ tasks:
       - 'A property key containing a null byte causes `exprToSQL` to return an error'
       - 'Valid property key names continue to produce correct JSON path fragments'
       - '`go test ./...` passes'
-    completed_at: null
+    completed_at: '2026-05-27T00:00:00Z'
 
   - id: task-006
     title: 'Apply hard cap to user-supplied MaxHops in variable-length path translation'
@@ -102,7 +102,7 @@ tasks:
       the value and log a warning, or return an error when `MaxHops > safetyLimit`. Expose a
       `WithMaxPathHops(n int)` option on `DB` in `options.go` so callers can deliberately raise
       the cap with documented risk.
-    status: pending
+    status: completed
     dependencies: []
     acceptance_criteria:
       - 'A Cypher query `MATCH p=(a)-[*1..1000]->(b) RETURN p` on an unmodified `DB` is rejected or clamped to 15 hops'

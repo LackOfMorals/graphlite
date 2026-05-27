@@ -2307,3 +2307,109 @@ func TestTranslate_PropKeyValidation_RemoveProp(t *testing.T) {
 		t.Errorf("error should mention the rejected key; got: %v", err)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Variable-length path hop cap tests (task-006)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// translateCypherWithOpts is like translateCypher but accepts additional
+// TranslatorOptions (e.g. WithMaxPathHops).
+func translateCypherWithOpts(t *testing.T, query string, opts ...sqldialect.TranslatorOption) (sqldialect.Result, error) {
+	t.Helper()
+	q, err := cypher.Parse(query)
+	if err != nil {
+		t.Fatalf("Parse(%q): %v", query, err)
+	}
+	scope := cypher.NewScope()
+	plan, err := cypher.Plan(q, scope)
+	if err != nil {
+		t.Fatalf("Plan(%q): %v", query, err)
+	}
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{}, opts...)
+	return tr.Translate(plan, scope)
+}
+
+// TestTranslate_VarLength_ExceedsDefaultCap verifies that a Cypher query with
+// an explicit upper bound greater than 15 is rejected by the default translator.
+func TestTranslate_VarLength_ExceedsDefaultCap(t *testing.T) {
+	_, err := translateCypherWithOpts(t, "MATCH (a)-[*1..1000]->(b) RETURN b.name")
+	if err == nil {
+		t.Fatal("expected an error for MaxHops=1000 with default cap of 15, got nil")
+	}
+	if !strings.Contains(err.Error(), "1000") || !strings.Contains(err.Error(), "15") {
+		t.Errorf("error should mention the requested hops and the cap; got: %v", err)
+	}
+}
+
+// TestTranslate_VarLength_WithinDefaultCap verifies that a Cypher query with
+// an explicit upper bound of exactly 15 succeeds with the default translator.
+func TestTranslate_VarLength_WithinDefaultCap(t *testing.T) {
+	result, err := translateCypherWithOpts(t, "MATCH (a)-[*1..15]->(b) RETURN b.name")
+	if err != nil {
+		t.Fatalf("unexpected error for MaxHops=15 (at default cap): %v", err)
+	}
+	containsAll(t, result, "WITH RECURSIVE", "depth")
+}
+
+// TestTranslate_VarLength_WithMaxPathHops_Raised verifies that WithMaxPathHops
+// allows explicit bounds up to the raised cap.
+func TestTranslate_VarLength_WithMaxPathHops_Raised(t *testing.T) {
+	result, err := translateCypherWithOpts(t,
+		"MATCH (a)-[*1..50]->(b) RETURN b.name",
+		sqldialect.WithMaxPathHops(50),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error for MaxHops=50 with cap=50: %v", err)
+	}
+	containsAll(t, result, "WITH RECURSIVE", "depth")
+	// The depth guard argument must be 50.
+	found := false
+	for _, a := range result.Args {
+		if a == int64(50) || a == 50 {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected depth-guard arg 50 in args, got %v", result.Args)
+	}
+}
+
+// TestTranslate_VarLength_WithMaxPathHops_StillEnforced verifies that even
+// with a raised cap, an explicit bound beyond the raised cap is still rejected.
+func TestTranslate_VarLength_WithMaxPathHops_StillEnforced(t *testing.T) {
+	_, err := translateCypherWithOpts(t,
+		"MATCH (a)-[*1..200]->(b) RETURN b.name",
+		sqldialect.WithMaxPathHops(50),
+	)
+	if err == nil {
+		t.Fatal("expected an error for MaxHops=200 with cap=50, got nil")
+	}
+	if !strings.Contains(err.Error(), "200") || !strings.Contains(err.Error(), "50") {
+		t.Errorf("error should mention 200 and 50; got: %v", err)
+	}
+}
+
+// TestTranslate_VarLength_UnboundedUsesHopCap verifies that an unbounded [*]
+// path uses the configured hop cap (not the default safetyLimit) when
+// WithMaxPathHops is provided.
+func TestTranslate_VarLength_UnboundedUsesHopCap(t *testing.T) {
+	result, err := translateCypherWithOpts(t,
+		"MATCH (a)-[*]->(b) RETURN b.name",
+		sqldialect.WithMaxPathHops(25),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error for unbounded path with cap=25: %v", err)
+	}
+	// The depth guard argument must be 25 (not the default 15).
+	found := false
+	for _, a := range result.Args {
+		if a == int64(25) || a == 25 {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected depth-guard arg 25 in args (custom cap), got %v", result.Args)
+	}
+}

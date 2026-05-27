@@ -52,8 +52,9 @@ import (
 // DB is an open graphlite database. All methods are safe for concurrent use
 // from multiple goroutines.
 type DB struct {
-	st       store.Store
-	readOnly bool
+	st           store.Store
+	readOnly     bool
+	maxPathHops  int
 }
 
 // Open opens (or creates) a graphlite database at path and returns a *DB.
@@ -94,7 +95,7 @@ func Open(path string, opts ...Option) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("graphlite: open %q: %w", path, err)
 	}
-	return &DB{st: st, readOnly: cfg.readOnly}, nil
+	return &DB{st: st, readOnly: cfg.readOnly, maxPathHops: cfg.maxPathHops}, nil
 }
 
 // Snapshot writes an atomic, consistent copy of the database to path.
@@ -133,7 +134,7 @@ func (d *DB) Close(_ context.Context) error {
 // query contains write statements.
 func (d *DB) RunQuery(ctx context.Context, cypherStr string, params map[string]any) (*Result, error) {
 	if d.readOnly {
-		sqlResult, err := buildSQLResult(cypherStr, params)
+		sqlResult, err := buildSQLResult(cypherStr, params, d.maxPathHops)
 		if err != nil {
 			return nil, err
 		}
@@ -144,7 +145,7 @@ func (d *DB) RunQuery(ctx context.Context, cypherStr string, params map[string]a
 		}
 		return executeStatements(ctx, d.st.Exec(), sqlResult, nil)
 	}
-	return runQuery(ctx, d.st.Exec(), cypherStr, params, d.st.BeginExecTx)
+	return runQuery(ctx, d.st.Exec(), cypherStr, params, d.st.BeginExecTx, d.maxPathHops)
 }
 
 // BeginTx starts an explicit transaction and returns a *Tx.
@@ -156,7 +157,7 @@ func (d *DB) BeginTx(ctx context.Context) (*Tx, error) {
 	if err != nil {
 		return nil, fmt.Errorf("graphlite: begin transaction: %w", err)
 	}
-	return &Tx{rawTx: txEx}, nil
+	return &Tx{rawTx: txEx, maxPathHops: d.maxPathHops}, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -169,8 +170,8 @@ type execer = store.Execer
 
 // runQuery is the execution pipeline for auto-commit mode.
 // beginTxFn is used to start an implicit transaction for atomic MERGE operations.
-func runQuery(ctx context.Context, ex execer, cypherStr string, params map[string]any, beginTxFn func(context.Context) (store.TxExecer, error)) (*Result, error) {
-	sqlResult, err := buildSQLResult(cypherStr, params)
+func runQuery(ctx context.Context, ex execer, cypherStr string, params map[string]any, beginTxFn func(context.Context) (store.TxExecer, error), maxPathHops int) (*Result, error) {
+	sqlResult, err := buildSQLResult(cypherStr, params, maxPathHops)
 	if err != nil {
 		return nil, err
 	}
@@ -179,8 +180,8 @@ func runQuery(ctx context.Context, ex execer, cypherStr string, params map[strin
 
 // runQueryTx is the execution pipeline for transactional mode. beginTxFn is
 // nil because the caller already holds an open transaction.
-func runQueryTx(ctx context.Context, ex execer, cypherStr string, params map[string]any) (*Result, error) {
-	sqlResult, err := buildSQLResult(cypherStr, params)
+func runQueryTx(ctx context.Context, ex execer, cypherStr string, params map[string]any, maxPathHops int) (*Result, error) {
+	sqlResult, err := buildSQLResult(cypherStr, params, maxPathHops)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +190,7 @@ func runQueryTx(ctx context.Context, ex execer, cypherStr string, params map[str
 
 // buildSQLResult runs parse → plan → translate → bind-params, returning the
 // bound Result ready for execution.
-func buildSQLResult(cypherStr string, params map[string]any) (glsql.Result, error) {
+func buildSQLResult(cypherStr string, params map[string]any, maxPathHops int) (glsql.Result, error) {
 	// Step 1: parse.
 	q, err := cypher.Parse(cypherStr)
 	if err != nil {
@@ -204,7 +205,7 @@ func buildSQLResult(cypherStr string, params map[string]any) (glsql.Result, erro
 	}
 
 	// Step 3: translate.
-	translator := glsql.NewTranslator(glsql.SQLiteDialect{})
+	translator := glsql.NewTranslator(glsql.SQLiteDialect{}, glsql.WithMaxPathHops(maxPathHops))
 	sqlResult, err := translator.Translate(plan, scope)
 	if err != nil {
 		return glsql.Result{}, fmt.Errorf("graphlite: translate: %w", err)

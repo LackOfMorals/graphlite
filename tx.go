@@ -12,8 +12,9 @@ import (
 //
 // A Tx must not be used after Commit or Rollback returns.
 type Tx struct {
-	rawTx store.TxExecer
-	done  bool
+	rawTx       store.TxExecer
+	done        bool
+	maxPathHops int
 }
 
 // Run executes cypherStr within the transaction and returns a lazy *Result.
@@ -26,7 +27,7 @@ func (t *Tx) Run(ctx context.Context, cypherStr string, params map[string]any) (
 	if t.done {
 		return nil, fmt.Errorf("graphlite: transaction already closed")
 	}
-	return runQueryTx(ctx, t.rawTx, cypherStr, params)
+	return runQueryTx(ctx, t.rawTx, cypherStr, params, t.maxPathHops)
 }
 
 // Commit commits the transaction.
