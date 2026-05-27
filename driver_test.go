@@ -2,6 +2,7 @@ package graphlite_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -486,4 +487,115 @@ func TestRunQuery_NodeProjection(t *testing.T) {
 		t.Errorf("Props[species] = %v, want %q", node.Props["species"], "cat")
 	}
 	qr.Consume(ctx) //nolint:errcheck
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Plan-cache tests (task-016)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestPlanCache_CacheHitProducesIdenticalResults verifies that repeated
+// executions of the same Cypher string via RunQuery produce identical results
+// regardless of whether the plan cache was hit. This tests the correctness
+// invariant for the cache introduced in task-016.
+func TestPlanCache_CacheHitProducesIdenticalResults(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+
+	// Seed two nodes with different names so we can verify parameter binding is
+	// not contaminated by a previous cache hit.
+	for _, name := range []string{"Alice", "Bob"} {
+		res, err := db.RunQuery(ctx, `CREATE (n:Person {name: $name})`,
+			map[string]any{"name": name})
+		if err != nil {
+			t.Fatalf("CREATE %q: %v", name, err)
+		}
+		if _, err := res.Consume(ctx); err != nil {
+			t.Fatalf("consume CREATE: %v", err)
+		}
+	}
+
+	query := `MATCH (n:Person {name: $name}) RETURN n.name AS name`
+
+	// First call — cache miss.
+	res1, err := db.RunQuery(ctx, query, map[string]any{"name": "Alice"})
+	if err != nil {
+		t.Fatalf("first RunQuery: %v", err)
+	}
+	recs1, err := res1.Collect(ctx)
+	if err != nil {
+		t.Fatalf("first Collect: %v", err)
+	}
+
+	// Second call — cache hit with the same query string but different params.
+	res2, err := db.RunQuery(ctx, query, map[string]any{"name": "Bob"})
+	if err != nil {
+		t.Fatalf("second RunQuery: %v", err)
+	}
+	recs2, err := res2.Collect(ctx)
+	if err != nil {
+		t.Fatalf("second Collect: %v", err)
+	}
+
+	if len(recs1) != 1 {
+		t.Fatalf("expected 1 record for Alice, got %d", len(recs1))
+	}
+	if len(recs2) != 1 {
+		t.Fatalf("expected 1 record for Bob, got %d", len(recs2))
+	}
+
+	got1, _ := recs1[0].Get("name")
+	got2, _ := recs2[0].Get("name")
+	if got1 != "Alice" {
+		t.Errorf("first result: got %q, want %q", got1, "Alice")
+	}
+	if got2 != "Bob" {
+		t.Errorf("second result: got %q, want %q", got2, "Bob")
+	}
+}
+
+// TestPlanCache_ConcurrentReadsAreSafe executes the same query concurrently
+// from multiple goroutines, exercising the plan cache's concurrent-read path.
+// This test is most useful when run with -race.
+func TestPlanCache_ConcurrentReadsAreSafe(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+
+	// Seed 10 nodes.
+	for i := range 10 {
+		res, err := db.RunQuery(ctx, `CREATE (n:Person {name: $name})`,
+			map[string]any{"name": strings.Repeat("A", i+1)})
+		if err != nil {
+			t.Fatalf("seed CREATE %d: %v", i, err)
+		}
+		if _, err := res.Consume(ctx); err != nil {
+			t.Fatalf("consume seed: %v", err)
+		}
+	}
+
+	const goroutines = 20
+	errc := make(chan error, goroutines)
+	for range goroutines {
+		go func() {
+			res, err := db.RunQuery(ctx, `MATCH (n:Person) RETURN n.name AS name`, nil)
+			if err != nil {
+				errc <- err
+				return
+			}
+			recs, err := res.Collect(ctx)
+			if err != nil {
+				errc <- err
+				return
+			}
+			if len(recs) != 10 {
+				errc <- fmt.Errorf("expected 10 records, got %d", len(recs))
+				return
+			}
+			errc <- nil
+		}()
+	}
+	for range goroutines {
+		if err := <-errc; err != nil {
+			t.Errorf("concurrent read: %v", err)
+		}
+	}
 }

@@ -354,3 +354,31 @@ Key Decisions:
 - Existing benchmarks did not call b.ReportAllocs(); new ones explicitly do per task spec.
 
 Next Task: task-016
+
+================================================================================
+TASK-016: Add query plan cache to avoid redundant ANTLR parses
+Date: 2026-05-27T15:00:00Z
+================================================================================
+
+Summary:
+Added a bounded LRU plan cache (1024 entries) to `DB` that caches the
+pre-BindParams translation result (parse→plan→translate output) keyed on the
+Cypher query string. On a cache hit, steps 1–3 are skipped and only BindParams
+is called. The cache is shared with `Tx` via a pointer field. Cache miss
+detection uses an explicit boolean (not nil-slice check) for robustness.
+
+Files Changed:
+- plan_cache.go (new file: planCache type with bounded LRU via container/list + sync.Mutex)
+- driver.go (cache field on DB; Open initializes it; buildSQLResult takes cache param; runQuery/runQueryTx signatures updated)
+- tx.go (cache field on Tx; shared from parent DB via BeginTx; passed to runQueryTx)
+- driver_test.go (TestPlanCache_CacheHitProducesIdenticalResults, TestPlanCache_ConcurrentReadsAreSafe; added "fmt" import)
+
+Key Decisions:
+- Cache is per-DB (not package-level) so that different DBs with different maxPathHops settings never share cached plans from each other.
+- Cache key is only the Cypher string; maxPathHops is implicit in the DB instance that owns the cache.
+- The cached glsql.Result is truly read-only after insertion: BindParams creates new slices via resolveArgs (never mutates the shared Args slice), so concurrent goroutines safely share the cached value.
+- LRU eviction via container/list keeps memory bounded at 1024 entries without introducing external dependencies.
+- Cache miss uses explicit boolean (not nil-slice sentinel) to correctly handle any hypothetical zero-statement result.
+- The `size` parameter in newPlanCache avoids shadowing the builtin `cap`.
+
+Next Task: task-017

@@ -23,6 +23,7 @@ type Tx struct {
 	rawTx       store.TxExecer
 	done        bool
 	maxPathHops int
+	cache       *planCache // shared plan cache from the parent DB
 }
 
 // Run executes cypherStr within the transaction and returns a lazy *Result.
@@ -35,7 +36,7 @@ func (t *Tx) Run(ctx context.Context, cypherStr string, params map[string]any) (
 	if t.done {
 		return nil, fmt.Errorf("graphlite: transaction already closed")
 	}
-	return runQueryTx(ctx, t.rawTx, cypherStr, params, t.maxPathHops)
+	return runQueryTx(ctx, t.rawTx, cypherStr, params, t.maxPathHops, t.cache)
 }
 
 // Commit commits the transaction.

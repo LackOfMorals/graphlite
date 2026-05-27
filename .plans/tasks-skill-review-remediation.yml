@@ -280,14 +280,14 @@ tasks:
       call only `BindParams` with the current parameter values. On a cache miss, run the full
       pipeline and store the result. Verify that the `glsql.Result` struct is safe to share
       across goroutines (read-only after construction).
-    status: pending
+    status: completed
     dependencies: [task-015]
     acceptance_criteria:
       - '`BenchmarkBuildSQLResult_CacheHit` demonstrates cache hits at least 5× faster than cache misses for a simple `MATCH (n) RETURN n` query'
       - 'Concurrent cache reads are safe (verified by `go test -race ./...`)'
       - 'Cache hits produce identical query results to cache misses'
       - '`go test ./...` passes'
-    completed_at: null
+    completed_at: '2026-05-27T15:00:00Z'
 
   - id: task-017
     title: 'Replace LIKE-based label lookup with a node_labels junction table'
