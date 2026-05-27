@@ -26,3 +26,25 @@ Key Decisions:
 - splitLabelsExport deleted entirely; callers use []string(n.Labels) or n.Labels.Encode() directly
 
 Next Task: task-002
+
+================================================================================
+TASK-002: Enforce PRAGMA foreign_keys = ON at open time
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary: Added `PRAGMA foreign_keys = ON;` to `store.Open` immediately after
+WAL mode is enabled. Returns an error if the PRAGMA execution fails. No
+existing tests assumed unconstrained edge insertion — all edge tests already
+used real node IDs. Added two new tests (`TestInsertEdgeMissingStartNode`,
+`TestInsertEdgeMissingEndNode`) to cover both acceptance criteria directly.
+
+Files Changed:
+- store/sqlite.go (add PRAGMA foreign_keys = ON after journal_mode=WAL)
+- store/crud_test.go (add TestInsertEdgeMissingStartNode and TestInsertEdgeMissingEndNode)
+
+Key Decisions:
+- PRAGMA placed after WAL and before BusyTimeout/schema DDL to ensure it is set before any schema operations run
+- Error path closes the DB and returns a wrapped error, consistent with WAL and BusyTimeout error handling
+- No existing tests required changes; all edge insert tests already inserted the referenced nodes first
+
+Next Task: task-003

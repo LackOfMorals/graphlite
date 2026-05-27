@@ -1101,3 +1101,51 @@ func TestTxUpdateEdgeProps(t *testing.T) {
 		t.Errorf("tx.UpdateEdgeProps: expected updated props to contain 'after', got %q", e.Props)
 	}
 }
+
+// ============================================================
+// Foreign key constraint tests
+// ============================================================
+
+// TestInsertEdgeMissingStartNode verifies that InsertEdge rejects an edge
+// whose start_id does not correspond to any node in the store.
+// This test relies on PRAGMA foreign_keys = ON being set at Open time.
+func TestInsertEdgeMissingStartNode(t *testing.T) {
+	s := openMemory(t)
+	ctx := context.Background()
+
+	// Insert only one node; use a synthetic non-existent ID for start_id.
+	n2, err := s.InsertNode(ctx, store.DecodeLabels("Node"), `{"n":2}`)
+	if err != nil {
+		t.Fatalf("InsertNode: %v", err)
+	}
+
+	_, err = s.InsertEdge(ctx, "DANGLING", 9999999, n2, `{}`)
+	if err == nil {
+		t.Fatal("expected FOREIGN KEY constraint error for missing start_id, got nil")
+	}
+	if !strings.Contains(err.Error(), "FOREIGN KEY") {
+		t.Errorf("expected FOREIGN KEY error, got: %v", err)
+	}
+}
+
+// TestInsertEdgeMissingEndNode verifies that InsertEdge rejects an edge
+// whose end_id does not correspond to any node in the store.
+// This test relies on PRAGMA foreign_keys = ON being set at Open time.
+func TestInsertEdgeMissingEndNode(t *testing.T) {
+	s := openMemory(t)
+	ctx := context.Background()
+
+	// Insert only one node; use a synthetic non-existent ID for end_id.
+	n1, err := s.InsertNode(ctx, store.DecodeLabels("Node"), `{"n":1}`)
+	if err != nil {
+		t.Fatalf("InsertNode: %v", err)
+	}
+
+	_, err = s.InsertEdge(ctx, "DANGLING", n1, 9999999, `{}`)
+	if err == nil {
+		t.Fatal("expected FOREIGN KEY constraint error for missing end_id, got nil")
+	}
+	if !strings.Contains(err.Error(), "FOREIGN KEY") {
+		t.Errorf("expected FOREIGN KEY error, got: %v", err)
+	}
+}

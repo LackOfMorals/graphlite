@@ -31,14 +31,14 @@ tasks:
       PRAGMA execution fails. Audit `store/crud_test.go` for any tests that assume unconstrained
       edge insertion (synthetic node IDs not pre-inserted) and fix them before or alongside this
       change so the test suite continues to pass.
-    status: pending
+    status: completed
     dependencies: []
     acceptance_criteria:
       - 'Inserting an edge whose `start_id` does not exist in `nodes` returns a `FOREIGN KEY constraint failed` error'
       - 'Inserting an edge whose `end_id` does not exist in `nodes` returns a `FOREIGN KEY constraint failed` error'
       - '`go test ./...` passes after fixing any test that previously relied on unconstrained edge insertion'
       - 'The `Open` function returns an error if `PRAGMA foreign_keys = ON` fails to execute'
-    completed_at: null
+    completed_at: '2026-05-27T00:00:00Z'
 
   - id: task-003
     title: 'Refactor sqliteTx: collapse 14-method override duplication'

@@ -112,3 +112,4 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - `types.go` had a second `// Package graphlite ...` doc block (v1-era text referencing Neo4j Aura); it was removed in task-011. Only `driver.go` carries the package doc comment.
 - `testdata/integration_test.go` and `compat/tck_test.go` both define their own `eagerResult`/`collectResult` — they are separate packages and cannot share a common helper without a new exported type.
 - `DB.Close` still takes `context.Context` (only `Tx` methods are context-free); any test calling `db.Close()` without args must be fixed to `db.Close(context.Background())`.
+- `PRAGMA foreign_keys = ON` is now set in `store.Open` immediately after `PRAGMA journal_mode=WAL`. SQLite disables FK enforcement by default; the PRAGMA must be set per-connection (it is not persisted). With `SetMaxOpenConns(1)` the single connection always has it enabled.

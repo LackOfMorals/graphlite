@@ -49,6 +49,14 @@ func Open(uri string, cfg Config) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("store: enable WAL mode: %w", err)
 	}
 
+	// Enforce foreign-key constraints. SQLite disables them by default;
+	// enabling here ensures that edge inserts referencing non-existent node IDs
+	// are rejected at the database level.
+	if _, err := db.Exec("PRAGMA foreign_keys = ON;"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("store: enable foreign keys: %w", err)
+	}
+
 	if cfg.BusyTimeout > 0 {
 		ms := cfg.BusyTimeout.Milliseconds()
 		if _, err := db.Exec(fmt.Sprintf("PRAGMA busy_timeout=%d;", ms)); err != nil {
