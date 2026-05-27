@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,9 +23,22 @@ type Config struct {
 
 // SQLiteStore is the SQLite-backed implementation of Store.
 // It uses modernc.org/sqlite so no CGO is required.
+//
+// The q field is the active SQL executor: it is set to db (as a querier) for
+// non-transactional operation and to a *sql.Tx for transactional operation.
+// The db field is always the underlying connection pool; it is used for
+// lifecycle operations (Close, Snapshot, BeginExecTx) regardless of
+// transaction state. The tx field is non-nil only within a transaction and
+// provides Commit/Rollback; it is always equal to q when non-nil.
 type SQLiteStore struct {
 	db *sql.DB
+	q  querier    // *sql.DB (no tx) or *sql.Tx (within a tx)
+	tx *sql.Tx    // non-nil only when this store is a transaction scope
 }
+
+// Compile-time assertion: *SQLiteStore must satisfy both Store and Tx.
+var _ Store = (*SQLiteStore)(nil)
+var _ Tx = (*SQLiteStore)(nil)
 
 // Open opens (or creates) a SQLite database at the given URI and returns a
 // Store. The URI may be:
@@ -49,6 +64,14 @@ func Open(uri string, cfg Config) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("store: enable WAL mode: %w", err)
 	}
 
+	// Enforce foreign-key constraints. SQLite disables them by default;
+	// enabling here ensures that edge inserts referencing non-existent node IDs
+	// are rejected at the database level.
+	if _, err := db.Exec("PRAGMA foreign_keys = ON;"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("store: enable foreign keys: %w", err)
+	}
+
 	if cfg.BusyTimeout > 0 {
 		ms := cfg.BusyTimeout.Milliseconds()
 		if _, err := db.Exec(fmt.Sprintf("PRAGMA busy_timeout=%d;", ms)); err != nil {
@@ -63,18 +86,30 @@ func Open(uri string, cfg Config) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("store: apply schema: %w", err)
 	}
 
-	return &SQLiteStore{db: db}, nil
+	// Backfill node_labels for any pre-existing nodes that were created before
+	// the junction table was added. This is a no-op on fresh databases.
+	if _, err := db.Exec(backfillMigrationSQL); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("store: backfill node_labels: %w", err)
+	}
+
+	return &SQLiteStore{db: db, q: db}, nil
 }
 
 // DB returns the underlying *sql.DB. This method is on the concrete type only
 // and is not part of the Store interface — use Exec() in interface-typed code.
 func (s *SQLiteStore) DB() *sql.DB { return s.db }
 
-// Exec returns the underlying *sql.DB as a store.Execer.
-func (s *SQLiteStore) Exec() Execer { return s.db }
+// Exec returns the active SQL executor as a store.Execer. When called on a
+// transaction-scoped store, the returned Execer runs within that transaction.
+func (s *SQLiteStore) Exec() Execer { return s.q }
 
 // BeginExecTx starts a new transaction and returns a TxExecer.
+// Returns an error if called on an already-transactional store.
 func (s *SQLiteStore) BeginExecTx(ctx context.Context) (TxExecer, error) {
+	if s.tx != nil {
+		return nil, fmt.Errorf("store: cannot nest transactions")
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("store: begin exec tx: %w", err)
@@ -87,196 +122,140 @@ func (s *SQLiteStore) Close() error { return s.db.Close() }
 
 // Snapshot writes an atomic, consistent copy of the database to path using
 // VACUUM INTO. path must not already exist.
+//
+// Path-traversal protection: the path is cleaned via filepath.Clean and any
+// remaining ".." components are rejected. Symlinks in the parent directory
+// are resolved so that ".." after symlink expansion is also caught. Note that
+// absolute paths with no ".." components are accepted; callers that need to
+// restrict snapshot destinations to a specific directory must enforce that
+// constraint themselves.
 func (s *SQLiteStore) Snapshot(path string) error {
-	escaped := strings.ReplaceAll(path, "'", "''")
-	if _, err := s.db.Exec("VACUUM INTO '" + escaped + "'"); err != nil {
+	// Apply the same path-traversal protection used in driver.Open: clean the
+	// path, resolve parent-directory symlinks, then reject any ".." component.
+	cleaned := filepath.Clean(path)
+	if dir, err := filepath.EvalSymlinks(filepath.Dir(cleaned)); err == nil {
+		cleaned = filepath.Join(dir, filepath.Base(cleaned))
+	}
+	if slices.Contains(strings.Split(cleaned, string(filepath.Separator)), "..") {
+		return fmt.Errorf("store: snapshot: path traversal not allowed: %q", path)
+	}
+
+	if _, err := s.db.Exec("VACUUM INTO ?", cleaned); err != nil {
 		return fmt.Errorf("store: snapshot: %w", err)
 	}
 	return nil
 }
 
-// Begin starts a new database transaction and returns a Tx.
+// Begin starts a new database transaction and returns a Tx. The returned Tx
+// is a *SQLiteStore whose querier is set to the underlying *sql.Tx so all
+// CRUD methods execute within the transaction without per-method overrides.
+// Returns an error if called on an already-transactional store.
 func (s *SQLiteStore) Begin(ctx context.Context) (Tx, error) {
+	if s.tx != nil {
+		return nil, fmt.Errorf("store: cannot nest transactions")
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("store: begin transaction: %w", err)
 	}
-	return &sqliteTx{SQLiteStore: &SQLiteStore{db: s.db}, tx: tx}, nil
+	return &SQLiteStore{db: s.db, q: tx, tx: tx}, nil
+}
+
+// Commit commits the transaction. Returns an error if the store is not in a
+// transaction scope.
+func (s *SQLiteStore) Commit() error {
+	if s.tx == nil {
+		return fmt.Errorf("store: commit called on non-transactional store")
+	}
+	return s.tx.Commit()
+}
+
+// Rollback aborts the transaction. Returns an error if the store is not in a
+// transaction scope.
+func (s *SQLiteStore) Rollback() error {
+	if s.tx == nil {
+		return fmt.Errorf("store: rollback called on non-transactional store")
+	}
+	return s.tx.Rollback()
 }
 
 // --- Node operations ---
 
 // InsertNode inserts a new node and returns its integer ID.
-func (s *SQLiteStore) InsertNode(ctx context.Context, labels string, propsJSON string) (int64, error) {
-	return insertNode(ctx, s.db, labels, propsJSON)
+func (s *SQLiteStore) InsertNode(ctx context.Context, labels Labels, propsJSON string) (int64, error) {
+	return insertNode(ctx, s.q, labels, propsJSON)
 }
 
 // GetNode returns the node with the given ID, or sql.ErrNoRows if not found.
 func (s *SQLiteStore) GetNode(ctx context.Context, id int64) (*NodeRow, error) {
-	return getNode(ctx, s.db, id)
+	return getNode(ctx, s.q, id)
 }
 
 // DeleteNode removes the node with the given ID.
 func (s *SQLiteStore) DeleteNode(ctx context.Context, id int64) error {
-	return deleteNode(ctx, s.db, id)
+	return deleteNode(ctx, s.q, id)
 }
 
 // ListNodes returns all nodes.
 func (s *SQLiteStore) ListNodes(ctx context.Context) ([]*NodeRow, error) {
-	return listNodes(ctx, s.db)
+	return listNodes(ctx, s.q)
 }
 
 // ListNodesByLabel returns nodes whose labels column contains labelName.
 func (s *SQLiteStore) ListNodesByLabel(ctx context.Context, labelName string) ([]*NodeRow, error) {
-	return listNodesByLabel(ctx, s.db, labelName)
+	return listNodesByLabel(ctx, s.q, labelName)
 }
 
 // UpdateNodeProps replaces the props JSON for the node with the given ID.
 func (s *SQLiteStore) UpdateNodeProps(ctx context.Context, id int64, propsJSON string) error {
-	return updateNodeProps(ctx, s.db, id, propsJSON)
+	return updateNodeProps(ctx, s.q, id, propsJSON)
 }
 
 // --- Edge operations ---
 
 // InsertEdge inserts a new edge and returns its integer ID.
 func (s *SQLiteStore) InsertEdge(ctx context.Context, edgeType string, startID, endID int64, propsJSON string) (int64, error) {
-	return insertEdge(ctx, s.db, edgeType, startID, endID, propsJSON)
+	return insertEdge(ctx, s.q, edgeType, startID, endID, propsJSON)
 }
 
 // GetEdge returns the edge with the given ID, or sql.ErrNoRows if not found.
 func (s *SQLiteStore) GetEdge(ctx context.Context, id int64) (*EdgeRow, error) {
-	return getEdge(ctx, s.db, id)
+	return getEdge(ctx, s.q, id)
 }
 
 // DeleteEdge removes the edge with the given ID.
 func (s *SQLiteStore) DeleteEdge(ctx context.Context, id int64) error {
-	return deleteEdge(ctx, s.db, id)
+	return deleteEdge(ctx, s.q, id)
 }
 
 // ListEdges returns all edges.
 func (s *SQLiteStore) ListEdges(ctx context.Context) ([]*EdgeRow, error) {
-	return listEdges(ctx, s.db)
+	return listEdges(ctx, s.q)
 }
 
 // ListEdgesByType returns edges with the given relationship type.
 func (s *SQLiteStore) ListEdgesByType(ctx context.Context, edgeType string) ([]*EdgeRow, error) {
-	return listEdgesByType(ctx, s.db, edgeType)
+	return listEdgesByType(ctx, s.q, edgeType)
 }
 
 // ListEdgesByStartNode returns all edges whose start_id equals startID.
 func (s *SQLiteStore) ListEdgesByStartNode(ctx context.Context, startID int64) ([]*EdgeRow, error) {
-	return listEdgesByStartNode(ctx, s.db, startID)
+	return listEdgesByStartNode(ctx, s.q, startID)
 }
 
 // ListEdgesByEndNode returns all edges whose end_id equals endID.
 func (s *SQLiteStore) ListEdgesByEndNode(ctx context.Context, endID int64) ([]*EdgeRow, error) {
-	return listEdgesByEndNode(ctx, s.db, endID)
+	return listEdgesByEndNode(ctx, s.q, endID)
 }
 
 // EdgeExistsForNode returns true if any edge references the given node ID.
 func (s *SQLiteStore) EdgeExistsForNode(ctx context.Context, nodeID int64) (bool, error) {
-	return edgeExistsForNode(ctx, s.db, nodeID)
+	return edgeExistsForNode(ctx, s.q, nodeID)
 }
 
 // UpdateEdgeProps replaces the props JSON for the edge with the given ID.
 func (s *SQLiteStore) UpdateEdgeProps(ctx context.Context, id int64, propsJSON string) error {
-	return updateEdgeProps(ctx, s.db, id, propsJSON)
-}
-
-// ============================================================================
-// sqliteTx — transaction-scoped Store
-// ============================================================================
-
-// sqliteTx is a Store that executes all operations within a single SQL
-// transaction. It embeds SQLiteStore to inherit all method implementations,
-// but overrides the querier with a *sql.Tx.
-type sqliteTx struct {
-	*SQLiteStore
-	tx *sql.Tx
-}
-
-// Compile-time assertion: sqliteTx must satisfy Tx.
-var _ Tx = (*sqliteTx)(nil)
-
-// Commit commits the transaction.
-func (t *sqliteTx) Commit() error { return t.tx.Commit() }
-
-// Rollback aborts the transaction.
-func (t *sqliteTx) Rollback() error { return t.tx.Rollback() }
-
-// Begin is not supported on a Tx; callers should use the parent Store.
-func (t *sqliteTx) Begin(_ context.Context) (Tx, error) {
-	return nil, fmt.Errorf("store: cannot nest transactions")
-}
-
-// Exec returns the underlying *sql.Tx as an Execer.
-func (t *sqliteTx) Exec() Execer { return t.tx }
-
-// BeginExecTx is not supported on an already-transactional store.
-func (t *sqliteTx) BeginExecTx(_ context.Context) (TxExecer, error) {
-	return nil, fmt.Errorf("store: cannot nest transactions")
-}
-
-// Override all operations to use the transaction's executor.
-
-func (t *sqliteTx) InsertNode(ctx context.Context, labels string, propsJSON string) (int64, error) {
-	return insertNode(ctx, t.tx, labels, propsJSON)
-}
-
-func (t *sqliteTx) GetNode(ctx context.Context, id int64) (*NodeRow, error) {
-	return getNode(ctx, t.tx, id)
-}
-
-func (t *sqliteTx) DeleteNode(ctx context.Context, id int64) error {
-	return deleteNode(ctx, t.tx, id)
-}
-
-func (t *sqliteTx) ListNodes(ctx context.Context) ([]*NodeRow, error) {
-	return listNodes(ctx, t.tx)
-}
-
-func (t *sqliteTx) ListNodesByLabel(ctx context.Context, labelName string) ([]*NodeRow, error) {
-	return listNodesByLabel(ctx, t.tx, labelName)
-}
-
-func (t *sqliteTx) UpdateNodeProps(ctx context.Context, id int64, propsJSON string) error {
-	return updateNodeProps(ctx, t.tx, id, propsJSON)
-}
-
-func (t *sqliteTx) InsertEdge(ctx context.Context, edgeType string, startID, endID int64, propsJSON string) (int64, error) {
-	return insertEdge(ctx, t.tx, edgeType, startID, endID, propsJSON)
-}
-
-func (t *sqliteTx) GetEdge(ctx context.Context, id int64) (*EdgeRow, error) {
-	return getEdge(ctx, t.tx, id)
-}
-
-func (t *sqliteTx) DeleteEdge(ctx context.Context, id int64) error {
-	return deleteEdge(ctx, t.tx, id)
-}
-
-func (t *sqliteTx) ListEdges(ctx context.Context) ([]*EdgeRow, error) {
-	return listEdges(ctx, t.tx)
-}
-
-func (t *sqliteTx) ListEdgesByType(ctx context.Context, edgeType string) ([]*EdgeRow, error) {
-	return listEdgesByType(ctx, t.tx, edgeType)
-}
-
-func (t *sqliteTx) ListEdgesByStartNode(ctx context.Context, startID int64) ([]*EdgeRow, error) {
-	return listEdgesByStartNode(ctx, t.tx, startID)
-}
-
-func (t *sqliteTx) ListEdgesByEndNode(ctx context.Context, endID int64) ([]*EdgeRow, error) {
-	return listEdgesByEndNode(ctx, t.tx, endID)
-}
-
-func (t *sqliteTx) EdgeExistsForNode(ctx context.Context, nodeID int64) (bool, error) {
-	return edgeExistsForNode(ctx, t.tx, nodeID)
-}
-
-func (t *sqliteTx) UpdateEdgeProps(ctx context.Context, id int64, propsJSON string) error {
-	return updateEdgeProps(ctx, t.tx, id, propsJSON)
+	return updateEdgeProps(ctx, s.q, id, propsJSON)
 }
 
 // ============================================================================
@@ -292,13 +271,13 @@ type querier interface {
 }
 
 // ============================================================================
-// Helper functions (shared between SQLiteStore and sqliteTx)
+// Helper functions (shared for both non-transactional and transactional use)
 // ============================================================================
 
-func insertNode(ctx context.Context, q querier, labels string, propsJSON string) (int64, error) {
+func insertNode(ctx context.Context, q querier, labels Labels, propsJSON string) (int64, error) {
 	res, err := q.ExecContext(ctx,
 		`INSERT INTO nodes (labels, props) VALUES (?, json(?))`,
-		labels, propsJSON,
+		labels.Encode(), propsJSON,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("store: insert node: %w", err)
@@ -339,17 +318,15 @@ func listNodes(ctx context.Context, q querier) ([]*NodeRow, error) {
 }
 
 func listNodesByLabel(ctx context.Context, q querier, labelName string) ([]*NodeRow, error) {
-	// Use the idx_nodes_labels index with an exact-match or instr-based check.
-	// The label is stored in a comma-separated list, so we need to find it as
-	// a whole word. We use instr to check for the label with comma delimiters,
-	// covering the cases: label at start, middle, or end of the list.
+	// Use the idx_node_labels_label index via a JOIN against the node_labels
+	// junction table. This replaces the previous LIKE-based scan and avoids
+	// full table scans on the nodes table.
 	rows, err := q.QueryContext(ctx,
-		`SELECT id, labels, props FROM nodes
-		 WHERE labels = ?
-		    OR labels LIKE ? || ',%'
-		    OR labels LIKE '%,' || ?
-		    OR labels LIKE '%,' || ? || ',%'`,
-		labelName, labelName, labelName, labelName,
+		`SELECT n.id, n.labels, n.props
+		 FROM nodes n
+		 JOIN node_labels nl ON nl.node_id = n.id
+		 WHERE nl.label = ?`,
+		labelName,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: list nodes by label %q: %w", labelName, err)

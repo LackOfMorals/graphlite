@@ -72,9 +72,16 @@ CREATE TABLE edges (
     end_id   INTEGER NOT NULL REFERENCES nodes(id),
     props    JSON    NOT NULL DEFAULT '{}'
 );
+CREATE TABLE node_labels (
+    node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    label   TEXT    NOT NULL,
+    UNIQUE (node_id, label)
+);
+-- idx_node_labels_label ON node_labels(label, node_id) — O(log n) label lookups
 ```
 
 WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
+`node_labels` is kept in sync automatically by SQLite triggers on nodes INSERT/UPDATE; label lookups use EXISTS subquery or JOIN against node_labels rather than LIKE on nodes.labels.
 
 ## Gotchas and Learnings
 
@@ -94,6 +101,7 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - neo4j driver fully removed in task-010 via `go mod tidy` + `go mod vendor` (both needed — the repo uses a vendor dir; `go build` fails with "inconsistent vendoring" if only tidy is run).
 - `Tx` type lives in `tx.go` (moved from session.go in task-003); context params on Commit/Rollback/Close were removed in task-005 — all were blank identifiers so no behavior changed.
 - `DB.Close` still takes `context.Context`; only `Tx` methods are context-free.
+- `*ErrImportDepthExceeded` must never be wrapped with `fmt.Errorf("%w")` — the existing test uses a direct type assertion (not `errors.As`). Use a `wrapErr` helper that checks `errors.As(err, &depthErr)` and returns the unwrapped sentinel directly.
 - `//go:build ignore` example files (examples/getting_started, examples/neo4j_roundtrip) use deleted v1 APIs and are not compiled by `go build ./...` — they will be rewritten in task-012.
 - `interfaces.go` is deleted in v2; all session-layer/compat interfaces (Driver, Session, Transaction, ResultTransformer, etc.) are gone.
 - When replacing `NewEagerResult(ctx, qr)` calls, use `qr.Collect(ctx)` to get records directly — no intermediate struct needed.
@@ -112,3 +120,17 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - `types.go` had a second `// Package graphlite ...` doc block (v1-era text referencing Neo4j Aura); it was removed in task-011. Only `driver.go` carries the package doc comment.
 - `testdata/integration_test.go` and `compat/tck_test.go` both define their own `eagerResult`/`collectResult` — they are separate packages and cannot share a common helper without a new exported type.
 - `DB.Close` still takes `context.Context` (only `Tx` methods are context-free); any test calling `db.Close()` without args must be fixed to `db.Close(context.Background())`.
+- `github.com/antlr/antlr4/runtime/Go/antlr` is locked to the 2021 pseudo-version and CANNOT be upgraded: `cloudprivacylabs/opencypher@v1.0.0`'s generated parser calls `DeserializeFromUInt16`, which was removed in antlr4-go v1.4.10. No newer opencypher release exists that uses the updated `github.com/antlr4-go/antlr/v4` module path.
+- `golang.org/x/sys` is pinned at v0.41.0 (not v0.44.0): v0.44.0 fixes GO-2026-5024 but requires Go 1.25. Revisit when minimum Go version is raised to 1.25.
+- Plan cache (`plan_cache.go`) is per-`DB` and keyed on Cypher string only. `maxPathHops` is implicitly scoped by the owning DB. `glsql.BindParams` always allocates new slices, so the cached pre-BindParams `glsql.Result` is safely shared read-only across goroutines. Avoid shadowing the builtin `cap` — use `size` or similar parameter names.
+- SQLite FOREIGN KEY constraint errors are detected via `strings.Contains(err.Error(), "FOREIGN KEY constraint failed")` — modernc.org/sqlite surfaces the constraint name verbatim in the error string. Catch this in `InsertEdge` callers and return a domain-appropriate error rather than exposing the raw SQLite message.
+- CSV node `:ID` values are file-local labels only — the actual SQLite primary keys are AUTOINCREMENT-assigned by `InsertNode`. In a fresh empty DB, sequential inserts give IDs 1, 2, 3, … matching the CSV row order, which benchmarks rely on.
+- `Result.rawVals`, `ptrs`, and `vals` are pre-allocated in `newResultFromRows` and reused across all `Next` calls. `ptrs[i] = &rawVals[i]` is stable because `rawVals` is never appended to. `newRecord` copies both keys and values internally, so reusing `vals` is safe.
+- `importJSON` uses `io.ReadAll(io.LimitReader(r, importMaxBytes+1))` for size detection. Do NOT replace this with a streaming decoder approach: `json.Decoder` scans bytes one at a time in a whitespace loop, causing `TestImport_TooLarge` (which sends 500MB of spaces via `io.Pipe`) to hang for 30+ seconds.
+- `decodeImportJSON` must handle `null` values for `"nodes"` and `"edges"` keys. When Go marshals a struct with nil slice fields, JSON produces `"nodes":null`; the decoder must treat this as an empty array (check `tok == nil` after `dec.Token()`).
+- `go test -race ./...` with ANTLR-heavy tests is very slow (~60s+ per ANTLR-first test); use `-run TestResult` or similar narrow patterns for fast race-detection of `result.go` changes.
+- `node_labels(node_id, label)` junction table is maintained by SQLite triggers (AFTER INSERT / AFTER UPDATE OF labels on nodes). All write paths — including raw SQL from the translator and importer — stay in sync automatically without Go-level changes.
+- SQLite triggers use a recursive CTE to split the comma-separated `labels` column because SQLite has no native STRING_SPLIT function.
+- `node_labels` has `UNIQUE(node_id, label)` so that `INSERT OR IGNORE` in `backfillMigrationSQL` truly prevents duplicate rows. Without a unique constraint, `INSERT OR IGNORE` is a no-op and does NOT deduplicate.
+- `LabelContains` in `sql/dialect.go` now takes `nodeIDExpr` (e.g. `"n0.id"`) not the labels column expression. All translator call sites pass `alias + ".id"` after task-017.
+- The backfill migration uses `WHERE NOT EXISTS (... WHERE node_id = n.id)` to skip nodes already populated by triggers (i.e., inserted after the schema upgrade). `INSERT OR IGNORE` handles the edge case where a node partially appears in node_labels.

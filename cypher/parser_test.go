@@ -562,3 +562,88 @@ func TestParse_OrderByMultipleColumns(t *testing.T) {
 		t.Error("second sort item: expected DESC")
 	}
 }
+
+// ─── test 26–32: openCypher string escape sequences ──────────────────────────
+
+// parseLiteralString is a helper that parses a Cypher WHERE clause containing a
+// single string equality comparison and returns the parsed string value.
+func parseLiteralString(t *testing.T, cypherLiteral string) string {
+	t.Helper()
+	// Build: MATCH (n) WHERE n.x = <literal> RETURN n
+	q := mustParse(t, "MATCH (n) WHERE n.x = "+cypherLiteral+" RETURN n")
+	m := getMatch(t, q, 0)
+	if m.Where == nil {
+		t.Fatal("expected non-nil Where")
+	}
+	cmp, ok := m.Where.(*cypher.ComparisonExpr)
+	if !ok {
+		t.Fatalf("expected *ComparisonExpr, got %T", m.Where)
+	}
+	lit, ok := cmp.Right.(*cypher.LiteralExpr)
+	if !ok {
+		t.Fatalf("expected *LiteralExpr on RHS, got %T", cmp.Right)
+	}
+	s, ok := lit.Value.(string)
+	if !ok {
+		t.Fatalf("expected string value, got %T(%v)", lit.Value, lit.Value)
+	}
+	return s
+}
+
+func TestParse_StringEscape_Newline(t *testing.T) {
+	got := parseLiteralString(t, `'Hello\nWorld'`)
+	want := "Hello\nWorld"
+	if got != want {
+		t.Errorf("\\n escape: got %q, want %q", got, want)
+	}
+}
+
+func TestParse_StringEscape_Tab(t *testing.T) {
+	got := parseLiteralString(t, `'\t'`)
+	want := "\t"
+	if got != want {
+		t.Errorf("\\t escape: got %q, want %q", got, want)
+	}
+}
+
+func TestParse_StringEscape_CarriageReturn(t *testing.T) {
+	got := parseLiteralString(t, `'\r'`)
+	want := "\r"
+	if got != want {
+		t.Errorf("\\r escape: got %q, want %q", got, want)
+	}
+}
+
+func TestParse_StringEscape_Backspace(t *testing.T) {
+	got := parseLiteralString(t, `'\b'`)
+	want := "\b"
+	if got != want {
+		t.Errorf("\\b escape: got %q, want %q", got, want)
+	}
+}
+
+func TestParse_StringEscape_FormFeed(t *testing.T) {
+	got := parseLiteralString(t, `'\f'`)
+	want := "\f"
+	if got != want {
+		t.Errorf("\\f escape: got %q, want %q", got, want)
+	}
+}
+
+func TestParse_StringEscape_Unicode(t *testing.T) {
+	// 'A' in Cypher decodes to the Unicode code point U+0041 = 'A'.
+	// Use a double-quoted Go string so the backslash is literal.
+	got := parseLiteralString(t, "'\\u0041'")
+	want := "A"
+	if got != want {
+		t.Errorf("\\u0041 escape: got %q, want %q", got, want)
+	}
+}
+
+func TestParse_StringEscape_UnrecognisedReturnsError(t *testing.T) {
+	// \q is not a valid openCypher escape sequence; Parse should return an error.
+	_, err := cypher.Parse(`MATCH (n) WHERE n.x = '\q' RETURN n`)
+	if err == nil {
+		t.Error("expected error for unrecognised escape sequence \\q, got nil")
+	}
+}

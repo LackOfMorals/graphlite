@@ -19,7 +19,7 @@ func TestOpenMemory(t *testing.T) {
 
 	// Verify the store is functional by inserting a node.
 	ctx := context.Background()
-	id, err := s.InsertNode(ctx, "Test", `{"x":1}`)
+	id, err := s.InsertNode(ctx, store.DecodeLabels("Test"), `{"x":1}`)
 	if err != nil {
 		t.Fatalf("InsertNode: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestOpenFilePath(t *testing.T) {
 
 	// Verify the store is functional.
 	ctx := context.Background()
-	id, err := s.InsertNode(ctx, "FileTest", `{}`)
+	id, err := s.InsertNode(ctx, store.DecodeLabels("FileTest"), `{}`)
 	if err != nil {
 		t.Fatalf("InsertNode: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestWALModeFile(t *testing.T) {
 	}
 }
 
-// TestSchemaTablesAndIndexes verifies that all four required tables and indexes exist.
+// TestSchemaTablesAndIndexes verifies that all required tables and indexes exist.
 func TestSchemaTablesAndIndexes(t *testing.T) {
 	s, err := store.Open(":memory:", store.Config{})
 	if err != nil {
@@ -108,8 +108,8 @@ func TestSchemaTablesAndIndexes(t *testing.T) {
 
 	db := s.DB()
 
-	// Check tables exist.
-	for _, table := range []string{"nodes", "edges"} {
+	// Check tables exist — including the node_labels junction table.
+	for _, table := range []string{"nodes", "edges", "node_labels"} {
 		var name string
 		err := db.QueryRow(
 			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table,
@@ -119,12 +119,13 @@ func TestSchemaTablesAndIndexes(t *testing.T) {
 		}
 	}
 
-	// Check all four required indexes exist.
+	// Check all required indexes exist.
 	for _, idx := range []string{
 		"idx_nodes_labels",
 		"idx_edges_start",
 		"idx_edges_end",
 		"idx_edges_type",
+		"idx_node_labels_label",
 	} {
 		var name string
 		err := db.QueryRow(
@@ -157,7 +158,7 @@ func TestTransactionBeginCommit(t *testing.T) {
 		t.Fatalf("Begin: %v", err)
 	}
 
-	id, err := tx.InsertNode(ctx, "TxNode", `{"key":"value"}`)
+	id, err := tx.InsertNode(ctx, store.DecodeLabels("TxNode"), `{"key":"value"}`)
 	if err != nil {
 		t.Fatalf("tx.InsertNode: %v", err)
 	}
@@ -191,7 +192,7 @@ func TestTransactionRollback(t *testing.T) {
 		t.Fatalf("Begin: %v", err)
 	}
 
-	id, err := tx.InsertNode(ctx, "Ephemeral", `{}`)
+	id, err := tx.InsertNode(ctx, store.DecodeLabels("Ephemeral"), `{}`)
 	if err != nil {
 		t.Fatalf("tx.InsertNode: %v", err)
 	}

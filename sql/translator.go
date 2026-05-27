@@ -126,11 +126,55 @@ type Translator struct {
 	// unqualified column names (e.g. "props" instead of "n0.props") since
 	// UPDATE statements cannot use table aliases.
 	updateVar string
+	// maxPathHops is the upper bound on explicit MaxHops in variable-length
+	// path patterns. 0 means "use the built-in safetyLimit of 15".
+	maxPathHops int
+}
+
+// TranslatorOption is a functional option for configuring a [Translator].
+type TranslatorOption func(*Translator)
+
+// WithMaxPathHops sets the maximum number of hops that an explicit variable-
+// length path bound (e.g. [*1..1000]) may request. Queries whose explicit
+// upper bound exceeds this value return a translation error. A value of 0
+// (the default) uses the built-in safety cap of 15.
+//
+// This option mirrors the graphlite.WithMaxPathHops DB option and exists so
+// that the translator can be tested independently of a full DB.
+func WithMaxPathHops(n int) TranslatorOption {
+	return func(t *Translator) { t.maxPathHops = n }
 }
 
 // NewTranslator creates a Translator that uses the given Dialect.
-func NewTranslator(d Dialect) *Translator {
-	return &Translator{dialect: d}
+// Pass TranslatorOption values to customise behaviour.
+func NewTranslator(d Dialect, opts ...TranslatorOption) *Translator {
+	tr := &Translator{dialect: d}
+	for _, o := range opts {
+		o(tr)
+	}
+	return tr
+}
+
+// validatePropKey checks that a property key name is safe to embed in a JSON
+// path expression such as "$.key". It rejects any name that is not a simple
+// identifier (letters, digits, underscores only, non-empty, starts with a
+// letter or underscore). This prevents JSON path injection attacks via
+// characters such as ']', '[', '"', or null bytes in property key names.
+//
+// The special sentinel key "$" used by the planner for whole-properties
+// parameter matching (MATCH (n $param)) is exempt — it never reaches a JSON
+// path construction site and must not be rejected.
+//
+// For example, a key like `foo]` would silently corrupt the JSON path fragment
+// produced by json_extract(props, '$.foo]') if not validated here.
+func validatePropKey(key string) error {
+	if key == "$" {
+		return nil // planner sentinel for whole-properties parameter matching
+	}
+	if !cypher.IsIdentifier(key) {
+		return fmt.Errorf("sql: property key %q is not a valid identifier (only letters, digits and underscores are allowed)", key)
+	}
+	return nil
 }
 
 // Translate walks plan and returns the SQL string and argument slice.
@@ -634,13 +678,16 @@ func (t *Translator) buildFromClauseForMatchNode(mnp *cypher.MatchNodePlan, scop
 	// Label constraints go to WHERE; args collected into fc.whereArgs so the
 	// caller can assemble t.args in SQL order (JOIN ON args before WHERE args).
 	for _, label := range mnp.Labels {
-		pred, args := t.dialect.LabelContains(alias+".labels", label)
+		pred, args := t.dialect.LabelContains(alias+".id", label)
 		fc.whereFragments = append(fc.whereFragments, pred)
 		fc.whereArgs = append(fc.whereArgs, args...)
 	}
 
 	// Inline property constraints.
 	for key, expr := range mnp.Props {
+		if err := validatePropKey(key); err != nil {
+			return fromClause{}, err
+		}
 		sub := &Translator{dialect: t.dialect}
 		valSQL, err := sub.exprToSQL(expr, scope)
 		if err != nil {
@@ -715,6 +762,9 @@ func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope 
 			edgeOnParts = append(edgeOnParts, "("+strings.Join(typeParts, " OR ")+")")
 		}
 		for key, expr := range mrp.RelProps {
+			if err := validatePropKey(key); err != nil {
+				return fromClause{}, err
+			}
 			sub := &Translator{dialect: t.dialect}
 			valSQL, err := sub.exprToSQL(expr, scope)
 			if err != nil {
@@ -729,11 +779,14 @@ func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope 
 		// 2. Build end-node LEFT JOIN ON clause.
 		nodeOnParts := []string{t.endNodeCond(mrp, relAlias, startAlias, endAlias)}
 		for _, label := range mrp.EndNode.Labels {
-			pred, args := t.dialect.LabelContains(endAlias+".labels", label)
+			pred, args := t.dialect.LabelContains(endAlias+".id", label)
 			nodeOnParts = append(nodeOnParts, pred)
 			fc.joinArgs = append(fc.joinArgs, args...)
 		}
 		for key, expr := range mrp.EndNode.Props {
+			if err := validatePropKey(key); err != nil {
+				return fromClause{}, err
+			}
 			sub := &Translator{dialect: t.dialect}
 			valSQL, err := sub.exprToSQL(expr, scope)
 			if err != nil {
@@ -748,11 +801,14 @@ func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope 
 		// 3. Start-node constraints go to WHERE. Args stored in fc.whereArgs so
 		//    the caller can append them after fc.joinArgs when assembling t.args.
 		for _, label := range mrp.StartNode.Labels {
-			pred, args := t.dialect.LabelContains(startAlias+".labels", label)
+			pred, args := t.dialect.LabelContains(startAlias+".id", label)
 			whereParts = append(whereParts, pred)
 			fc.whereArgs = append(fc.whereArgs, args...)
 		}
 		for key, expr := range mrp.StartNode.Props {
+			if err := validatePropKey(key); err != nil {
+				return fromClause{}, err
+			}
 			sub := &Translator{dialect: t.dialect}
 			valSQL, err := sub.exprToSQL(expr, scope)
 			if err != nil {
@@ -769,11 +825,14 @@ func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope 
 
 		// Start node constraints.
 		for _, label := range mrp.StartNode.Labels {
-			pred, args := t.dialect.LabelContains(startAlias+".labels", label)
+			pred, args := t.dialect.LabelContains(startAlias+".id", label)
 			whereParts = append(whereParts, pred)
 			fc.whereArgs = append(fc.whereArgs, args...)
 		}
 		for key, expr := range mrp.StartNode.Props {
+			if err := validatePropKey(key); err != nil {
+				return fromClause{}, err
+			}
 			sub := &Translator{dialect: t.dialect}
 			valSQL, err := sub.exprToSQL(expr, scope)
 			if err != nil {
@@ -800,6 +859,9 @@ func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope 
 			whereParts = append(whereParts, "("+strings.Join(typeParts, " OR ")+")")
 		}
 		for key, expr := range mrp.RelProps {
+			if err := validatePropKey(key); err != nil {
+				return fromClause{}, err
+			}
 			sub := &Translator{dialect: t.dialect}
 			valSQL, err := sub.exprToSQL(expr, scope)
 			if err != nil {
@@ -815,11 +877,14 @@ func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope 
 
 		// End node constraints to WHERE.
 		for _, label := range mrp.EndNode.Labels {
-			pred, args := t.dialect.LabelContains(endAlias+".labels", label)
+			pred, args := t.dialect.LabelContains(endAlias+".id", label)
 			whereParts = append(whereParts, pred)
 			fc.whereArgs = append(fc.whereArgs, args...)
 		}
 		for key, expr := range mrp.EndNode.Props {
+			if err := validatePropKey(key); err != nil {
+				return fromClause{}, err
+			}
 			sub := &Translator{dialect: t.dialect}
 			valSQL, err := sub.exprToSQL(expr, scope)
 			if err != nil {
@@ -923,10 +988,26 @@ func (t *Translator) buildFromClauseForVarLengthRel(vlp *cypher.VariableLengthRe
 		recEndID = "e.start_id"
 	}
 
+	// Determine the effective hop cap for this query.
+	// t.maxPathHops == 0 means "use the built-in safetyLimit".
+	hopCap := safetyLimit
+	if t.maxPathHops > 0 {
+		hopCap = t.maxPathHops
+	}
+
 	// Depth guard in the recursive case.
 	maxHops := vlp.MaxHops
 	if maxHops == 0 {
-		maxHops = safetyLimit // practical cap for unbounded paths
+		maxHops = hopCap // practical cap for unbounded paths
+	} else if maxHops > hopCap {
+		// Explicit upper bound exceeds the configured cap — reject the query
+		// rather than silently truncating results, so callers are aware of the
+		// limit. Use WithMaxPathHops (on DB) to raise the cap deliberately.
+		return fromClause{}, fmt.Errorf(
+			"sql: variable-length path upper bound %d exceeds the maximum allowed hops (%d); "+
+				"use WithMaxPathHops to raise the limit",
+			maxHops, hopCap,
+		)
 	}
 	// The recursive WHERE condition stops expansion when depth reaches the cap.
 	// "depth < maxHops" allows the recursive case to add one more hop (depth+1).
@@ -963,11 +1044,14 @@ func (t *Translator) buildFromClauseForVarLengthRel(vlp *cypher.VariableLengthRe
 	var whereParts []string
 	var whereArgs []any
 	for _, label := range vlp.StartNode.Labels {
-		pred, args := t.dialect.LabelContains(startAlias+".labels", label)
+		pred, args := t.dialect.LabelContains(startAlias+".id", label)
 		whereParts = append(whereParts, pred)
 		whereArgs = append(whereArgs, args...)
 	}
 	for key, expr := range vlp.StartNode.Props {
+		if err := validatePropKey(key); err != nil {
+			return fromClause{}, err
+		}
 		sub := &Translator{dialect: t.dialect}
 		valSQL, err := sub.exprToSQL(expr, scope)
 		if err != nil {
@@ -979,11 +1063,14 @@ func (t *Translator) buildFromClauseForVarLengthRel(vlp *cypher.VariableLengthRe
 
 	// ── End-node constraints (additional WHERE fragments) ─────────────────────
 	for _, label := range vlp.EndNode.Labels {
-		pred, args := t.dialect.LabelContains(endAlias+".labels", label)
+		pred, args := t.dialect.LabelContains(endAlias+".id", label)
 		whereParts = append(whereParts, pred)
 		whereArgs = append(whereArgs, args...)
 	}
 	for key, expr := range vlp.EndNode.Props {
+		if err := validatePropKey(key); err != nil {
+			return fromClause{}, err
+		}
 		sub := &Translator{dialect: t.dialect}
 		valSQL, err := sub.exprToSQL(expr, scope)
 		if err != nil {
@@ -1202,6 +1289,9 @@ func (t *Translator) toGroupBySQL(expr cypher.Expr, scope *cypher.BindingScope) 
 		if !ok {
 			return "", fmt.Errorf("sql: variable %q not in scope for GROUP BY", e.Variable)
 		}
+		if err := validatePropKey(e.Property); err != nil {
+			return "", err
+		}
 		return t.dialect.JSONExtract(b.Alias+".props", "$."+e.Property), nil
 	case *cypher.LiteralExpr:
 		// Literals are constants — no GROUP BY column needed.
@@ -1289,6 +1379,9 @@ func (t *Translator) exprToSQL(expr cypher.Expr, scope *cypher.BindingScope) (st
 		if !ok {
 			return "", fmt.Errorf("sql: variable %q not in scope", e.Variable)
 		}
+		if err := validatePropKey(e.Property); err != nil {
+			return "", err
+		}
 		// In an UPDATE context for this variable, use the unqualified column name
 		// since UPDATE statements cannot reference table aliases.
 		if t.updateVar == e.Variable {
@@ -1366,10 +1459,10 @@ func (t *Translator) exprToSQL(expr cypher.Expr, scope *cypher.BindingScope) (st
 		if !ok {
 			return "", fmt.Errorf("sql: variable %q not in scope for label check", e.Variable)
 		}
-		labelsCol := binding.Alias + ".labels"
+		nodeIDExpr := binding.Alias + ".id"
 		parts := make([]string, 0, len(e.Labels))
 		for _, label := range e.Labels {
-			pred, args := t.dialect.LabelContains(labelsCol, label)
+			pred, args := t.dialect.LabelContains(nodeIDExpr, label)
 			t.args = append(t.args, args...)
 			parts = append(parts, pred)
 		}
@@ -1506,6 +1599,9 @@ func (t *Translator) exprToSQL(expr cypher.Expr, scope *cypher.BindingScope) (st
 		if !ok {
 			return "", fmt.Errorf("sql: variable %q not in scope for exists()", e.Prop.Variable)
 		}
+		if err := validatePropKey(e.Prop.Property); err != nil {
+			return "", err
+		}
 		jsonExpr := t.dialect.JSONExtract(binding.Alias+".props", "$."+e.Prop.Property)
 		return fmt.Sprintf("(%s IS NOT NULL)", jsonExpr), nil
 
@@ -1615,9 +1711,15 @@ func (t *Translator) exprToSQL(expr cypher.Expr, scope *cypher.BindingScope) (st
 		return "?", nil
 
 	case *cypher.RawExpr:
-		// RawExpr: unsupported sub-expression; return as-is (best effort).
-		// The translator cannot produce correct SQL for this but should not crash.
-		return e.Text, nil
+		// RawExpr carries an unparsed expression text from the planner.
+		// Interpolating arbitrary text directly into SQL would open a SQL injection
+		// vector, so we only allow values that pass the isIdentifier allowlist
+		// (letters, digits, underscores — no SQL metacharacters). All other values
+		// are rejected with an error.
+		if cypher.IsIdentifier(e.Text) {
+			return e.Text, nil
+		}
+		return "", fmt.Errorf("sql: unsupported expression %q: complex expressions are not yet supported in this context", e.Text)
 
 	default:
 		return "", fmt.Errorf("sql: unsupported expression type %T", expr)
@@ -2092,6 +2194,10 @@ func (t *Translator) translateSetProp(p *cypher.SetPropPlan, scope *cypher.Bindi
 		return Statement{}, fmt.Errorf("sql: variable %q not in scope for SET", p.Variable)
 	}
 
+	if err := validatePropKey(p.Property); err != nil {
+		return Statement{}, err
+	}
+
 	// Build the value SQL fragment (with its own fresh arg list).
 	valTranslator := &Translator{dialect: t.dialect, updateVar: p.Variable}
 	valSQL, err := valTranslator.exprToSQL(p.Value, scope)
@@ -2142,6 +2248,9 @@ func (t *Translator) translateSetMerge(p *cypher.SetMergePlan, scope *cypher.Bin
 	var args []any
 	jsonSetParts = append(jsonSetParts, "props")
 	for _, k := range keys {
+		if err := validatePropKey(k); err != nil {
+			return Statement{}, err
+		}
 		expr := p.Props[k]
 		valT := &Translator{dialect: t.dialect}
 		valSQL, err := valT.exprToSQL(expr, scope)
@@ -2176,6 +2285,9 @@ func (t *Translator) translateRemoveProp(p *cypher.RemovePropPlan, scope *cypher
 		return Statement{}, fmt.Errorf("sql: variable %q not in scope for REMOVE prop", p.Variable)
 	}
 
+	if err := validatePropKey(p.Property); err != nil {
+		return Statement{}, err
+	}
 	removeExpr := t.dialect.JSONRemove("props", "$."+p.Property)
 	table := "nodes"
 	if binding.IsRel {
@@ -2316,7 +2428,7 @@ func (t *Translator) translateMerge(p *cypher.MergePlan, scope *cypher.BindingSc
 	}
 
 	for _, label := range p.Labels {
-		pred, args := t.dialect.LabelContains(alias+".labels", label)
+		pred, args := t.dialect.LabelContains(alias+".id", label)
 		whereParts = append(whereParts, pred)
 		whereArgs = append(whereArgs, args...)
 	}
@@ -2340,6 +2452,9 @@ func (t *Translator) translateMerge(p *cypher.MergePlan, scope *cypher.BindingSc
 	var externalRefs []externalRef
 
 	for _, key := range propKeys {
+		if err := validatePropKey(key); err != nil {
+			return nil, err
+		}
 		expr := p.Props[key]
 		sub := &Translator{dialect: t.dialect}
 		valSQL, err := sub.exprToSQL(expr, scope)
@@ -2747,6 +2862,9 @@ func (t *Translator) buildPropsJSON(props map[string]cypher.Expr, scope *cypher.
 	parts := make([]string, 0, len(keys)*2)
 	var args []any
 	for _, key := range keys {
+		if err := validatePropKey(key); err != nil {
+			return "", nil, err
+		}
 		expr := props[key]
 		// Use a fresh translator so we can collect the arg values cleanly.
 		sub := &Translator{dialect: t.dialect}

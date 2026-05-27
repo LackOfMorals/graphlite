@@ -148,11 +148,20 @@ func TestImport_CSVEdges_InvalidNodeRef(t *testing.T) {
 	db := openMem(t)
 	ctx := context.Background()
 
-	// No nodes in DB — edge ref should fail.
+	// No nodes in DB — edge ref should fail with a clear error that
+	// does not expose the raw SQLite FOREIGN KEY constraint message.
 	csv := ":START_ID,:END_ID,:TYPE\n99,100,KNOWS\n"
 	err := db.Import(ctx, strings.NewReader(csv), graphlite.FormatCSVEdges)
 	if err == nil {
 		t.Fatal("expected error for nonexistent node ref, got nil")
+	}
+	// The error must identify the bad node IDs without exposing the raw
+	// SQLite constraint string.
+	if !strings.Contains(err.Error(), "node not found") {
+		t.Errorf("error should mention 'node not found', got: %v", err)
+	}
+	if strings.Contains(err.Error(), "FOREIGN KEY constraint") {
+		t.Errorf("error should not expose raw SQLite constraint text, got: %v", err)
 	}
 }
 

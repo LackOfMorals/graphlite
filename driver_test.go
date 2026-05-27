@@ -2,6 +2,7 @@ package graphlite_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,6 +123,25 @@ func TestWithReadOnly(t *testing.T) {
 	_, err = ro.RunQuery(ctx, `CREATE (n:Person {name: "Bob"})`, nil)
 	if err == nil {
 		t.Fatal("expected ErrReadOnly, got nil")
+	}
+	if err != graphlite.ErrReadOnly {
+		t.Fatalf("expected ErrReadOnly, got: %v", err)
+	}
+}
+
+// TestWithReadOnly_BeginTxReturnsErrReadOnly verifies that BeginTx returns
+// ErrReadOnly immediately when the database was opened with WithReadOnly.
+func TestWithReadOnly_BeginTxReturnsErrReadOnly(t *testing.T) {
+	ctx := context.Background()
+	ro, err := graphlite.Open(":memory:", graphlite.WithReadOnly())
+	if err != nil {
+		t.Fatalf("Open ro: %v", err)
+	}
+	defer func() { _ = ro.Close(ctx) }()
+
+	_, err = ro.BeginTx(ctx)
+	if err == nil {
+		t.Fatal("expected ErrReadOnly from BeginTx on read-only DB, got nil")
 	}
 	if err != graphlite.ErrReadOnly {
 		t.Fatalf("expected ErrReadOnly, got: %v", err)
@@ -399,6 +419,42 @@ func TestBeginTx_ClosedAfterRollback(t *testing.T) {
 	}
 }
 
+// TestBeginTx_RollbackAfterCommitIsNoOp verifies that calling Rollback after
+// Commit returns nil, following the database/sql.Tx convention that makes the
+// defer-rollback guard pattern safe to use.
+func TestBeginTx_RollbackAfterCommitIsNoOp(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+
+	tx, err := db.BeginTx(ctx)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	if _, err := tx.Run(ctx, `CREATE (n:IdempotentNode {v: 1})`, nil); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("Run: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	// Rollback after Commit must be a no-op (returns nil, not an error).
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback after Commit: got %v, want nil", err)
+	}
+	// The committed data must still be visible after the no-op Rollback.
+	qr, err := db.RunQuery(ctx, `MATCH (n:IdempotentNode) RETURN n`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery after Rollback: %v", err)
+	}
+	records, err := qr.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 committed node to remain visible, got %d", len(records))
+	}
+}
+
 // TestRunQuery_NodeProjection verifies that a whole-node RETURN populates a
 // *Node value with Labels and Props.
 func TestRunQuery_NodeProjection(t *testing.T) {
@@ -431,4 +487,115 @@ func TestRunQuery_NodeProjection(t *testing.T) {
 		t.Errorf("Props[species] = %v, want %q", node.Props["species"], "cat")
 	}
 	qr.Consume(ctx) //nolint:errcheck
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Plan-cache tests (task-016)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestPlanCache_CacheHitProducesIdenticalResults verifies that repeated
+// executions of the same Cypher string via RunQuery produce identical results
+// regardless of whether the plan cache was hit. This tests the correctness
+// invariant for the cache introduced in task-016.
+func TestPlanCache_CacheHitProducesIdenticalResults(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+
+	// Seed two nodes with different names so we can verify parameter binding is
+	// not contaminated by a previous cache hit.
+	for _, name := range []string{"Alice", "Bob"} {
+		res, err := db.RunQuery(ctx, `CREATE (n:Person {name: $name})`,
+			map[string]any{"name": name})
+		if err != nil {
+			t.Fatalf("CREATE %q: %v", name, err)
+		}
+		if _, err := res.Consume(ctx); err != nil {
+			t.Fatalf("consume CREATE: %v", err)
+		}
+	}
+
+	query := `MATCH (n:Person {name: $name}) RETURN n.name AS name`
+
+	// First call — cache miss.
+	res1, err := db.RunQuery(ctx, query, map[string]any{"name": "Alice"})
+	if err != nil {
+		t.Fatalf("first RunQuery: %v", err)
+	}
+	recs1, err := res1.Collect(ctx)
+	if err != nil {
+		t.Fatalf("first Collect: %v", err)
+	}
+
+	// Second call — cache hit with the same query string but different params.
+	res2, err := db.RunQuery(ctx, query, map[string]any{"name": "Bob"})
+	if err != nil {
+		t.Fatalf("second RunQuery: %v", err)
+	}
+	recs2, err := res2.Collect(ctx)
+	if err != nil {
+		t.Fatalf("second Collect: %v", err)
+	}
+
+	if len(recs1) != 1 {
+		t.Fatalf("expected 1 record for Alice, got %d", len(recs1))
+	}
+	if len(recs2) != 1 {
+		t.Fatalf("expected 1 record for Bob, got %d", len(recs2))
+	}
+
+	got1, _ := recs1[0].Get("name")
+	got2, _ := recs2[0].Get("name")
+	if got1 != "Alice" {
+		t.Errorf("first result: got %q, want %q", got1, "Alice")
+	}
+	if got2 != "Bob" {
+		t.Errorf("second result: got %q, want %q", got2, "Bob")
+	}
+}
+
+// TestPlanCache_ConcurrentReadsAreSafe executes the same query concurrently
+// from multiple goroutines, exercising the plan cache's concurrent-read path.
+// This test is most useful when run with -race.
+func TestPlanCache_ConcurrentReadsAreSafe(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+
+	// Seed 10 nodes.
+	for i := range 10 {
+		res, err := db.RunQuery(ctx, `CREATE (n:Person {name: $name})`,
+			map[string]any{"name": strings.Repeat("A", i+1)})
+		if err != nil {
+			t.Fatalf("seed CREATE %d: %v", i, err)
+		}
+		if _, err := res.Consume(ctx); err != nil {
+			t.Fatalf("consume seed: %v", err)
+		}
+	}
+
+	const goroutines = 20
+	errc := make(chan error, goroutines)
+	for range goroutines {
+		go func() {
+			res, err := db.RunQuery(ctx, `MATCH (n:Person) RETURN n.name AS name`, nil)
+			if err != nil {
+				errc <- err
+				return
+			}
+			recs, err := res.Collect(ctx)
+			if err != nil {
+				errc <- err
+				return
+			}
+			if len(recs) != 10 {
+				errc <- fmt.Errorf("expected 10 records, got %d", len(recs))
+				return
+			}
+			errc <- nil
+		}()
+	}
+	for range goroutines {
+		if err := <-errc; err != nil {
+			t.Errorf("concurrent read: %v", err)
+		}
+	}
 }

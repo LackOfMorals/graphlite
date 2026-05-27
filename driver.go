@@ -52,8 +52,10 @@ import (
 // DB is an open graphlite database. All methods are safe for concurrent use
 // from multiple goroutines.
 type DB struct {
-	st       store.Store
-	readOnly bool
+	st          store.Store
+	readOnly    bool
+	maxPathHops int
+	cache       *planCache // bounded LRU cache for parse→plan→translate results
 }
 
 // Open opens (or creates) a graphlite database at path and returns a *DB.
@@ -94,7 +96,12 @@ func Open(path string, opts ...Option) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("graphlite: open %q: %w", path, err)
 	}
-	return &DB{st: st, readOnly: cfg.readOnly}, nil
+	return &DB{
+		st:          st,
+		readOnly:    cfg.readOnly,
+		maxPathHops: cfg.maxPathHops,
+		cache:       newPlanCache(planCacheMaxSize),
+	}, nil
 }
 
 // Snapshot writes an atomic, consistent copy of the database to path.
@@ -133,7 +140,7 @@ func (d *DB) Close(_ context.Context) error {
 // query contains write statements.
 func (d *DB) RunQuery(ctx context.Context, cypherStr string, params map[string]any) (*Result, error) {
 	if d.readOnly {
-		sqlResult, err := buildSQLResult(cypherStr, params)
+		sqlResult, err := buildSQLResult(cypherStr, params, d.maxPathHops, d.cache)
 		if err != nil {
 			return nil, err
 		}
@@ -144,19 +151,22 @@ func (d *DB) RunQuery(ctx context.Context, cypherStr string, params map[string]a
 		}
 		return executeStatements(ctx, d.st.Exec(), sqlResult, nil)
 	}
-	return runQuery(ctx, d.st.Exec(), cypherStr, params, d.st.BeginExecTx)
+	return runQuery(ctx, d.st.Exec(), cypherStr, params, d.st.BeginExecTx, d.maxPathHops, d.cache)
 }
 
 // BeginTx starts an explicit transaction and returns a *Tx.
 //
-// Use WithReadOnly() on Open to enforce read-only access across the entire
-// database connection.
+// Returns [ErrReadOnly] if the database was opened with [WithReadOnly]; use
+// [DB.RunQuery] for read-only access.
 func (d *DB) BeginTx(ctx context.Context) (*Tx, error) {
+	if d.readOnly {
+		return nil, ErrReadOnly
+	}
 	txEx, err := d.st.BeginExecTx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("graphlite: begin transaction: %w", err)
 	}
-	return &Tx{rawTx: txEx}, nil
+	return &Tx{rawTx: txEx, maxPathHops: d.maxPathHops, cache: d.cache}, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -169,8 +179,8 @@ type execer = store.Execer
 
 // runQuery is the execution pipeline for auto-commit mode.
 // beginTxFn is used to start an implicit transaction for atomic MERGE operations.
-func runQuery(ctx context.Context, ex execer, cypherStr string, params map[string]any, beginTxFn func(context.Context) (store.TxExecer, error)) (*Result, error) {
-	sqlResult, err := buildSQLResult(cypherStr, params)
+func runQuery(ctx context.Context, ex execer, cypherStr string, params map[string]any, beginTxFn func(context.Context) (store.TxExecer, error), maxPathHops int, cache *planCache) (*Result, error) {
+	sqlResult, err := buildSQLResult(cypherStr, params, maxPathHops, cache)
 	if err != nil {
 		return nil, err
 	}
@@ -179,8 +189,8 @@ func runQuery(ctx context.Context, ex execer, cypherStr string, params map[strin
 
 // runQueryTx is the execution pipeline for transactional mode. beginTxFn is
 // nil because the caller already holds an open transaction.
-func runQueryTx(ctx context.Context, ex execer, cypherStr string, params map[string]any) (*Result, error) {
-	sqlResult, err := buildSQLResult(cypherStr, params)
+func runQueryTx(ctx context.Context, ex execer, cypherStr string, params map[string]any, maxPathHops int, cache *planCache) (*Result, error) {
+	sqlResult, err := buildSQLResult(cypherStr, params, maxPathHops, cache)
 	if err != nil {
 		return nil, err
 	}
@@ -189,32 +199,56 @@ func runQueryTx(ctx context.Context, ex execer, cypherStr string, params map[str
 
 // buildSQLResult runs parse → plan → translate → bind-params, returning the
 // bound Result ready for execution.
-func buildSQLResult(cypherStr string, params map[string]any) (glsql.Result, error) {
-	// Step 1: parse.
-	q, err := cypher.Parse(cypherStr)
-	if err != nil {
-		return glsql.Result{}, fmt.Errorf("graphlite: parse: %w", err)
+//
+// When cache is non-nil, the parse→plan→translate result (unbound, containing
+// paramSentinel values) is cached keyed on cypherStr. On a cache hit the three
+// expensive steps are skipped and only BindParams is called. The cached Result
+// is read-only after insertion and is never mutated, so sharing it across
+// goroutines is safe.
+func buildSQLResult(cypherStr string, params map[string]any, maxPathHops int, cache *planCache) (glsql.Result, error) {
+	var (
+		unbound   glsql.Result
+		cacheHit  bool
+	)
+
+	if cache != nil {
+		unbound, cacheHit = cache.get(cypherStr)
 	}
 
-	// Step 2: plan.
-	scope := cypher.NewScope()
-	plan, err := cypher.Plan(q, scope)
-	if err != nil {
-		return glsql.Result{}, fmt.Errorf("graphlite: plan: %w", err)
+	if !cacheHit {
+		// Cache miss (or no cache): run the full pipeline.
+
+		// Step 1: parse.
+		q, err := cypher.Parse(cypherStr)
+		if err != nil {
+			return glsql.Result{}, fmt.Errorf("graphlite: parse: %w", err)
+		}
+
+		// Step 2: plan.
+		scope := cypher.NewScope()
+		plan, err := cypher.Plan(q, scope)
+		if err != nil {
+			return glsql.Result{}, fmt.Errorf("graphlite: plan: %w", err)
+		}
+
+		// Step 3: translate.
+		translator := glsql.NewTranslator(glsql.SQLiteDialect{}, glsql.WithMaxPathHops(maxPathHops))
+		unbound, err = translator.Translate(plan, scope)
+		if err != nil {
+			return glsql.Result{}, fmt.Errorf("graphlite: translate: %w", err)
+		}
+
+		// Store the unbound result in the cache for future hits.
+		if cache != nil {
+			cache.put(cypherStr, unbound)
+		}
 	}
 
-	// Step 3: translate.
-	translator := glsql.NewTranslator(glsql.SQLiteDialect{})
-	sqlResult, err := translator.Translate(plan, scope)
-	if err != nil {
-		return glsql.Result{}, fmt.Errorf("graphlite: translate: %w", err)
-	}
-
-	// Step 4: bind named parameters.
+	// Step 4: bind named parameters (always executed — params differ per call).
 	if params == nil {
 		params = map[string]any{}
 	}
-	sqlResult, err = glsql.BindParams(sqlResult, params)
+	sqlResult, err := glsql.BindParams(unbound, params)
 	if err != nil {
 		var mp *glsql.ErrMissingParam
 		if errors.As(err, &mp) {
@@ -510,19 +544,27 @@ func collectMatchRows(ctx context.Context, ex execer, stmt *glsql.Statement) ([]
 		_ = rows.Close()
 		return nil, nil, fmt.Errorf("graphlite: match-for-write columns: %w", err)
 	}
+	// Pre-allocate scan buffers once and reuse across rows. vals is reset per row
+	// before each Scan call. Each collected row is copied into a fresh slice so
+	// the caller owns independent slices that won't be overwritten by the next iteration.
+	scanVals := make([]any, len(cols))
+	ptrs := make([]any, len(cols))
+	for i := range scanVals {
+		ptrs[i] = &scanVals[i]
+	}
 	var result [][]any
 	for rows.Next() {
-		vals := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range vals {
-			ptrs[i] = &vals[i]
+		// Zero out the scan buffer so stale values from the previous row don't leak
+		// through in the rare case that Scan leaves a slot unchanged (e.g. NULL).
+		for i := range scanVals {
+			scanVals[i] = nil
 		}
 		if err := rows.Scan(ptrs...); err != nil {
 			_ = rows.Close()
 			return nil, nil, fmt.Errorf("graphlite: match-for-write scan: %w", err)
 		}
 		row := make([]any, len(cols))
-		copy(row, vals)
+		copy(row, scanVals)
 		result = append(result, row)
 	}
 	if err := rows.Err(); err != nil {

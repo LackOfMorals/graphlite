@@ -1,8 +1,10 @@
 module github.com/LackOfMorals/graphlite
 
-go 1.24
+go 1.24.12
 
 require (
+	// antlr cannot be upgraded: cloudprivacylabs/opencypher@v1.0.0 generated parser
+	// requires DeserializeFromUInt16 which was removed in antlr4-go v1.4.10.
 	github.com/antlr/antlr4/runtime/Go/antlr v0.0.0-20210803070921-b358b509191a
 	github.com/cloudprivacylabs/opencypher v1.0.0
 	github.com/cucumber/godog v0.15.1
@@ -30,7 +32,9 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/tkuchiki/go-timezone v0.2.0 // indirect
 	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
-	golang.org/x/sys v0.33.0 // indirect
+	// golang.org/x/sys: GO-2026-5024 fixed in v0.44.0 which requires Go 1.25;
+	// staying on v0.41.0 until minimum Go version is raised.
+	golang.org/x/sys v0.41.0 // indirect
 	modernc.org/libc v1.61.13 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.8.2 // indirect

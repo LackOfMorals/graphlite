@@ -31,7 +31,7 @@ func TestInsertNode(t *testing.T) {
 	s := openMemory(t)
 	ctx := context.Background()
 
-	id1, err := s.InsertNode(ctx, "Person", `{"name":"Alice","age":30}`)
+	id1, err := s.InsertNode(ctx, store.DecodeLabels("Person"), `{"name":"Alice","age":30}`)
 	if err != nil {
 		t.Fatalf("InsertNode: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestInsertNode(t *testing.T) {
 		t.Fatalf("expected positive ID, got %d", id1)
 	}
 
-	id2, err := s.InsertNode(ctx, "Person", `{"name":"Bob","age":25}`)
+	id2, err := s.InsertNode(ctx, store.DecodeLabels("Person"), `{"name":"Bob","age":25}`)
 	if err != nil {
 		t.Fatalf("InsertNode second: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestInsertNodeStableID(t *testing.T) {
 	s := openMemory(t)
 	ctx := context.Background()
 
-	insertedID, err := s.InsertNode(ctx, "City", `{"name":"London"}`)
+	insertedID, err := s.InsertNode(ctx, store.DecodeLabels("City"), `{"name":"London"}`)
 	if err != nil {
 		t.Fatalf("InsertNode: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestGetNode(t *testing.T) {
 	s := openMemory(t)
 	ctx := context.Background()
 
-	id, err := s.InsertNode(ctx, "Animal,Pet", `{"name":"Fido","legs":4}`)
+	id, err := s.InsertNode(ctx, store.DecodeLabels("Animal,Pet"), `{"name":"Fido","legs":4}`)
 	if err != nil {
 		t.Fatalf("InsertNode: %v", err)
 	}
@@ -85,8 +85,8 @@ func TestGetNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetNode: %v", err)
 	}
-	if n.Labels != "Animal,Pet" {
-		t.Errorf("Labels: want %q, got %q", "Animal,Pet", n.Labels)
+	if n.Labels.Encode() != "Animal,Pet" {
+		t.Errorf("Labels: want %q, got %q", "Animal,Pet", n.Labels.Encode())
 	}
 	if !strings.Contains(n.Props, "Fido") {
 		t.Errorf("Props should contain 'Fido', got %q", n.Props)
@@ -113,7 +113,7 @@ func TestDeleteNode(t *testing.T) {
 	s := openMemory(t)
 	ctx := context.Background()
 
-	id, err := s.InsertNode(ctx, "Temp", `{}`)
+	id, err := s.InsertNode(ctx, store.DecodeLabels("Temp"), `{}`)
 	if err != nil {
 		t.Fatalf("InsertNode: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestListNodes(t *testing.T) {
 	labels := []string{"A", "B", "C"}
 	insertedIDs := make(map[int64]bool)
 	for _, lbl := range labels {
-		id, err := s.InsertNode(ctx, lbl, `{}`)
+		id, err := s.InsertNode(ctx, store.DecodeLabels(lbl), `{}`)
 		if err != nil {
 			t.Fatalf("InsertNode(%q): %v", lbl, err)
 		}
@@ -190,7 +190,7 @@ func TestListNodesByLabel(t *testing.T) {
 		"Employee":        `{"name":"Dave"}`,
 		"Admin,Person,Manager": `{"name":"Eve"}`,
 	} {
-		id, err := s.InsertNode(ctx, lbl, props)
+		id, err := s.InsertNode(ctx, store.DecodeLabels(lbl), props)
 		if err != nil {
 			t.Fatalf("InsertNode(%q): %v", lbl, err)
 		}
@@ -226,22 +226,27 @@ func TestListNodesByLabel(t *testing.T) {
 	}
 }
 
-// TestListNodesByLabelIndexHint verifies that idx_nodes_labels is used for
-// label lookup via EXPLAIN QUERY PLAN.
+// TestListNodesByLabelIndexHint verifies that idx_node_labels_label is used
+// for label lookup via EXPLAIN QUERY PLAN. The junction-table JOIN should be
+// resolved via the (label, node_id) index rather than a full table scan.
 func TestListNodesByLabelIndexHint(t *testing.T) {
 	s := openMemory(t)
 	ctx := context.Background()
 
 	// Insert a few nodes so the index is non-trivially used.
 	for range 5 {
-		if _, err := s.InsertNode(ctx, "Person", `{}`); err != nil {
+		if _, err := s.InsertNode(ctx, store.DecodeLabels("Person"), `{}`); err != nil {
 			t.Fatalf("InsertNode: %v", err)
 		}
 	}
 
-	// EXPLAIN QUERY PLAN for the first OR branch (exact match), which uses the index.
+	// EXPLAIN QUERY PLAN for the junction-table label lookup.
 	rows, err := s.DB().QueryContext(ctx,
-		`EXPLAIN QUERY PLAN SELECT id, labels, props FROM nodes WHERE labels = ?`,
+		`EXPLAIN QUERY PLAN
+		 SELECT n.id, n.labels, n.props
+		 FROM nodes n
+		 JOIN node_labels nl ON nl.node_id = n.id
+		 WHERE nl.label = ?`,
 		"Person",
 	)
 	if err != nil {
@@ -256,7 +261,7 @@ func TestListNodesByLabelIndexHint(t *testing.T) {
 		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
 			t.Fatalf("EXPLAIN scan: %v", err)
 		}
-		if strings.Contains(detail, "idx_nodes_labels") {
+		if strings.Contains(detail, "idx_node_labels_label") {
 			found = true
 		}
 	}
@@ -264,7 +269,7 @@ func TestListNodesByLabelIndexHint(t *testing.T) {
 		t.Fatalf("EXPLAIN rows: %v", err)
 	}
 	if !found {
-		t.Error("expected EXPLAIN QUERY PLAN to use idx_nodes_labels, but it did not")
+		t.Error("expected EXPLAIN QUERY PLAN to use idx_node_labels_label, but it did not")
 	}
 }
 
@@ -273,7 +278,7 @@ func TestUpdateNodeProps(t *testing.T) {
 	s := openMemory(t)
 	ctx := context.Background()
 
-	id, err := s.InsertNode(ctx, "Widget", `{"color":"red"}`)
+	id, err := s.InsertNode(ctx, store.DecodeLabels("Widget"), `{"color":"red"}`)
 	if err != nil {
 		t.Fatalf("InsertNode: %v", err)
 	}
@@ -302,11 +307,11 @@ func TestUpdateNodeProps(t *testing.T) {
 func insertTestNodes(t *testing.T, s *store.SQLiteStore) (int64, int64) {
 	t.Helper()
 	ctx := context.Background()
-	id1, err := s.InsertNode(ctx, "Node", `{"n":1}`)
+	id1, err := s.InsertNode(ctx, store.DecodeLabels("Node"), `{"n":1}`)
 	if err != nil {
 		t.Fatalf("InsertNode 1: %v", err)
 	}
-	id2, err := s.InsertNode(ctx, "Node", `{"n":2}`)
+	id2, err := s.InsertNode(ctx, store.DecodeLabels("Node"), `{"n":2}`)
 	if err != nil {
 		t.Fatalf("InsertNode 2: %v", err)
 	}
@@ -507,7 +512,7 @@ func TestListEdgesByStartNode(t *testing.T) {
 	s := openMemory(t)
 	ctx := context.Background()
 	n1, n2 := insertTestNodes(t, s)
-	n3, err := s.InsertNode(ctx, "Node", `{"n":3}`)
+	n3, err := s.InsertNode(ctx, store.DecodeLabels("Node"), `{"n":3}`)
 	if err != nil {
 		t.Fatalf("InsertNode 3: %v", err)
 	}
@@ -545,7 +550,7 @@ func TestListEdgesByEndNode(t *testing.T) {
 	s := openMemory(t)
 	ctx := context.Background()
 	n1, n2 := insertTestNodes(t, s)
-	n3, err := s.InsertNode(ctx, "Node", `{"n":3}`)
+	n3, err := s.InsertNode(ctx, store.DecodeLabels("Node"), `{"n":3}`)
 	if err != nil {
 		t.Fatalf("InsertNode 3: %v", err)
 	}
@@ -644,7 +649,7 @@ func TestTxNodeRollback(t *testing.T) {
 		t.Fatalf("Begin: %v", err)
 	}
 
-	id, err := tx.InsertNode(ctx, "RollMe", `{}`)
+	id, err := tx.InsertNode(ctx, store.DecodeLabels("RollMe"), `{}`)
 	if err != nil {
 		t.Fatalf("tx.InsertNode: %v", err)
 	}
@@ -701,11 +706,11 @@ func TestTxAtomicCommit(t *testing.T) {
 		t.Fatalf("Begin: %v", err)
 	}
 
-	n1, err := tx.InsertNode(ctx, "TxA", `{}`)
+	n1, err := tx.InsertNode(ctx, store.DecodeLabels("TxA"), `{}`)
 	if err != nil {
 		t.Fatalf("tx.InsertNode A: %v", err)
 	}
-	n2, err := tx.InsertNode(ctx, "TxB", `{}`)
+	n2, err := tx.InsertNode(ctx, store.DecodeLabels("TxB"), `{}`)
 	if err != nil {
 		t.Fatalf("tx.InsertNode B: %v", err)
 	}
@@ -737,7 +742,7 @@ func TestTxMultipleMutationsRollback(t *testing.T) {
 	ctx := context.Background()
 
 	// Insert a node that will be deleted inside the rolled-back tx.
-	persistedID, err := s.InsertNode(ctx, "Persist", `{}`)
+	persistedID, err := s.InsertNode(ctx, store.DecodeLabels("Persist"), `{}`)
 	if err != nil {
 		t.Fatalf("InsertNode: %v", err)
 	}
@@ -750,7 +755,7 @@ func TestTxMultipleMutationsRollback(t *testing.T) {
 	// Insert several new nodes inside the tx.
 	var newIDs []int64
 	for range 3 {
-		id, err := tx.InsertNode(ctx, "Tx", `{}`)
+		id, err := tx.InsertNode(ctx, store.DecodeLabels("Tx"), `{}`)
 		if err != nil {
 			t.Fatalf("tx.InsertNode: %v", err)
 		}
@@ -797,11 +802,10 @@ func TestNestedTransactionError(t *testing.T) {
 }
 
 // ============================================================
-// Transaction delegate method coverage (task-021)
-// The sqliteTx type delegates each operation to the shared helpers via the
-// embedded *sql.Tx executor. These tests ensure the delegate methods are
-// exercised (they appear as 0% uncovered in the coverage report even though
-// the helpers themselves are tested above via the direct store path).
+// Transaction method coverage (task-021)
+// SQLiteStore uses a single querier field (set to *sql.Tx inside a transaction)
+// so all CRUD methods are shared. These tests exercise the transaction path to
+// ensure coverage of the *sql.Tx code path through each helper function.
 // ============================================================
 
 // openTx opens an in-memory store and begins a transaction.
@@ -823,7 +827,7 @@ func TestTxGetNode(t *testing.T) {
 	_, tx := openTx(t)
 	ctx := context.Background()
 
-	id, err := tx.InsertNode(ctx, "TxGet", `{"x":1}`)
+	id, err := tx.InsertNode(ctx, store.DecodeLabels("TxGet"), `{"x":1}`)
 	if err != nil {
 		t.Fatalf("tx.InsertNode: %v", err)
 	}
@@ -834,8 +838,8 @@ func TestTxGetNode(t *testing.T) {
 	if n.ID != id {
 		t.Errorf("tx.GetNode: expected ID %d, got %d", id, n.ID)
 	}
-	if n.Labels != "TxGet" {
-		t.Errorf("tx.GetNode: expected labels %q, got %q", "TxGet", n.Labels)
+	if n.Labels.Encode() != "TxGet" {
+		t.Errorf("tx.GetNode: expected labels %q, got %q", "TxGet", n.Labels.Encode())
 	}
 }
 
@@ -845,7 +849,7 @@ func TestTxListNodes(t *testing.T) {
 	ctx := context.Background()
 
 	for range 3 {
-		if _, err := tx.InsertNode(ctx, "TxList", `{}`); err != nil {
+		if _, err := tx.InsertNode(ctx, store.DecodeLabels("TxList"), `{}`); err != nil {
 			t.Fatalf("tx.InsertNode: %v", err)
 		}
 	}
@@ -863,10 +867,10 @@ func TestTxListNodesByLabel(t *testing.T) {
 	_, tx := openTx(t)
 	ctx := context.Background()
 
-	if _, err := tx.InsertNode(ctx, "Alpha", `{}`); err != nil {
+	if _, err := tx.InsertNode(ctx, store.DecodeLabels("Alpha"), `{}`); err != nil {
 		t.Fatalf("tx.InsertNode Alpha: %v", err)
 	}
-	if _, err := tx.InsertNode(ctx, "Beta", `{}`); err != nil {
+	if _, err := tx.InsertNode(ctx, store.DecodeLabels("Beta"), `{}`); err != nil {
 		t.Fatalf("tx.InsertNode Beta: %v", err)
 	}
 
@@ -884,7 +888,7 @@ func TestTxUpdateNodeProps(t *testing.T) {
 	_, tx := openTx(t)
 	ctx := context.Background()
 
-	id, err := tx.InsertNode(ctx, "Upd", `{"v":1}`)
+	id, err := tx.InsertNode(ctx, store.DecodeLabels("Upd"), `{"v":1}`)
 	if err != nil {
 		t.Fatalf("tx.InsertNode: %v", err)
 	}
@@ -908,11 +912,11 @@ func insertTxNodes(t *testing.T, tx store.Tx) (n1, n2 int64) {
 	t.Helper()
 	ctx := context.Background()
 	var err error
-	n1, err = tx.InsertNode(ctx, "TxNodeA", `{}`)
+	n1, err = tx.InsertNode(ctx, store.DecodeLabels("TxNodeA"), `{}`)
 	if err != nil {
 		t.Fatalf("insertTxNodes: InsertNode A: %v", err)
 	}
-	n2, err = tx.InsertNode(ctx, "TxNodeB", `{}`)
+	n2, err = tx.InsertNode(ctx, store.DecodeLabels("TxNodeB"), `{}`)
 	if err != nil {
 		t.Fatalf("insertTxNodes: InsertNode B: %v", err)
 	}
@@ -1100,4 +1104,277 @@ func TestTxUpdateEdgeProps(t *testing.T) {
 	if !strings.Contains(e.Props, "after") {
 		t.Errorf("tx.UpdateEdgeProps: expected updated props to contain 'after', got %q", e.Props)
 	}
+}
+
+// ============================================================
+// Junction table (node_labels) correctness tests
+// ============================================================
+
+// TestNodeLabelsJunctionPopulatedOnInsert verifies that node_labels rows are
+// created when a node is inserted (via the INSERT trigger).
+func TestNodeLabelsJunctionPopulatedOnInsert(t *testing.T) {
+	s := openMemory(t)
+	ctx := context.Background()
+
+	id, err := s.InsertNode(ctx, store.DecodeLabels("Person,Employee"), `{}`)
+	if err != nil {
+		t.Fatalf("InsertNode: %v", err)
+	}
+
+	rows, err := s.DB().QueryContext(ctx,
+		`SELECT label FROM node_labels WHERE node_id = ? ORDER BY label`, id)
+	if err != nil {
+		t.Fatalf("query node_labels: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var labels []string
+	for rows.Next() {
+		var lbl string
+		if err := rows.Scan(&lbl); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		labels = append(labels, lbl)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows err: %v", err)
+	}
+
+	want := []string{"Employee", "Person"} // sorted
+	if len(labels) != len(want) {
+		t.Fatalf("expected %d node_labels rows, got %d: %v", len(want), len(labels), labels)
+	}
+	for i, lbl := range labels {
+		if lbl != want[i] {
+			t.Errorf("node_labels[%d] = %q; want %q", i, lbl, want[i])
+		}
+	}
+}
+
+// TestNodeLabelsJunctionCascadesOnDelete verifies that node_labels rows are
+// deleted automatically (via ON DELETE CASCADE) when the node is deleted.
+func TestNodeLabelsJunctionCascadesOnDelete(t *testing.T) {
+	s := openMemory(t)
+	ctx := context.Background()
+
+	id, err := s.InsertNode(ctx, store.DecodeLabels("Person"), `{}`)
+	if err != nil {
+		t.Fatalf("InsertNode: %v", err)
+	}
+
+	if err := s.DeleteNode(ctx, id); err != nil {
+		t.Fatalf("DeleteNode: %v", err)
+	}
+
+	var count int
+	if err := s.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM node_labels WHERE node_id = ?`, id).Scan(&count); err != nil {
+		t.Fatalf("count node_labels: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 node_labels rows after delete, got %d", count)
+	}
+}
+
+// TestNodeLabelsJunctionUpdatedOnLabelChange verifies that the node_labels
+// junction table is synchronised when nodes.labels is updated (via the UPDATE
+// trigger). This is exercised by Cypher REMOVE label operations.
+func TestNodeLabelsJunctionUpdatedOnLabelChange(t *testing.T) {
+	s := openMemory(t)
+	ctx := context.Background()
+
+	id, err := s.InsertNode(ctx, store.DecodeLabels("Person,Employee"), `{}`)
+	if err != nil {
+		t.Fatalf("InsertNode: %v", err)
+	}
+
+	// Simulate a REMOVE :Employee operation by directly updating nodes.labels.
+	if _, err := s.DB().ExecContext(ctx,
+		`UPDATE nodes SET labels = ? WHERE id = ?`, "Person", id); err != nil {
+		t.Fatalf("UPDATE labels: %v", err)
+	}
+
+	rows, err := s.DB().QueryContext(ctx,
+		`SELECT label FROM node_labels WHERE node_id = ?`, id)
+	if err != nil {
+		t.Fatalf("query node_labels: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var labels []string
+	for rows.Next() {
+		var lbl string
+		if err := rows.Scan(&lbl); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		labels = append(labels, lbl)
+	}
+	if len(labels) != 1 || labels[0] != "Person" {
+		t.Errorf("expected [Person] after label update, got %v", labels)
+	}
+}
+
+// TestNodeLabelsJunctionBackfill verifies that the Open-time backfill migration
+// correctly populates node_labels for pre-existing databases. This is simulated
+// by inserting rows into nodes directly (bypassing the trigger) and then
+// running the backfill SQL via reopening a fresh store with pre-seeded data.
+func TestNodeLabelsJunctionBackfill(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := dir + "/backfill_test.db"
+
+	// Open the database and seed raw node rows, bypassing the trigger by first
+	// dropping the trigger, inserting, then the backfill should recover.
+	s, err := store.Open(dbPath, store.Config{})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// Drop the INSERT trigger so we can test the backfill path.
+	if _, err := s.DB().ExecContext(ctx, `DROP TRIGGER IF EXISTS trg_nodes_insert_labels`); err != nil {
+		t.Fatalf("drop trigger: %v", err)
+	}
+	if _, err := s.DB().ExecContext(ctx,
+		`INSERT INTO nodes (labels, props) VALUES (?, '{}')`, "Backfill,Test"); err != nil {
+		t.Fatalf("raw insert: %v", err)
+	}
+	// Confirm node_labels is empty for this row (trigger was dropped).
+	var count int
+	if err := s.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM node_labels`).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 0 {
+		t.Skipf("trigger still fired despite drop (SQLite restriction); skipping backfill test")
+	}
+	_ = s.Close()
+
+	// Reopen: this runs schemaDDL (recreates trigger) + backfillMigrationSQL.
+	s2, err := store.Open(dbPath, store.Config{})
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+
+	// The backfill should have populated node_labels for the raw row.
+	backfillRows, err := s2.ListNodesByLabel(ctx, "Backfill")
+	if err != nil {
+		t.Fatalf("ListNodesByLabel(Backfill): %v", err)
+	}
+	if len(backfillRows) != 1 {
+		t.Errorf("expected 1 node with label Backfill, got %d", len(backfillRows))
+	}
+	testRows, err := s2.ListNodesByLabel(ctx, "Test")
+	if err != nil {
+		t.Fatalf("ListNodesByLabel(Test): %v", err)
+	}
+	if len(testRows) != 1 {
+		t.Errorf("expected 1 node with label Test, got %d", len(testRows))
+	}
+}
+
+// ============================================================
+// Foreign key constraint tests
+// ============================================================
+
+// TestInsertEdgeMissingStartNode verifies that InsertEdge rejects an edge
+// whose start_id does not correspond to any node in the store.
+// This test relies on PRAGMA foreign_keys = ON being set at Open time.
+func TestInsertEdgeMissingStartNode(t *testing.T) {
+	s := openMemory(t)
+	ctx := context.Background()
+
+	// Insert only one node; use a synthetic non-existent ID for start_id.
+	n2, err := s.InsertNode(ctx, store.DecodeLabels("Node"), `{"n":2}`)
+	if err != nil {
+		t.Fatalf("InsertNode: %v", err)
+	}
+
+	_, err = s.InsertEdge(ctx, "DANGLING", 9999999, n2, `{}`)
+	if err == nil {
+		t.Fatal("expected FOREIGN KEY constraint error for missing start_id, got nil")
+	}
+	if !strings.Contains(err.Error(), "FOREIGN KEY") {
+		t.Errorf("expected FOREIGN KEY error, got: %v", err)
+	}
+}
+
+// TestInsertEdgeMissingEndNode verifies that InsertEdge rejects an edge
+// whose end_id does not correspond to any node in the store.
+// This test relies on PRAGMA foreign_keys = ON being set at Open time.
+func TestInsertEdgeMissingEndNode(t *testing.T) {
+	s := openMemory(t)
+	ctx := context.Background()
+
+	// Insert only one node; use a synthetic non-existent ID for end_id.
+	n1, err := s.InsertNode(ctx, store.DecodeLabels("Node"), `{"n":1}`)
+	if err != nil {
+		t.Fatalf("InsertNode: %v", err)
+	}
+
+	_, err = s.InsertEdge(ctx, "DANGLING", n1, 9999999, `{}`)
+	if err == nil {
+		t.Fatal("expected FOREIGN KEY constraint error for missing end_id, got nil")
+	}
+	if !strings.Contains(err.Error(), "FOREIGN KEY") {
+		t.Errorf("expected FOREIGN KEY error, got: %v", err)
+	}
+}
+
+// ============================================================
+// Snapshot path-traversal protection (task-008)
+// ============================================================
+
+// TestSnapshotPathTraversal_DotDot verifies that a path containing ".."
+// components is rejected before VACUUM INTO is executed.
+func TestSnapshotPathTraversal_DotDot(t *testing.T) {
+	s := openMemory(t)
+	err := s.Snapshot("../../etc/malicious.db")
+	if err == nil {
+		t.Fatal("expected path traversal error, got nil")
+	}
+	if !strings.Contains(err.Error(), "path traversal not allowed") {
+		t.Errorf("unexpected error text: %v", err)
+	}
+}
+
+// TestSnapshotPathTraversal_RelativeEscape verifies that a relative path
+// whose cleaned form still escapes the current directory via ".." is rejected.
+// Note: filepath.Clean resolves ".." in absolute paths inline, so this check
+// protects relative paths that traverse above the working directory.
+func TestSnapshotPathTraversal_RelativeEscape(t *testing.T) {
+	s := openMemory(t)
+	// "./sub/../../etc/malicious.db" cleans to "../etc/malicious.db" — still
+	// contains ".." and must be rejected.
+	err := s.Snapshot("./sub/../../etc/malicious.db")
+	if err == nil {
+		t.Fatal("expected path traversal error, got nil")
+	}
+	if !strings.Contains(err.Error(), "path traversal not allowed") {
+		t.Errorf("unexpected error text: %v", err)
+	}
+}
+
+// TestSnapshotValidPath verifies that a valid path within a temporary directory
+// succeeds and produces a readable SQLite file.
+func TestSnapshotValidPath(t *testing.T) {
+	dir := t.TempDir()
+	// Use a file-backed source DB so VACUUM INTO works.
+	src := dir + "/source.db"
+	s, err := store.Open(src, store.Config{})
+	if err != nil {
+		t.Fatalf("Open file DB: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	dest := dir + "/snapshot.db"
+	if err := s.Snapshot(dest); err != nil {
+		t.Fatalf("Snapshot(%q): %v", dest, err)
+	}
+	// Verify the snapshot can be opened as a store.
+	snap, err := store.Open(dest, store.Config{})
+	if err != nil {
+		t.Fatalf("Open snapshot: %v", err)
+	}
+	_ = snap.Close()
 }

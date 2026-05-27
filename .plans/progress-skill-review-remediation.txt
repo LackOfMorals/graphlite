@@ -1,0 +1,528 @@
+================================================================================
+TASK-001: Define Labels type with Encode/Decode helpers
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Introduced `type Labels []string` in `store/store.go` replacing the raw
+comma-separated `string` used for node labels throughout the codebase.
+Added `Encode()`, `DecodeLabels()`, `sql.Scanner`, and `driver.Valuer`
+implementations so the type works transparently with database/sql.
+Updated all call sites: `store/sqlite.go`, `importer.go` (import, export,
+CSV paths), both store test files. Removed the now-dead `splitLabelsExport`
+helper from `importer.go`.
+
+Files Changed:
+- store/store.go (new Labels type with Encode/DecodeLabels/Scan/Value)
+- store/sqlite.go (InsertNode signature, insertNode helper uses Labels.Encode)
+- importer.go (added store import; updated InsertNode calls and CSV export; removed splitLabelsExport)
+- store/crud_test.go (all InsertNode calls use store.DecodeLabels; label comparisons use .Encode())
+- store/store_test.go (same InsertNode and comparison fixes)
+
+Key Decisions:
+- Labels implements sql.Scanner so existing `rows.Scan(&n.Labels)` calls work without change
+- Labels implements driver.Valuer so future parameterised inserts are handled automatically
+- DecodeLabels("") returns nil (no labels) rather than []string{""} to avoid spurious empty label
+- splitLabelsExport deleted entirely; callers use []string(n.Labels) or n.Labels.Encode() directly
+
+Next Task: task-002
+
+================================================================================
+TASK-002: Enforce PRAGMA foreign_keys = ON at open time
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary: Added `PRAGMA foreign_keys = ON;` to `store.Open` immediately after
+WAL mode is enabled. Returns an error if the PRAGMA execution fails. No
+existing tests assumed unconstrained edge insertion — all edge tests already
+used real node IDs. Added two new tests (`TestInsertEdgeMissingStartNode`,
+`TestInsertEdgeMissingEndNode`) to cover both acceptance criteria directly.
+
+Files Changed:
+- store/sqlite.go (add PRAGMA foreign_keys = ON after journal_mode=WAL)
+- store/crud_test.go (add TestInsertEdgeMissingStartNode and TestInsertEdgeMissingEndNode)
+
+Key Decisions:
+- PRAGMA placed after WAL and before BusyTimeout/schema DDL to ensure it is set before any schema operations run
+- Error path closes the DB and returns a wrapped error, consistent with WAL and BusyTimeout error handling
+- No existing tests required changes; all edge insert tests already inserted the referenced nodes first
+
+Next Task: task-003
+
+================================================================================
+TASK-003: Refactor sqliteTx: collapse 14-method override duplication
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Eliminated the `sqliteTx` struct and its 14 per-method forwarding overrides.
+`SQLiteStore` now holds a `q querier` field (the existing interface) set to
+`*sql.DB` at Open time and to `*sql.Tx` inside Begin. A `tx *sql.Tx` field
+tracks whether the store is in a transaction; Commit/Rollback guard on this.
+`Begin` returns a `*SQLiteStore` with `q` and `tx` set. Added compile-time
+interface assertions. Net result: 180 lines removed from sqlite.go.
+
+Files Changed:
+- store/sqlite.go (removed sqliteTx, added q/tx fields to SQLiteStore, updated Begin/Commit/Rollback)
+- store/crud_test.go (minor test adjustments for new structure)
+- .plans/tasks-skill-review-remediation.yml (task-003 marked completed)
+
+Key Decisions:
+- Snapshot() still uses s.db.Exec() (not s.q) — snapshots of in-progress transactions intentionally reflect committed state only, consistent with prior behaviour
+- Commit/Rollback return a sentinel error when called on a non-transactional SQLiteStore; task-012 will make Rollback idempotent after Commit
+
+Next Task: task-004
+
+================================================================================
+TASK-004: Fix RawExpr SQL injection: return error instead of interpolating verbatim
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary: Closed the highest-severity SQL injection vector in the translator.
+The `case *cypher.RawExpr` branch in `exprToSQL` previously returned `e.Text`
+verbatim into the generated SQL string. It now gates on `cypher.IsIdentifier(e.Text)`:
+safe identifiers (letters/digits/underscores only) are passed through; all other
+values return a descriptive error. To enable cross-package use, `isIdentifier` in
+`cypher/planner.go` was exported to `IsIdentifier` and all callers in
+`cypher/planner.go` and `cypher/parser.go` were updated accordingly.
+
+Files Changed:
+- sql/translator.go (case *cypher.RawExpr: gate on IsIdentifier, return error for unsafe inputs)
+- cypher/planner.go (export isIdentifier → IsIdentifier; update all internal callers; improve doc comment)
+- cypher/parser.go (update sole caller to IsIdentifier)
+
+Key Decisions:
+- Exported `isIdentifier` rather than duplicating the logic in the sql package — keeps a single source of truth for the allowlist
+- Simple identifiers (variable names resolved via RawExpr) remain valid passthroughs; complex expressions (function calls, arithmetic, etc.) now error cleanly
+- No existing tests exercise the RawExpr passthrough path in translator, so no test changes were needed
+
+Next Task: task-005
+
+================================================================================
+TASK-005: Validate property key names before JSON path construction
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Added `validatePropKey(key string) error` to `sql/translator.go`. Validation
+gates on `cypher.IsIdentifier`, rejecting keys that contain injection characters
+(`]`, `[`, `"`, null bytes, etc.). Applied at all JSON path construction sites:
+MATCH node/rel/var-length prop loops, exprToSQL PropExpr, ExistsPropExpr,
+GROUP BY PropExpr, translateSetProp, translateSetMerge, translateRemoveProp,
+translateMerge, and buildPropsJSON (CREATE path). The `$` planner sentinel key
+is explicitly exempted. Key validation in translateSetProp was reordered to
+occur before value expression evaluation.
+
+Files Changed:
+- sql/translator.go (validatePropKey + calls at all JSON path sites; $ sentinel exemption; translateSetProp reorder; buildPropsJSON coverage)
+- sql/translator_test.go (3 new tests: ClosingBracket, OpeningBracket, NullByte rejection)
+
+Key Decisions:
+- $ is exempted in validatePropKey itself (not at call sites) so the exemption is documented once and cannot be missed by new call sites
+- translateSetProp validates key before building value expression to surface the security-relevant error first
+- buildPropsJSON now validates keys, closing the CREATE/MERGE injection path
+
+Next Task: task-006
+
+================================================================================
+TASK-006: Apply hard cap to user-supplied MaxHops
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Added `WithMaxPathHops(n int)` option to both `options.go` (DB-level) and
+`sql/translator.go` (translator-level via TranslatorOption). The cap is enforced
+in `buildFromClauseForVarLengthRel`: explicit MaxHops > hopCap returns an error.
+Unbounded [*] paths continue to be clamped to safetyLimit. maxPathHops propagates
+DB → Tx → buildSQLResult → NewTranslator. Reviewer fixes applied: n<=0 is a no-op
+with documentation; error message no longer hardcodes package name.
+
+Files Changed:
+- options.go (WithMaxPathHops option; n<=0 is no-op with docs)
+- driver.go (maxPathHops field on DB; propagation through runQuery/BeginTx)
+- tx.go (maxPathHops field; passed to runQueryTx)
+- sql/translator.go (TranslatorOption/WithMaxPathHops; hopCap enforcement; generic error message)
+- sql/translator_test.go (tests: explicit cap rejection, WithMaxPathHops raises cap, unbounded still clamped)
+
+Key Decisions:
+- n<=0 is silently treated as "use default 15" (documented); returning an error at Open time for n<=0 would be too strict for zero-value struct initialization patterns
+- Error message says "use WithMaxPathHops" without package prefix to avoid stale cross-package references
+
+Next Task: task-007
+
+================================================================================
+TASK-007: Enforce read-only contract in BeginTx and fix misleading PRAGMA comment
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Added a `d.readOnly` guard at the top of `DB.BeginTx` that returns `ErrReadOnly`
+immediately, preventing read-only databases from opening explicit transactions.
+Corrected the `WithReadOnly` doc comment in `options.go` which falsely claimed
+"PRAGMA query_only=ON" was set (it was never executed); the comment now accurately
+describes the API-layer enforcement strategy. Added a focused test
+`TestWithReadOnly_BeginTxReturnsErrReadOnly` in `driver_test.go`.
+
+Files Changed:
+- driver.go (BeginTx: add d.readOnly check returning ErrReadOnly; update doc comment)
+- options.go (WithReadOnly doc: remove false PRAGMA claim, describe actual enforcement)
+- driver_test.go (TestWithReadOnly_BeginTxReturnsErrReadOnly)
+
+Key Decisions:
+- Application-layer enforcement in BeginTx is simpler and safer than trying to
+  retroactively set PRAGMA query_only per-connection (which would require store-level
+  API changes and has different semantics — it silently ignores writes rather than
+  erroring at the API boundary).
+- The doc comment now describes enforcement honestly without prescribing an
+  implementation detail that could change.
+
+Next Task: task-008
+
+================================================================================
+TASK-008: Apply path-traversal protection to Snapshot
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Added filepath.Clean + EvalSymlinks + ".." component check to store.Snapshot,
+matching the protection already in driver.Open. Replaced the unsafe single-quote
+string concatenation with a parameterised `VACUUM INTO ?` bind argument (SQLite
+supports this). Doc comment corrected to accurately state that ".." traversal is
+rejected but absolute paths with no ".." components are accepted; callers needing
+stricter directory confinement must enforce it themselves.
+
+Files Changed:
+- store/sqlite.go (path-traversal check; VACUUM INTO ?; corrected doc comment)
+- store/crud_test.go (TestSnapshotPathTraversal_DotDot, TestSnapshotPathTraversal_RelativeEscape, TestSnapshotValidPath)
+
+Key Decisions:
+- VACUUM INTO ? (bind parameter) is supported in SQLite 3.32+ and is safe; confirmed by TestSnapshotValidPath passing with an absolute path
+- Absolute paths are not rejected (consistent with driver.Open behaviour); doc comment explicitly documents this limitation
+
+Next Task: task-009
+
+================================================================================
+TASK-009: Escape LIKE wildcards in LabelContains
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Added LIKE wildcard escaping to SQLiteDialect.LabelContains. Label names
+containing '%', '_', or '\' are now escaped before use in the three LIKE
+branches; the exact-match (=) branch continues to use the unescaped value.
+Each LIKE clause gains an ESCAPE '\' clause. Updated the interface doc comment
+to document the escaping contract and corrected the args-count doc from "five"
+to "four". Unit tests added covering %, _, \, and combinations.
+
+Files Changed:
+- sql/dialect.go (LabelContains escaping + ESCAPE clause; corrected args count doc)
+- sql/dialect_test.go (wildcard escaping unit tests)
+
+Key Decisions:
+- Backslash escaped first to avoid double-escaping (\ → \\ before % → \%)
+- Exact-match branch uses original unescaped value (SQLite = is literal, not a pattern)
+- Interface doc updated at the definition level so custom dialect implementors see the escaping contract
+
+Next Task: task-010
+
+================================================================================
+TASK-010: Implement full openCypher escape sequences in unquoteString
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Extended `unquoteString` in `cypher/parser.go` to handle the full openCypher
+string escape sequence table: \n, \r, \t, \b, \f (control chars), \uXXXX
+(4-digit Unicode), \uXXXXXXXX (8-digit Unicode). Added `isAllHex` helper.
+Added `unicode/utf8` import and `utf8.ValidRune` checks on both Unicode escape
+paths — code points above unicode.MaxRune and surrogate code points (U+D800–
+U+DFFF) now return a descriptive error rather than silently emitting U+FFFD.
+Applied De Morgan's law to `isAllHex` to satisfy staticcheck QF1001.
+
+Files Changed:
+- cypher/parser.go (escape sequence handling; isAllHex helper; utf8.ValidRune guards; unicode/utf8 import)
+- cypher/parser_test.go (tests for all new escape sequences and invalid Unicode rejection)
+
+Key Decisions:
+- utf8.ValidRune catches both surrogates and code points > MaxRune in one call
+- isAllHex rewritten with De Morgan's law per staticcheck QF1001
+
+Next Task: task-011
+
+================================================================================
+TASK-012: Make Rollback idempotent (no-op after Commit)
+Date: 2026-05-27T12:00:00Z
+================================================================================
+
+Summary:
+Applied two review-phase findings to complete task-012:
+
+1. Fixed the `Tx` struct doc comment in `tx.go` which contradicted the
+   idempotent Rollback behaviour by saying "A Tx must not be used after Commit
+   or Rollback returns." The new comment explains that calling Rollback after
+   a successful Commit is explicitly safe (returns nil), enabling the standard
+   defer-rollback guard pattern, and includes an inline code example.
+
+2. Extended `TestBeginTx_RollbackAfterCommitIsNoOp` in `driver_test.go` to
+   verify that committed data remains visible after the no-op Rollback call.
+   The test now queries for the created node and asserts exactly one record
+   is returned.
+
+The Rollback implementation itself (returns nil when t.done) was already
+correct from the prior implementation pass.
+
+Files Changed:
+- tx.go (Tx struct doc comment: replace contradictory line with accurate defer-pattern description + example)
+- driver_test.go (TestBeginTx_RollbackAfterCommitIsNoOp: add visibility assertion after no-op Rollback)
+- .plans/tasks-skill-review-remediation.yml (task-012 marked completed)
+
+Key Decisions:
+- Struct-level doc comment is the authoritative description of Tx lifecycle; the
+  old "must not be used after..." wording was left over from before the idempotent
+  change and would mislead callers into wrapping Rollback in error checks on the
+  success path.
+- The visibility assertion uses RunQuery + Collect (rather than a second explicit
+  transaction) to keep the test focused on the no-op Rollback semantics.
+
+Next Task: task-013
+
+================================================================================
+TASK-011: Upgrade stale ANTLR and opencypher dependencies; add govulncheck to CI
+Date: 2026-05-27T13:00:00Z
+================================================================================
+
+Summary:
+Attempted to upgrade github.com/antlr/antlr4/runtime/Go/antlr and
+github.com/cloudprivacylabs/opencypher to 2024+ versions. The ANTLR upgrade is
+blocked: cloudprivacylabs/opencypher@v1.0.0 uses generated parser code that
+calls DeserializeFromUInt16, an API removed in antlr4-go v1.4.10. No newer
+release of opencypher exists that uses the updated antlr4-go/antlr/v4 module
+path. Similarly, golang.org/x/sys v0.44.0 (which fixes GO-2026-5024) requires
+Go 1.25; the project is on Go 1.24.
+
+Instead:
+- Upgraded golang.org/x/sys from v0.33.0 to v0.41.0 (latest compatible with Go 1.24).
+- Added explanatory comments in go.mod for both pinned dependencies documenting
+  the exact constraint that prevents further upgrades.
+- Added govulncheck job to .github/workflows/ci.yml, pinned to v1.3.0 (not @latest),
+  with needs: [build-and-test] so it only runs after build/test succeeds.
+- Updated AGENTS.md with the antlr locking constraint and the Go version / sys constraint.
+
+Files Changed:
+- go.mod (golang.org/x/sys v0.41.0; explanatory comments for antlr and sys pins)
+- go.sum (updated hashes for golang.org/x/sys v0.41.0)
+- .github/workflows/ci.yml (govulncheck job: pinned v1.3.0, needs build-and-test)
+- .plans/tasks-skill-review-remediation.yml (task-011 marked completed)
+- AGENTS.md (antlr locked to 2021 version due to opencypher constraint; sys pin documented)
+
+Key Decisions:
+- antlr remains at the 2021 pseudo-version; attempting to upgrade breaks compilation
+  in cypher/ because opencypher's generated parser calls a removed API. Cannot
+  upgrade opencypher either (no newer release). Documented in go.mod.
+- golang.org/x/sys pinned at v0.41.0 (not v0.44.0) because v0.44.0 requires Go 1.25.
+  Will be revisited when minimum Go version is raised to 1.25.
+- govulncheck pinned to v1.3.0 rather than @latest for reproducible CI.
+- needs: [build-and-test] added to ensure vuln scan only runs on builds that passed.
+
+Next Task: task-012 (already completed)
+
+================================================================================
+TASK-015: Add benchmark suite for core hot paths
+Date: 2026-05-27T14:00:00Z
+================================================================================
+
+Summary:
+Added six required benchmarks to `bench/bench_test.go`: BenchmarkRunQuerySimpleSelect,
+BenchmarkRunQueryCreateNode, BenchmarkCollectLargeResult, BenchmarkImportJSON,
+BenchmarkBuildSQLResult_CacheHit, and BenchmarkMatchByLabel. Also added a shared
+10K-node fixture (get10KDB / seedMixedNodes) used by BenchmarkMatchByLabel and
+BenchmarkCollectLargeResult. All six benchmarks call b.ReportAllocs() and run
+successfully with `go test -bench=. -benchmem ./bench/...`.
+
+Files Changed:
+- bench/bench_test.go (added get10KDB fixture, seedMixedNodes helper, and all 6 required benchmarks)
+
+Key Decisions:
+- 10K fixture uses 50/50 Person/Employee split (first 5K Person, last 5K Employee) to give
+  BenchmarkMatchByLabel a deterministic 50% match rate with exact count validation (5000).
+- BenchmarkCollectLargeResult validates len(recs)==10000 to catch regressions immediately.
+- BenchmarkBuildSQLResult_CacheHit uses Consume (not Collect) to focus on pipeline overhead
+  rather than row-iteration overhead; named for the task-016 cache-hit baseline comparison.
+- BenchmarkRunQueryCreateNode opens a fresh DB per b.Run (not a shared fixture) to avoid
+  unbounded DB growth across benchmark iterations.
+- All 6 benchmarks call b.ReportAllocs() before b.ResetTimer() per standard Go pattern.
+- Existing benchmarks did not call b.ReportAllocs(); new ones explicitly do per task spec.
+
+Next Task: task-016
+
+================================================================================
+TASK-016: Add query plan cache to avoid redundant ANTLR parses
+Date: 2026-05-27T15:00:00Z
+================================================================================
+
+Summary:
+Added a bounded LRU plan cache (1024 entries) to `DB` that caches the
+pre-BindParams translation result (parse→plan→translate output) keyed on the
+Cypher query string. On a cache hit, steps 1–3 are skipped and only BindParams
+is called. The cache is shared with `Tx` via a pointer field. Cache miss
+detection uses an explicit boolean (not nil-slice check) for robustness.
+
+Files Changed:
+- plan_cache.go (new file: planCache type with bounded LRU via container/list + sync.Mutex)
+- driver.go (cache field on DB; Open initializes it; buildSQLResult takes cache param; runQuery/runQueryTx signatures updated)
+- tx.go (cache field on Tx; shared from parent DB via BeginTx; passed to runQueryTx)
+- driver_test.go (TestPlanCache_CacheHitProducesIdenticalResults, TestPlanCache_ConcurrentReadsAreSafe; added "fmt" import)
+
+Key Decisions:
+- Cache is per-DB (not package-level) so that different DBs with different maxPathHops settings never share cached plans from each other.
+- Cache key is only the Cypher string; maxPathHops is implicit in the DB instance that owns the cache.
+- The cached glsql.Result is truly read-only after insertion: BindParams creates new slices via resolveArgs (never mutates the shared Args slice), so concurrent goroutines safely share the cached value.
+- LRU eviction via container/list keeps memory bounded at 1024 entries without introducing external dependencies.
+- Cache miss uses explicit boolean (not nil-slice sentinel) to correctly handle any hypothetical zero-statement result.
+- The `size` parameter in newPlanCache avoids shadowing the builtin `cap`.
+
+Next Task: task-017
+
+================================================================================
+TASK-017: Replace LIKE-based label lookup with a node_labels junction table
+Date: 2026-05-27T16:30:00Z
+================================================================================
+
+Summary:
+Replaced the LIKE-based label predicate (`labels LIKE '%,Label,%'`) with a
+dedicated `node_labels(node_id, label)` junction table. SQLite triggers maintain
+the junction table automatically on every INSERT or UPDATE to `nodes.labels`,
+so all code paths (store layer, translator, importer) stay in sync without
+modification. `listNodesByLabel` now JOINs against `node_labels`. The SQL
+dialect's `LabelContains` was redesigned from a 4-arg LIKE expression to a
+1-arg EXISTS subquery against `node_labels`. A UNIQUE(node_id, label) constraint
+was added to enable `INSERT OR IGNORE` idempotency in the Open-time backfill.
+
+Files Changed:
+- store/schema.go (added node_labels table with UNIQUE constraint, two triggers for INSERT/UPDATE of labels, backfillMigrationSQL)
+- store/sqlite.go (added backfill call in Open; rewrote listNodesByLabel to JOIN node_labels)
+- sql/dialect.go (LabelContains signature changed to nodeIDExpr+labelName → EXISTS subquery, 1 arg)
+- sql/translator.go (all 9 LabelContains call sites use alias+".id" not alias+".labels")
+- sql/dialect_test.go (rewrote LabelContains tests for EXISTS/1-arg behavior)
+- sql/translator_test.go (updated arg count assertions: 4→1 per label, 5→2, 8→2; golden fixture checks "node_labels")
+- store/crud_test.go (added 4 junction table tests: trigger population, cascade delete, update sync, backfill)
+- store/store_test.go (TestSchemaTablesAndIndexes now checks node_labels table and idx_node_labels_label index)
+
+Key Decisions:
+- Used SQLite triggers (not Go-level code) to maintain node_labels — guarantees all write paths (including raw SQL from the translator) stay in sync automatically.
+- Recursive CTE string splitting inside triggers because SQLite has no native STRING_SPLIT.
+- UNIQUE(node_id, label) constraint on node_labels: enables INSERT OR IGNORE in backfill and prevents duplicate junction rows.
+- Backfill uses WHERE NOT EXISTS (SELECT 1 FROM node_labels WHERE node_id = n.id) to skip already-migrated nodes (trigger-populated), plus INSERT OR IGNORE for the UNIQUE constraint.
+- LabelContains returns EXISTS subquery instead of 4-branch LIKE; node ID column (not labels column) is now the join target.
+
+Next Task: task-018
+
+================================================================================
+TASK-018: Remove redundant GetNode lookups on CSV edge import
+Date: 2026-05-27T17:00:00Z
+================================================================================
+
+Summary:
+Removed the two per-row GetNode/SELECT existence checks from importCSVEdges
+in importer.go. The PRAGMA foreign_keys = ON constraint (task-002) already
+enforces referential integrity at the SQLite level, making these checks
+redundant. The FOREIGN KEY constraint error from InsertEdge is now caught via
+strings.Contains and translated into a clear "node not found (start_id=X,
+end_id=Y)" message without exposing the raw SQLite constraint text.
+Added BenchmarkImportCSVEdges to bench/bench_test.go (1K nodes + 1K edges,
+pre-built payloads, b.ReportAllocs()). Enhanced TestImport_CSVEdges_InvalidNodeRef
+to verify the new error message format.
+
+Files Changed:
+- importer.go (removed GetNode calls; added FK error mapping in InsertEdge handler; updated section comment)
+- exporter_test.go (enhanced TestImport_CSVEdges_InvalidNodeRef to assert "node not found" and no raw FK text)
+- bench/bench_test.go (added BenchmarkImportCSVEdges with pre-built CSV payloads)
+
+Key Decisions:
+- FK error detected via strings.Contains(err.Error(), "FOREIGN KEY constraint failed") — reliable for modernc.org/sqlite
+- Error message includes both start_id and end_id since a single InsertEdge call cannot distinguish which was missing
+- Benchmark pre-builds payloads outside the iteration loop; nodes auto-assigned IDs 1..N in a fresh DB match the CSV :ID values exactly
+
+Next Task: task-019
+
+================================================================================
+TASK-019: Eliminate triple JSON parse pass in importJSON
+Date: 2026-05-27T18:00:00Z
+================================================================================
+
+Summary:
+Refactored `decodeImportJSON` in `importer.go` from a three-pass approach
+(decode full document to json.RawMessage, checkJSONDepth scan, json.Unmarshal)
+to a streaming approach that eliminates the full-document buffer. A single
+json.Decoder is used throughout; the outer structure (top-level object, nodes
+array, edges array) is parsed token-by-token via `readToken` which tracks
+`outerDepth` incrementally. Each individual node/edge object is decoded to
+json.RawMessage and depth-checked only for its own bytes (relative to
+outerDepth), then unmarshalled — eliminating the full-document buffer allocation.
+Added `errors` import and `wrapErr` helper to propagate `*ErrImportDepthExceeded`
+unwrapped (direct type-assertable) while wrapping all other parse errors.
+`checkJSONDepth` gained a `startDepth` parameter for relative counting.
+
+Files Changed:
+- importer.go (decodeImportJSON: streaming token-by-token outer structure;
+  per-element checkJSONDepth; wrapErr helper; added "errors" import;
+  checkJSONDepth signature: added startDepth int param)
+
+Key Decisions:
+- `decodeElement` still calls dec.Decode→json.RawMessage then json.Unmarshal per
+  element — this is a per-element two-pass (not per-document), which is
+  unavoidable without fully manual token-by-token struct population. The
+  full-document allocation is eliminated; only individual node/edge bytes
+  are buffered at a time.
+- `outerDepth` tracks only manually-consumed structural delimiters; dec.Decode
+  in decodeElement consumes element delimiters without going through readToken,
+  so outerDepth is not updated inside elements (intentional, correct).
+- `wrapErr` uses errors.As to detect *ErrImportDepthExceeded and return it
+  unwrapped, preserving direct type-assertability used by existing tests.
+- `checkJSONDepth` startDepth parameter ensures depth inside a node/edge is
+  counted from the document root (outer 2 levels already consumed).
+
+Next Task: task-020
+
+================================================================================
+TASK-020: Reduce per-row heap allocations in result.go and streaming result paths
+Date: 2026-05-27T14:30:00Z
+================================================================================
+
+Summary:
+Pre-allocated rawVals, ptrs, and vals scan buffers on the Result struct in
+newResultFromRows, eliminating 3 make([]any, n) calls per Next iteration.
+Pre-allocated scanVals and ptrs in collectMatchRows outside the row loop,
+eliminating 2 make([]any, n) calls per matched row. Also fixed two pre-existing
+bugs from task-019: (1) importJSON now uses io.ReadAll+io.LimitReader for size
+detection instead of a limitedReader+streaming decoder, which caused TestImport_TooLarge
+to hang for 30+ seconds; (2) decodeImportJSON now handles null values for "nodes"
+and "edges" keys (JSON null is valid Go struct default). Cleaned up two pre-existing
+staticcheck QF1012 lint issues in bench/bench_test.go (WriteString+Sprintf → Fprintf).
+
+Files Changed:
+- result.go (Result struct: rawVals/ptrs/vals fields; newResultFromRows: pre-alloc buffers
+  and build ptrs once; Next: reuse pre-allocated buffers instead of per-call make)
+- driver.go (collectMatchRows: pre-allocate scanVals+ptrs before loop; zero scanVals per row)
+- importer.go (importJSON: io.ReadAll+io.LimitReader for size detection, limitedReader
+  removed; decodeImportJSON: null-value handling for "nodes"/"edges" keys)
+- bench/bench_test.go (fmt.Fprintf instead of WriteString+Sprintf, fixes QF1012)
+- .plans/tasks-skill-review-remediation.yml (task-020 marked completed)
+
+Key Decisions:
+- ptrs[i] = &rawVals[i] is stable because rawVals is never appended to (fixed size).
+  This means ptrs can be computed once at construction and reused every Next call.
+- newRecord copies both keys and values internally, so reusing vals across Next calls
+  is safe — each Record owns its own copy.
+- For n=1 column (single-projection queries), Go stack-allocates 2 of the 3 small
+  slices, so the measured improvement is 1 alloc/row. For n≥2 columns, all 3 are heap-
+  allocated and savings scale proportionally.
+- importJSON reverted to io.ReadAll+io.LimitReader for size detection because the
+  streaming decoder (task-019) must scan all bytes byte-by-byte in the whitespace loop
+  before detecting the size limit, causing TestImport_TooLarge to time out after 30s.
+  io.ReadAll uses large OS-level reads and the length check is O(1).
+- JSON null for "nodes"/"edges" is correctly handled: when Go marshals a struct with
+  nil slice fields, it produces null. The streaming decoder must accept null as an
+  equivalent to an empty array.
+
+Next Task: All tasks complete

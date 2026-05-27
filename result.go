@@ -24,6 +24,15 @@ type Result struct {
 	consumed bool
 	counters queryCounters
 
+	// Pre-allocated scan buffers reused across Next calls to reduce per-row
+	// heap allocations. rawVals holds raw column values; ptrs holds pointers
+	// into rawVals for rows.Scan; vals holds the mapped graph-type values
+	// before they are copied into the Record. All three are sized to
+	// len(keys) at construction time in newResultFromRows.
+	rawVals []any
+	ptrs    []any
+	vals    []any
+
 	// inMemory holds pre-collected records for in-memory results (no sql.Rows).
 	// When non-nil, Next/Record/Consume iterate over this slice instead of rows.
 	inMemory    []*Record
@@ -32,12 +41,26 @@ type Result struct {
 
 // newResultFromRows constructs a Result, deriving column names from
 // the *sql.Rows itself. Returns an error if column names cannot be read.
+// The scan buffers (rawVals, ptrs, vals) are pre-allocated here and reused
+// across all Next calls to avoid per-row heap allocations.
 func newResultFromRows(rows *sql.Rows) (*Result, error) {
 	cols, err := rows.Columns()
 	if err != nil {
 		return nil, fmt.Errorf("graphlite: read column names: %w", err)
 	}
-	return &Result{rows: rows, keys: cols}, nil
+	n := len(cols)
+	rawVals := make([]any, n)
+	ptrs := make([]any, n)
+	for i := range rawVals {
+		ptrs[i] = &rawVals[i]
+	}
+	return &Result{
+		rows:    rows,
+		keys:    cols,
+		rawVals: rawVals,
+		ptrs:    ptrs,
+		vals:    make([]any, n),
+	}, nil
 }
 
 // newInMemoryResult constructs a Result backed by a pre-collected
@@ -62,7 +85,14 @@ func (r *Result) Keys() []string {
 
 // Next advances the cursor to the next record. Returns true if a record is
 // available; false when the result set is exhausted or an error occurred.
-func (r *Result) Next(_ context.Context) bool {
+// If the context is already cancelled or has timed out, Next immediately
+// returns false and sets Err to ctx.Err().
+func (r *Result) Next(ctx context.Context) bool {
+	if err := ctx.Err(); err != nil {
+		r.err = err
+		r.consumed = true
+		return false
+	}
 	if r.consumed || r.err != nil {
 		return false
 	}
@@ -83,23 +113,19 @@ func (r *Result) Next(_ context.Context) bool {
 		r.consumed = true
 		return false
 	}
-	// Scan raw column values.
-	rawVals := make([]any, len(r.keys))
-	ptrs := make([]any, len(r.keys))
-	for i := range rawVals {
-		ptrs[i] = &rawVals[i]
-	}
-	if err := r.rows.Scan(ptrs...); err != nil {
+	// Scan raw column values into the pre-allocated buffers. rawVals and ptrs
+	// are reused across calls (ptrs[i] == &rawVals[i] established at construction).
+	if err := r.rows.Scan(r.ptrs...); err != nil {
 		r.err = fmt.Errorf("graphlite: scan row: %w", err)
 		r.consumed = true
 		return false
 	}
-	// Map each raw value to its graph type.
-	vals := make([]any, len(r.keys))
-	for i, v := range rawVals {
-		vals[i] = mapColumnValue(v)
+	// Map each raw value to its graph type, reusing the pre-allocated vals slice.
+	// newRecord copies vals internally so it is safe to reuse vals on the next call.
+	for i, v := range r.rawVals {
+		r.vals[i] = mapColumnValue(v)
 	}
-	r.record = newRecord(r.keys, vals)
+	r.record = newRecord(r.keys, r.vals)
 	return true
 }
 

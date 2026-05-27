@@ -5,11 +5,14 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/LackOfMorals/graphlite/store"
 )
 
 // Format identifies the file format accepted by Import.
@@ -140,17 +143,21 @@ func (d *DB) Export(ctx context.Context, w io.Writer, format ExportFormat) error
 // ─────────────────────────────────────────────────────────────────────────────
 
 // importJSON implements the JSON import path.
-func (d *DB) importJSON(ctx context.Context, r io.Reader) error {
-	// Enforce the 500 MiB size limit by wrapping with a counting reader.
-	lr := &limitedReader{r: io.LimitReader(r, importMaxBytes+1), limit: importMaxBytes}
-
-	doc, err := decodeImportJSON(lr)
-	// Check the size limit before propagating any decode error: a truncated read
-	// (EOF mid-document) caused by io.LimitReader is reported as a JSON parse
-	// error, but the real root cause is the size limit being exceeded.
-	if lr.exceeded {
+func (d *DB) importJSON(ctx context.Context, r io.Reader) (retErr error) {
+	// Read the entire input into memory (up to importMaxBytes+1 bytes) so we can
+	// detect the oversize condition with a single length check. Using io.ReadAll with
+	// io.LimitReader is more efficient than streaming for size detection because it
+	// avoids the per-byte overhead of the JSON decoder's whitespace scanner on large
+	// inputs. The byte slice is then decoded with the streaming token-by-token parser.
+	raw, err := io.ReadAll(io.LimitReader(r, importMaxBytes+1))
+	if err != nil {
+		return fmt.Errorf("graphlite: import: read: %w", err)
+	}
+	if int64(len(raw)) > importMaxBytes {
 		return &ErrImportTooLarge{MaxBytes: importMaxBytes}
 	}
+
+	doc, err := decodeImportJSON(bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
@@ -160,26 +167,29 @@ func (d *DB) importJSON(ctx context.Context, r io.Reader) error {
 	if err != nil {
 		return fmt.Errorf("graphlite: import: begin transaction: %w", err)
 	}
+	// Rollback is a no-op after a successful Commit (task-012), so this deferred
+	// guard is always safe and eliminates per-error inline rollback calls.
+	defer func() {
+		if retErr != nil {
+			_ = tx.Rollback()
+		}
+	}()
 
 	// idMap maps the file-local node "id" string to its database integer ID.
 	idMap := make(map[string]int64, len(doc.Nodes))
 
 	// Insert nodes.
 	for i, n := range doc.Nodes {
-		labelsStr := strings.Join(n.Labels, ",")
 		propsJSON, err := marshalProps(n.Props)
 		if err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: import: node %d (%q) props: %w", i, n.ID, err)
 		}
-		dbID, err := tx.InsertNode(ctx, labelsStr, propsJSON)
+		dbID, err := tx.InsertNode(ctx, store.Labels(n.Labels), propsJSON)
 		if err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: import: insert node %d (%q): %w", i, n.ID, err)
 		}
 		if n.ID != "" {
 			if _, dup := idMap[n.ID]; dup {
-				_ = tx.Rollback()
 				return fmt.Errorf("graphlite: import: duplicate node id %q", n.ID)
 			}
 			idMap[n.ID] = dbID
@@ -189,32 +199,26 @@ func (d *DB) importJSON(ctx context.Context, r io.Reader) error {
 	// Insert edges.
 	for i, e := range doc.Edges {
 		if e.Type == "" {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: import: edge %d: missing type", i)
 		}
 		startDBID, ok := idMap[e.StartID]
 		if !ok {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: import: edge %d: unknown startId %q", i, e.StartID)
 		}
 		endDBID, ok := idMap[e.EndID]
 		if !ok {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: import: edge %d: unknown endId %q", i, e.EndID)
 		}
 		propsJSON, err := marshalProps(e.Props)
 		if err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: import: edge %d props: %w", i, err)
 		}
 		if _, err := tx.InsertEdge(ctx, e.Type, startDBID, endDBID, propsJSON); err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: import: insert edge %d: %w", i, err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		_ = tx.Rollback()
 		return fmt.Errorf("graphlite: import: commit: %w", err)
 	}
 	return nil
@@ -306,7 +310,7 @@ func parseCSVPropValue(raw, propType string) (any, error) {
 }
 
 // importCSVNodes imports a node CSV file into the database atomically.
-func (d *DB) importCSVNodes(ctx context.Context, r io.Reader) error {
+func (d *DB) importCSVNodes(ctx context.Context, r io.Reader) (retErr error) {
 	cr := csv.NewReader(io.LimitReader(r, importMaxBytes+1))
 	cr.TrimLeadingSpace = true
 
@@ -348,10 +352,16 @@ func (d *DB) importCSVNodes(ctx context.Context, r io.Reader) error {
 	if err != nil {
 		return fmt.Errorf("graphlite: csv node import: begin transaction: %w", err)
 	}
+	// Rollback is a no-op after a successful Commit (task-012), so this deferred
+	// guard is always safe and eliminates per-error inline rollback calls.
+	defer func() {
+		if retErr != nil {
+			_ = tx.Rollback()
+		}
+	}()
 
 	for rowIdx, row := range rows {
 		if len(row) != len(defs) {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv node import: row %d: expected %d columns, got %d", rowIdx+2, len(defs), len(row))
 		}
 
@@ -371,7 +381,6 @@ func (d *DB) importCSVNodes(ctx context.Context, r io.Reader) error {
 				}
 				pv, err := parseCSVPropValue(val, def.propType)
 				if err != nil {
-					_ = tx.Rollback()
 					return fmt.Errorf("graphlite: csv node import: row %d col %q: %w", rowIdx+2, def.propName, err)
 				}
 				if pv != nil {
@@ -381,39 +390,33 @@ func (d *DB) importCSVNodes(ctx context.Context, r io.Reader) error {
 		}
 
 		if nodeID == "" {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv node import: row %d: empty :ID value", rowIdx+2)
 		}
 
 		propsJSON, err := marshalProps(props)
 		if err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv node import: row %d props: %w", rowIdx+2, err)
 		}
 
-		if _, err := tx.InsertNode(ctx, labelStr, propsJSON); err != nil {
-			_ = tx.Rollback()
+		if _, err := tx.InsertNode(ctx, store.DecodeLabels(labelStr), propsJSON); err != nil {
 			return fmt.Errorf("graphlite: csv node import: row %d insert: %w", rowIdx+2, err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		_ = tx.Rollback()
 		return fmt.Errorf("graphlite: csv node import: commit: %w", err)
 	}
 	return nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CSV import (edges) — requires a pre-existing node idMap from a prior node CSV
-// import. Since Import is called per-file, edges reference :ID values that must
-// already be in the database. We look them up by scanning the nodes table.
+// CSV import (edges)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // importCSVEdges imports an edge CSV file into the database atomically.
 // The :START_ID and :END_ID values must match node row IDs already in the DB
 // (i.e. the integer primary keys stored as ElementId strings).
-func (d *DB) importCSVEdges(ctx context.Context, r io.Reader) error {
+func (d *DB) importCSVEdges(ctx context.Context, r io.Reader) (retErr error) {
 	cr := csv.NewReader(io.LimitReader(r, importMaxBytes+1))
 	cr.TrimLeadingSpace = true
 
@@ -460,10 +463,16 @@ func (d *DB) importCSVEdges(ctx context.Context, r io.Reader) error {
 	if err != nil {
 		return fmt.Errorf("graphlite: csv edge import: begin transaction: %w", err)
 	}
+	// Rollback is a no-op after a successful Commit (task-012), so this deferred
+	// guard is always safe and eliminates per-error inline rollback calls.
+	defer func() {
+		if retErr != nil {
+			_ = tx.Rollback()
+		}
+	}()
 
 	for rowIdx, row := range rows {
 		if len(row) != len(defs) {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv edge import: row %d: expected %d columns, got %d", rowIdx+2, len(defs), len(row))
 		}
 
@@ -485,7 +494,6 @@ func (d *DB) importCSVEdges(ctx context.Context, r io.Reader) error {
 				}
 				pv, err := parseCSVPropValue(val, def.propType)
 				if err != nil {
-					_ = tx.Rollback()
 					return fmt.Errorf("graphlite: csv edge import: row %d col %q: %w", rowIdx+2, def.propName, err)
 				}
 				if pv != nil {
@@ -495,45 +503,35 @@ func (d *DB) importCSVEdges(ctx context.Context, r io.Reader) error {
 		}
 
 		if edgeType == "" {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv edge import: row %d: empty :TYPE value", rowIdx+2)
 		}
 
 		startID, err := strconv.ParseInt(startIDStr, 10, 64)
 		if err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv edge import: row %d: invalid :START_ID %q: %w", rowIdx+2, startIDStr, err)
 		}
 		endID, err := strconv.ParseInt(endIDStr, 10, 64)
 		if err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv edge import: row %d: invalid :END_ID %q: %w", rowIdx+2, endIDStr, err)
-		}
-
-		// Verify that the referenced nodes exist.
-		if _, err := tx.GetNode(ctx, startID); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("graphlite: csv edge import: row %d: start node %d not found: %w", rowIdx+2, startID, err)
-		}
-		if _, err := tx.GetNode(ctx, endID); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("graphlite: csv edge import: row %d: end node %d not found: %w", rowIdx+2, endID, err)
 		}
 
 		propsJSON, err := marshalProps(props)
 		if err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv edge import: row %d props: %w", rowIdx+2, err)
 		}
 
 		if _, err := tx.InsertEdge(ctx, edgeType, startID, endID, propsJSON); err != nil {
-			_ = tx.Rollback()
+			// PRAGMA foreign_keys = ON causes SQLite to reject edges whose
+			// start_id or end_id do not exist in the nodes table. Translate
+			// the opaque constraint error into a clear, actionable message.
+			if strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
+				return fmt.Errorf("graphlite: csv edge import: row %d: node not found (start_id=%d, end_id=%d)", rowIdx+2, startID, endID)
+			}
 			return fmt.Errorf("graphlite: csv edge import: row %d insert: %w", rowIdx+2, err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		_ = tx.Rollback()
 		return fmt.Errorf("graphlite: csv edge import: commit: %w", err)
 	}
 	return nil
@@ -586,7 +584,7 @@ func (d *DB) exportJSON(ctx context.Context, w io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("graphlite: export json: node %d props: %w", n.ID, err)
 		}
-		labels := splitLabelsExport(n.Labels)
+		labels := []string(n.Labels)
 		doc.Nodes = append(doc.Nodes, exportJSONNode{
 			ID:     strconv.FormatInt(n.ID, 10),
 			Labels: labels,
@@ -660,7 +658,7 @@ func (d *DB) exportCSVNodes(ctx context.Context, w io.Writer) error {
 	// Write rows.
 	for i, n := range nodes {
 		row := make([]string, 0, 2+len(propKeys))
-		row = append(row, strconv.FormatInt(n.ID, 10), n.Labels)
+		row = append(row, strconv.FormatInt(n.ID, 10), n.Labels.Encode())
 		props := nodeProps[i]
 		for _, k := range propKeys {
 			v, ok := props[k]
@@ -775,22 +773,6 @@ func unmarshalProps(propsJSON string) (map[string]any, error) {
 	return m, nil
 }
 
-// splitLabelsExport splits a comma-separated labels string into a slice.
-// An empty string returns an empty (non-nil) slice.
-func splitLabelsExport(labels string) []string {
-	if labels == "" {
-		return []string{}
-	}
-	parts := strings.Split(labels, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
 
 // anyToString converts a property value to its string representation for CSV output.
 func anyToString(v any) string {
@@ -836,43 +818,174 @@ func sortedKeys(m map[string]struct{}) []string {
 // JSON decode helpers (used by importJSON)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// decodeImportJSON decodes the import document from r, enforcing the maximum
-// JSON nesting depth (importMaxDepth). Returns ErrImportDepthExceeded when the
-// depth limit is violated.
+// decodeImportJSON decodes the import document from r in a single streaming
+// pass while enforcing the maximum JSON nesting depth (importMaxDepth).
+//
+// Design: a single json.Decoder is used for the entire document.  The outer
+// structure (top-level object, "nodes" array, "edges" array) is parsed
+// token-by-token so we can track nesting depth incrementally.  Each individual
+// node or edge object is decoded via dec.Decode into a json.RawMessage and
+// then depth-checked in isolation — this limits the per-element scan to only
+// the bytes of that element, not the full document.
+//
+// This eliminates the original three-pass approach:
+//   1. Decode entire document into json.RawMessage  ← removed
+//   2. checkJSONDepth over all raw bytes           ← replaced with per-element check
+//   3. json.Unmarshal full document                ← replaced with per-element Unmarshal
 func decodeImportJSON(r io.Reader) (*importJSONDocument, error) {
 	dec := json.NewDecoder(r)
 
-	// Walk the token stream manually so we can track nesting depth.
-	// We accumulate the raw JSON and then unmarshal it, rather than
-	// trying to decode into the struct token-by-token.
-	//
-	// Strategy: scan for depth violations first using the token stream,
-	// then re-decode the already-buffered bytes into the struct.
-	// Since we need to buffer anyway (the reader may be streaming), we
-	// decode into a raw json.RawMessage first, validate depth, then unmarshal.
+	// outerDepth tracks the nesting level of the structural tokens we parse
+	// manually (top-level '{', "nodes" '[', "edges" '[').  It is used as the
+	// starting depth when depth-checking each individual element's raw bytes.
+	outerDepth := 0
 
-	var raw json.RawMessage
-	if err := dec.Decode(&raw); err != nil {
-		return nil, fmt.Errorf("graphlite: import: JSON parse error: %w", err)
+	// wrapErr returns err unchanged if it is (or wraps) a depth error, so that
+	// ErrImportDepthExceeded is never double-wrapped and is always directly
+	// type-assertable by callers.  All other errors get the parse context prefix.
+	wrapErr := func(err error) error {
+		var depthErr *ErrImportDepthExceeded
+		if errors.As(err, &depthErr) {
+			return depthErr
+		}
+		return fmt.Errorf("graphlite: import: JSON parse error: %w", err)
 	}
 
-	// Check depth of the decoded bytes.
-	if err := checkJSONDepth(raw, importMaxDepth); err != nil {
-		return nil, err
+	// readToken reads the next token, updating outerDepth for delimiters.
+	// Returns ErrImportDepthExceeded if the depth limit is exceeded.
+	readToken := func() (json.Token, error) {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		if d, ok := tok.(json.Delim); ok {
+			if d == '{' || d == '[' {
+				outerDepth++
+				if outerDepth > importMaxDepth {
+					return nil, &ErrImportDepthExceeded{MaxDepth: importMaxDepth}
+				}
+			} else {
+				outerDepth--
+			}
+		}
+		return tok, nil
 	}
 
-	// Unmarshal into the document struct.
+	// decodeElement decodes the next complete JSON value from dec into v.
+	// It depth-checks the raw bytes relative to outerDepth so that nesting
+	// inside props is counted from the document root.
+	// The opening '{' of this element has NOT yet been consumed; dec.Decode
+	// will consume the entire value including its delimiters.
+	decodeElement := func(v any) error {
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return err
+		}
+		if err := checkJSONDepth(raw, importMaxDepth, outerDepth); err != nil {
+			return err
+		}
+		return json.Unmarshal(raw, v)
+	}
+
 	var doc importJSONDocument
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil, fmt.Errorf("graphlite: import: JSON unmarshal error: %w", err)
+
+	// Expect top-level '{'.
+	tok, err := readToken()
+	if err != nil {
+		return nil, wrapErr(err)
 	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return nil, fmt.Errorf("graphlite: import: expected JSON object at top level")
+	}
+
+	// Iterate over top-level keys.
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return nil, wrapErr(err)
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return nil, fmt.Errorf("graphlite: import: expected string key, got %T", keyTok)
+		}
+
+		switch key {
+		case "nodes":
+			// Expect '[' or null (null is treated as an empty array).
+			tok, err := readToken()
+			if err != nil {
+				return nil, wrapErr(err)
+			}
+			if tok == nil {
+				// JSON null — no nodes to decode.
+				break
+			}
+			if d, ok := tok.(json.Delim); !ok || d != '[' {
+				return nil, fmt.Errorf("graphlite: import: \"nodes\" must be a JSON array")
+			}
+			for dec.More() {
+				var n importJSONNode
+				if err := decodeElement(&n); err != nil {
+					return nil, wrapErr(err)
+				}
+				doc.Nodes = append(doc.Nodes, n)
+			}
+			// Consume the closing ']'.
+			if _, err := readToken(); err != nil {
+				return nil, wrapErr(err)
+			}
+
+		case "edges":
+			// Expect '[' or null (null is treated as an empty array).
+			tok, err := readToken()
+			if err != nil {
+				return nil, wrapErr(err)
+			}
+			if tok == nil {
+				// JSON null — no edges to decode.
+				break
+			}
+			if d, ok := tok.(json.Delim); !ok || d != '[' {
+				return nil, fmt.Errorf("graphlite: import: \"edges\" must be a JSON array")
+			}
+			for dec.More() {
+				var e importJSONEdge
+				if err := decodeElement(&e); err != nil {
+					return nil, wrapErr(err)
+				}
+				doc.Edges = append(doc.Edges, e)
+			}
+			// Consume the closing ']'.
+			if _, err := readToken(); err != nil {
+				return nil, wrapErr(err)
+			}
+
+		default:
+			// Skip unknown top-level keys by decoding into json.RawMessage and
+			// depth-checking, in case an attacker embeds a deeply-nested value.
+			var raw json.RawMessage
+			if err := dec.Decode(&raw); err != nil {
+				return nil, wrapErr(err)
+			}
+			if err := checkJSONDepth(raw, importMaxDepth, outerDepth); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Consume the closing '}'.
+	if _, err := readToken(); err != nil && err != io.EOF {
+		return nil, wrapErr(err)
+	}
+
 	return &doc, nil
 }
 
-// checkJSONDepth scans the raw JSON bytes and returns ErrImportDepthExceeded
-// if the nesting depth of objects and arrays exceeds maxDepth.
-func checkJSONDepth(data []byte, maxDepth int) error {
-	depth := 0
+// checkJSONDepth scans raw JSON bytes and returns ErrImportDepthExceeded if
+// the nesting depth of objects and arrays — counted from startDepth —
+// exceeds maxDepth.
+func checkJSONDepth(data []byte, maxDepth int, startDepth int) error {
+	depth := startDepth
 	dec := json.NewDecoder(bytes.NewReader(data))
 	for {
 		tok, err := dec.Token()
@@ -880,11 +993,10 @@ func checkJSONDepth(data []byte, maxDepth int) error {
 			break
 		}
 		if err != nil {
-			// The data was already successfully decoded, so this shouldn't happen.
+			// data was already successfully decoded above, so this is unexpected.
 			return fmt.Errorf("graphlite: import: depth check error: %w", err)
 		}
-		switch d := tok.(type) {
-		case json.Delim:
+		if d, ok := tok.(json.Delim); ok {
 			if d == '{' || d == '[' {
 				depth++
 				if depth > maxDepth {
@@ -898,21 +1010,3 @@ func checkJSONDepth(data []byte, maxDepth int) error {
 	return nil
 }
 
-// limitedReader wraps an io.Reader that has already been limited via
-// io.LimitReader. It sets exceeded=true if the underlying reader delivered
-// exactly limit+1 bytes (i.e. the real input was larger than limit).
-type limitedReader struct {
-	r        io.Reader
-	limit    int64
-	read     int64
-	exceeded bool
-}
-
-func (l *limitedReader) Read(p []byte) (int, error) {
-	n, err := l.r.Read(p)
-	l.read += int64(n)
-	if l.read > l.limit {
-		l.exceeded = true
-	}
-	return n, err
-}

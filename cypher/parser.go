@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/antlr/antlr4/runtime/Go/antlr"
 	"github.com/cloudprivacylabs/opencypher"
@@ -341,7 +342,7 @@ func buildSetItem(ctx *parser.OC_SetItemContext) (SetItem, error) {
 				innerExpr := parenCtx.(*parser.OC_ParenthesizedExpressionContext).OC_Expression()
 				if innerExpr != nil {
 					innerText := trimWhitespace(innerExpr.GetText())
-					if isIdentifier(innerText) {
+					if IsIdentifier(innerText) {
 						varName = nil // will use innerText directly below
 						lookups := pe.AllOC_PropertyLookup()
 						if len(lookups) != 1 {
@@ -1564,7 +1565,10 @@ func buildLiteralExpr(ctx *parser.OC_LiteralContext) (Expr, error) {
 	// String literal — strip surrounding quotes and unescape.
 	if ctx.StringLiteral() != nil {
 		raw := trimWhitespace(ctx.StringLiteral().GetText())
-		val := unquoteString(raw)
+		val, err := unquoteString(raw)
+		if err != nil {
+			return nil, err
+		}
 		return &LiteralExpr{Value: val}, nil
 	}
 	// List literal: [expr, expr, ...]
@@ -1605,19 +1609,109 @@ func buildNumberLiteralExpr(ctx *parser.OC_NumberLiteralContext) (Expr, error) {
 }
 
 // unquoteString strips surrounding single or double quotes from a Cypher string
-// literal and unescapes the internal escape sequences.
-func unquoteString(s string) string {
+// literal and unescapes the internal escape sequences according to the openCypher
+// specification. The full escape sequence table is:
+//
+//	\\         → backslash
+//	\'         → single quote
+//	\"         → double quote
+//	\n or \N   → newline (U+000A)
+//	\r or \R   → carriage return (U+000D)
+//	\t or \T   → horizontal tab (U+0009)
+//	\b or \B   → backspace (U+0008)
+//	\f or \F   → form feed (U+000C)
+//	\uXXXX     → Unicode code point (4 hex digits; case-insensitive u)
+//	\uXXXXXXXX → Unicode code point (8 hex digits; case-insensitive u)
+//
+// Unrecognised backslash sequences return an error. In practice the ANTLR
+// grammar rejects such sequences before reaching this function, but the error
+// path is retained for defensive completeness.
+func unquoteString(s string) (string, error) {
 	if len(s) < 2 {
-		return s
+		return s, nil
 	}
 	if (s[0] == '\'' && s[len(s)-1] == '\'') || (s[0] == '"' && s[len(s)-1] == '"') {
 		inner := s[1 : len(s)-1]
-		inner = strings.ReplaceAll(inner, "''", "'")
-		inner = strings.ReplaceAll(inner, `""`, `"`)
-		inner = strings.ReplaceAll(inner, `\\`, `\`)
-		inner = strings.ReplaceAll(inner, `\'`, `'`)
-		inner = strings.ReplaceAll(inner, `\"`, `"`)
-		return inner
+		var buf strings.Builder
+		buf.Grow(len(inner))
+		for i := 0; i < len(inner); {
+			ch := inner[i]
+			if ch != '\\' {
+				buf.WriteByte(ch)
+				i++
+				continue
+			}
+			// We have a backslash — look at the next character.
+			if i+1 >= len(inner) {
+				return "", fmt.Errorf("cypher: unterminated backslash escape at end of string")
+			}
+			next := inner[i+1]
+			switch next {
+			case '\\':
+				buf.WriteByte('\\')
+			case '\'':
+				buf.WriteByte('\'')
+			case '"':
+				buf.WriteByte('"')
+			case 'n', 'N':
+				buf.WriteByte('\n')
+			case 'r', 'R':
+				buf.WriteByte('\r')
+			case 't', 'T':
+				buf.WriteByte('\t')
+			case 'b', 'B':
+				buf.WriteByte('\b')
+			case 'f', 'F':
+				buf.WriteByte('\f')
+			case 'u', 'U':
+				// \uXXXX (4 hex digits) or \uXXXXXXXX (8 hex digits).
+				// Try 8 digits first to avoid misidentifying the leading 4.
+				if i+10 <= len(inner) && isAllHex(inner[i+2:i+10]) {
+					hexStr := inner[i+2 : i+10]
+					cp, err := strconv.ParseUint(hexStr, 16, 32)
+					if err != nil {
+						return "", fmt.Errorf("cypher: invalid \\u escape %q: %w", "\\u"+hexStr, err)
+					}
+					r := rune(cp)
+					if !utf8.ValidRune(r) {
+						return "", fmt.Errorf("cypher: invalid \\u escape %q: code point U+%08X is not a valid Unicode scalar value", "\\u"+hexStr, cp)
+					}
+					buf.WriteRune(r)
+					i += 10
+					continue
+				}
+				if i+6 > len(inner) {
+					return "", fmt.Errorf("cypher: \\u escape requires 4 or 8 hex digits")
+				}
+				hexStr := inner[i+2 : i+6]
+				cp, err := strconv.ParseUint(hexStr, 16, 32)
+				if err != nil {
+					return "", fmt.Errorf("cypher: invalid \\u escape %q: %w", "\\u"+hexStr, err)
+				}
+				r := rune(cp)
+				if !utf8.ValidRune(r) {
+					return "", fmt.Errorf("cypher: invalid \\u escape %q: code point U+%04X is not a valid Unicode scalar value (surrogate or out of range)", "\\u"+hexStr, cp)
+				}
+				buf.WriteRune(r)
+				i += 6
+				continue
+			default:
+				return "", fmt.Errorf("cypher: unrecognised escape sequence %q in string literal", "\\"+string(next))
+			}
+			i += 2
+		}
+		return buf.String(), nil
 	}
-	return s
+	return s, nil
+}
+
+// isAllHex reports whether every byte in s is a valid hexadecimal digit.
+func isAllHex(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return len(s) > 0
 }

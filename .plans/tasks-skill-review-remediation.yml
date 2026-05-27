@@ -1,0 +1,362 @@
+feature: skill-review-remediation
+prd: ./prd-skill-review-remediation.md
+created_at: 2026-05-27T00:00:00Z
+updated_at: 2026-05-27T00:00:00Z
+
+tasks:
+  - id: task-001
+    title: 'Define Labels type with Encode/Decode helpers'
+    description: |
+      Define `type Labels []string` in `types.go` (or a new `labels.go`) along with
+      `func (l Labels) Encode() string` (comma-separated) and `func DecodeLabels(s string) Labels`
+      (splits on comma, returns nil/empty for empty input). Update `NodeRow.Labels` from `string`
+      to `Labels` and update the `Store` interface parameters accordingly. Update all internal
+      callers (`insertNode`, `getNode`, `listNodesByLabel`, `importer.go`, `result.go`) to use
+      `Labels.Encode()` / `DecodeLabels()` rather than raw comma manipulation. The underlying
+      SQLite storage format (comma-separated text) does not change in this task.
+    status: completed
+    dependencies: []
+    acceptance_criteria:
+      - 'No call site in non-store code directly constructs or parses a comma-separated label string'
+      - 'The public `Node.Labels` field is of type `Labels` (or consistent `[]string`)'
+      - 'JSON export uses `"labels": ["Person","Employee"]` rather than `"labels": "Person,Employee"`'
+      - '`go test ./...` passes with no regressions after the change'
+    completed_at: '2026-05-27T00:00:00Z'
+
+  - id: task-002
+    title: 'Enforce PRAGMA foreign_keys = ON at open time'
+    description: |
+      Add `PRAGMA foreign_keys = ON;` to the `Open` function in `store/sqlite.go` after the
+      `PRAGMA journal_mode=WAL` line and before schema DDL application. Return an error if the
+      PRAGMA execution fails. Audit `store/crud_test.go` for any tests that assume unconstrained
+      edge insertion (synthetic node IDs not pre-inserted) and fix them before or alongside this
+      change so the test suite continues to pass.
+    status: completed
+    dependencies: []
+    acceptance_criteria:
+      - 'Inserting an edge whose `start_id` does not exist in `nodes` returns a `FOREIGN KEY constraint failed` error'
+      - 'Inserting an edge whose `end_id` does not exist in `nodes` returns a `FOREIGN KEY constraint failed` error'
+      - '`go test ./...` passes after fixing any test that previously relied on unconstrained edge insertion'
+      - 'The `Open` function returns an error if `PRAGMA foreign_keys = ON` fails to execute'
+    completed_at: '2026-05-27T00:00:00Z'
+
+  - id: task-003
+    title: 'Refactor sqliteTx: collapse 14-method override duplication'
+    description: |
+      Refactor `store/sqlite.go` so that `SQLiteStore` holds a single `querier` field (the
+      interface is already defined at line 288) set to `*sql.DB` at `Open` time and to `*sql.Tx`
+      at `Begin` time. Remove the `sqliteTx` struct and its 14 per-method forwarding overrides —
+      `Begin` should return a `*SQLiteStore` with the `querier` set to the transaction. Review all
+      `SQLiteStore.DB()` callers before removing the field. This is prerequisite infrastructure
+      for the junction table work in task-008.
+    status: completed
+    dependencies: [task-002]
+    acceptance_criteria:
+      - '`store/sqlite.go` no longer contains a `sqliteTx` struct'
+      - 'No per-method forwarding overrides remain for `sqliteTx`'
+      - 'All existing `store/crud_test.go` and `store/store_test.go` tests pass'
+      - '`go vet ./...` and `golangci-lint run` produce no new findings'
+    completed_at: '2026-05-27T00:00:00Z'
+
+  - id: task-004
+    title: 'Fix RawExpr SQL injection: return error instead of interpolating verbatim'
+    description: |
+      In `sql/translator.go` lines 1617–1620, replace the `case *cypher.RawExpr` branch that
+      returns `e.Text` directly into the generated SQL with a `return "", fmt.Errorf(...)` call.
+      If future callers need best-effort passthrough for trusted internal use, gate it behind an
+      explicit allowlist validated with the `isIdentifier` function from `cypher/planner.go`.
+      This closes the highest-severity SQL injection vector identified in the security review.
+    status: completed
+    dependencies: []
+    acceptance_criteria:
+      - 'No path through `exprToSQL` returns unvalidated user-supplied text into the SQL string'
+      - 'A Cypher expression that triggers `*cypher.RawExpr` returns a descriptive error'
+      - 'Existing query tests that do not use `RawExpr` continue to pass'
+      - '`go test ./...` passes'
+    completed_at: '2026-05-27T00:00:00Z'
+
+  - id: task-005
+    title: 'Validate property key names before JSON path construction'
+    description: |
+      At all sites in `sql/translator.go` (approximately lines 649, 723, 742) that build
+      `$.key` JSON path strings, validate the property key using the `isIdentifier` function
+      already present in `cypher/planner.go` before concatenating it into the fragment. Return
+      a descriptive error if validation fails. Document which characters are rejected and why
+      in a comment. This prevents malformed JSON path injection via bracket characters or null
+      bytes in property key names.
+    status: completed
+    dependencies: [task-004]
+    acceptance_criteria:
+      - 'A property key containing `]` causes `exprToSQL` to return an error'
+      - 'A property key containing `[` causes `exprToSQL` to return an error'
+      - 'A property key containing a null byte causes `exprToSQL` to return an error'
+      - 'Valid property key names continue to produce correct JSON path fragments'
+      - '`go test ./...` passes'
+    completed_at: '2026-05-27T00:00:00Z'
+
+  - id: task-006
+    title: 'Apply hard cap to user-supplied MaxHops in variable-length path translation'
+    description: |
+      In `sql/translator.go` around line 868, extend the `safetyLimit = 15` cap (currently
+      applied only for unbounded `[*]` paths) to also clamp explicit `MaxHops` values. Clamp
+      the value and log a warning, or return an error when `MaxHops > safetyLimit`. Expose a
+      `WithMaxPathHops(n int)` option on `DB` in `options.go` so callers can deliberately raise
+      the cap with documented risk.
+    status: completed
+    dependencies: []
+    acceptance_criteria:
+      - 'A Cypher query `MATCH p=(a)-[*1..1000]->(b) RETURN p` on an unmodified `DB` is rejected or clamped to 15 hops'
+      - '`WithMaxPathHops(50)` allows queries up to 50 hops'
+      - 'The `WithMaxPathHops` option is documented with a risk warning'
+      - '`go test ./...` passes'
+    completed_at: null
+
+  - id: task-007
+    title: 'Enforce read-only contract in BeginTx and fix misleading PRAGMA comment'
+    description: |
+      In `driver.go` `BeginTx` function (lines 150–160), add a `d.readOnly` check that returns
+      `ErrReadOnly` before opening a transaction, or issue `PRAGMA query_only=ON` immediately
+      after `Open` when `WithReadOnly` is set to enforce read-only at the SQLite engine level.
+      Remove or correct the misleading PRAGMA mention in the `WithReadOnly` doc comment that
+      references a PRAGMA that was never executed.
+    status: completed
+    dependencies: []
+    acceptance_criteria:
+      - 'Opening a DB with `WithReadOnly()` then calling `db.BeginTx(ctx)` followed by a write returns an error'
+      - 'The error is consistent with the `ErrReadOnly` contract documented on the type'
+      - 'The `WithReadOnly` doc comment no longer references an unenforced PRAGMA'
+      - '`go test ./...` passes'
+    completed_at: '2026-05-27T00:00:00Z'
+
+  - id: task-008
+    title: 'Apply path-traversal protection to Snapshot'
+    description: |
+      In `store/sqlite.go` `Snapshot` function (lines 90–96), apply the same `filepath.Clean`
+      and parent-directory symlink resolution logic used in `Open` (driver.go lines 79–104) to
+      the `path` argument before executing `VACUUM INTO`. Return an error if the resolved path
+      contains `..` components or resolves outside the working directory in the same manner as
+      `Open` enforces.
+    status: completed
+    dependencies: []
+    acceptance_criteria:
+      - '`db.Snapshot("../../etc/malicious.db")` returns an error without executing `VACUUM INTO`'
+      - 'A valid relative path within the working directory succeeds'
+      - 'An absolute path outside the project root is rejected'
+      - '`go test ./...` passes'
+    completed_at: null
+
+  - id: task-009
+    title: 'Escape LIKE wildcards in LabelContains for % and _ in label names'
+    description: |
+      In `sql/dialect.go` `LabelContains` function (lines 147–154), escape `%` as `\%` and `_`
+      as `\_` in `labelName` before binding it in all four LIKE branches, and append
+      `ESCAPE '\'` to each LIKE predicate. Use the same escaping already present in
+      `stringMatchPattern` (approximately lines 1715–1718 of `sql/translator.go`). Update the
+      `LabelContains` function signature comment to document this escaping behaviour.
+    status: completed
+    dependencies: []
+    acceptance_criteria:
+      - 'A node with label `"50%_off"` is NOT matched by `MATCH (n:Person)`'
+      - 'A node with label `"50%_off"` IS matched by an exact label query for that label'
+      - 'Label names without wildcards continue to produce correct results'
+      - '`go test ./...` passes'
+    completed_at: null
+
+  - id: task-010
+    title: 'Implement full openCypher escape sequences in unquoteString'
+    description: |
+      Extend `cypher/parser.go` `unquoteString` function (lines 1607–1623) to handle the
+      complete openCypher escape sequence table: `\n` → newline, `\r` → carriage return,
+      `\t` → tab, `\b` → backspace, `\f` → form feed, and `\uXXXX` → Unicode code point.
+      Unrecognised backslash sequences should return an error (or optionally pass through with
+      a comment explaining the forward-compatibility choice). Currently only five sequences are
+      handled and unrecognised ones silently pass through as literal backslashes.
+    status: completed
+    dependencies: []
+    acceptance_criteria:
+      - "The Cypher literal `'Hello\\nWorld'` produces a Go string containing a real newline character"
+      - "The Cypher literal `'\\t'` produces a Go string containing a real tab character"
+      - "The Cypher literal `'\\u0041'` produces the Go string `\"A\"`"
+      - 'Unrecognised backslash sequences return an error or are documented as pass-through'
+      - '`go test ./...` passes'
+    completed_at: '2026-05-27T00:00:00Z'
+
+  - id: task-011
+    title: 'Upgrade stale ANTLR and opencypher dependencies; add govulncheck to CI'
+    description: |
+      Run `go get` to upgrade `github.com/antlr/antlr4/runtime/Go/antlr` and
+      `github.com/cloudprivacylabs/opencypher` to versions released in 2024 or later, then run
+      `go mod tidy`. Note that the ANTLR v4 Go runtime changed its module path to
+      `github.com/antlr4-go/antlr/v4` at v4.13.0 — confirm the new import path and update all
+      `antlr` imports in `cypher/` accordingly. If the `opencypher` dependency pins the old
+      ANTLR path, both must be upgraded simultaneously. Add `govulncheck ./...` to the CI
+      pipeline in `scripts/` or `.github/workflows/`.
+    status: completed
+    dependencies: []
+    acceptance_criteria:
+      - '`go.mod` pins both dependencies to versions released in 2024 or later — BLOCKED: antlr cannot be upgraded because cloudprivacylabs/opencypher@v1.0.0 generated parser requires DeserializeFromUInt16 which was removed in antlr4-go v1.4.10; golang.org/x/sys v0.44.0 requires Go 1.25. Both constraints documented in go.mod comments.'
+      - 'All `antlr` imports in `cypher/` use the correct updated module path — N/A: antlr path unchanged due to opencypher constraint'
+      - '`govulncheck ./...` reports no known vulnerabilities'
+      - '`go test ./...` passes after the upgrade'
+      - 'CI pipeline includes a `govulncheck` step (pinned to v1.3.0, runs after build-and-test)'
+    completed_at: '2026-05-27T13:00:00Z'
+
+  - id: task-012
+    title: 'Make Rollback idempotent (no-op after Commit)'
+    description: |
+      In `tx.go` `Rollback` function (lines 45–53), change the `if t.done` branch to return
+      `nil` instead of an error, following the `database/sql.Tx` convention. Add a comment
+      explaining that this matches the standard Go convention where `Rollback` after `Commit` is
+      a no-op. This fix unblocks the defer-based rollback pattern required by task-013 and
+      task-014.
+    status: completed
+    dependencies: []
+    acceptance_criteria:
+      - 'Calling `tx.Rollback()` after `tx.Commit()` returns `nil` without error'
+      - 'Calling `tx.Rollback()` before `tx.Commit()` still performs the rollback'
+      - 'A comment explains the `database/sql` convention rationale'
+      - '`go test ./...` passes'
+    completed_at: '2026-05-27T12:00:00Z'
+
+  - id: task-013
+    title: 'Use defer-based transaction rollback in importer.go'
+    description: |
+      Refactor `importJSON`, `importCSVNodes`, and `importCSVEdges` in `importer.go` to use
+      the standard Go defer+named-return pattern for rollback. Add a deferred closure that calls
+      `tx.Rollback()` only when `retErr != nil`, and remove all inline `_ = tx.Rollback()` calls
+      from the function bodies. This requires task-012 to be complete first so that the deferred
+      rollback after a successful commit is a no-op.
+    status: completed
+    dependencies: [task-012]
+    acceptance_criteria:
+      - '`grep -n ''tx.Rollback'' importer.go` returns zero results outside of the deferred closures'
+      - 'All three import functions use the named-return defer pattern'
+      - 'Import error paths still correctly roll back the transaction'
+      - '`go test ./...` passes'
+    completed_at: '2026-05-27T12:00:00Z'
+
+  - id: task-014
+    title: 'Respect context cancellation in Result.Next'
+    description: |
+      In `result.go` `Next` function (line 65), add a context check at the top of the function
+      that returns `false` and sets `r.err = ctx.Err()` and `r.consumed = true` when the context
+      is already cancelled or has timed out. The existing body remains unchanged after this guard.
+      This fixes the false API contract where callers pass cancellable contexts expecting
+      iteration to stop.
+    status: completed
+    dependencies: []
+    acceptance_criteria:
+      - 'A test that cancels the context mid-iteration sees `Next` return `false`'
+      - '`result.Err()` returns `context.Canceled` after the context is cancelled'
+      - 'Iteration completes normally when the context is not cancelled'
+      - '`go test ./...` passes'
+    completed_at: '2026-05-27T12:30:00Z'
+
+  - id: task-015
+    title: 'Add benchmark suite for core hot paths'
+    description: |
+      Add the six required benchmarks (in `bench/`, `driver_bench_test.go`,
+      `result_bench_test.go`, or `importer_bench_test.go`): `BenchmarkRunQuerySimpleSelect`,
+      `BenchmarkRunQueryCreateNode`, `BenchmarkCollectLargeResult`, `BenchmarkImportJSON`,
+      `BenchmarkBuildSQLResult_CacheHit`, and `BenchmarkMatchByLabel`. Each benchmark must call
+      `b.ReportAllocs()`. This benchmark suite must exist before the performance optimisation
+      tasks (task-016 through task-020) so that before/after numbers can be captured.
+    status: completed
+    dependencies: []
+    acceptance_criteria:
+      - 'All six benchmarks exist and compile'
+      - 'All six benchmarks run to completion with `go test -bench=. -benchmem ./...`'
+      - 'Each benchmark calls `b.ReportAllocs()`'
+      - '`BenchmarkMatchByLabel` uses a 10,000-node graph with 50% label match'
+      - '`BenchmarkCollectLargeResult` uses a 10,000-node graph'
+    completed_at: '2026-05-27T14:00:00Z'
+
+  - id: task-016
+    title: 'Add query plan cache to avoid redundant ANTLR parses'
+    description: |
+      In `driver.go` `buildSQLResult` function, add a plan cache (a `sync.Map` or bounded LRU
+      capped at 1,024 entries, keyed on the Cypher string) that stores the translated
+      `glsql.Result` minus bound parameter values. On a cache hit, skip parse/plan/translate and
+      call only `BindParams` with the current parameter values. On a cache miss, run the full
+      pipeline and store the result. Verify that the `glsql.Result` struct is safe to share
+      across goroutines (read-only after construction).
+    status: completed
+    dependencies: [task-015]
+    acceptance_criteria:
+      - '`BenchmarkBuildSQLResult_CacheHit` demonstrates cache hits at least 5× faster than cache misses for a simple `MATCH (n) RETURN n` query'
+      - 'Concurrent cache reads are safe (verified by `go test -race ./...`)'
+      - 'Cache hits produce identical query results to cache misses'
+      - '`go test ./...` passes'
+    completed_at: '2026-05-27T15:00:00Z'
+
+  - id: task-017
+    title: 'Replace LIKE-based label lookup with a node_labels junction table'
+    description: |
+      Add a `node_labels(node_id INTEGER NOT NULL REFERENCES nodes(id), label TEXT NOT NULL)`
+      junction table to `store/schema.go` with index `CREATE INDEX idx_node_labels_label ON
+      node_labels(label, node_id)`. Populate rows in `insertNode`, maintain them in a new
+      `updateNodeLabels` helper, and delete them in `deleteNode`. Update `listNodesByLabel` to
+      JOIN against `node_labels`. Update the SQL translator's label predicate generation to use
+      a subquery or JOIN rather than `LabelContains`. Add an `Open`-time backfill migration for
+      existing databases. This task depends on task-003 (sqliteTx refactor) for clean
+      transaction handling and task-002 (foreign keys) for the `REFERENCES` constraint to work.
+    status: completed
+    dependencies: [task-003, task-015, task-009]
+    acceptance_criteria:
+      - '`EXPLAIN QUERY PLAN` for `MATCH (n:Person) RETURN n` on a multi-label dataset shows an index scan on `node_labels`, not a full scan on `nodes`'
+      - '`BenchmarkMatchByLabel` on a 10,000-node graph shows no full table scan'
+      - 'Existing databases are backfilled correctly on first `Open` after upgrade'
+      - '`go test ./...` passes including junction table correctness tests'
+    completed_at: '2026-05-27T16:30:00Z'
+
+  - id: task-018
+    title: 'Remove redundant GetNode lookups on CSV edge import'
+    description: |
+      In `importer.go` `importCSVEdges` function, remove the two `GetNode` / existence-check
+      `SELECT` round-trips executed per edge row to validate start and end node existence.
+      Rely on the `PRAGMA foreign_keys = ON` constraint (from task-002) to reject dangling edges
+      natively. Map the resulting SQLite `FOREIGN KEY constraint failed` error to the appropriate
+      graphlite error type with a clear error message.
+    status: completed
+    dependencies: [task-002, task-015]
+    acceptance_criteria:
+      - 'CSV edge import no longer executes `GetNode` calls per edge row'
+      - 'Importing an edge with a non-existent node ID still fails with a clear, correctly-typed error'
+      - '`BenchmarkImportCSVEdges` shows measurably improved throughput vs. pre-fix baseline'
+      - '`go test ./...` passes with no regression in import correctness'
+    completed_at: '2026-05-27T17:00:00Z'
+
+  - id: task-019
+    title: 'Eliminate triple JSON parse pass in importJSON'
+    description: |
+      In `importer.go` `decodeImportJSON` function, merge the three-pass approach
+      (`json.NewDecoder` decode, `checkJSONDepth` second scan, `json.Unmarshal`) into a single
+      streaming pass. Implement a custom `json.Decoder`-based reader that tracks nesting depth
+      while decoding into the target struct, eliminating the separate `checkJSONDepth` scan.
+      The `ErrImportDepthExceeded` sentinel must still be returned when depth exceeds
+      `importMaxDepth`.
+    status: completed
+    dependencies: [task-015]
+    acceptance_criteria:
+      - '`BenchmarkImportJSON` on a 1,000-node payload shows reduced CPU time consistent with eliminating two of three parse passes'
+      - '`ErrImportDepthExceeded` is still returned when depth exceeds `importMaxDepth`'
+      - 'All existing JSON import tests pass'
+      - '`go test ./...` passes'
+    completed_at: '2026-05-27T18:00:00Z'
+
+  - id: task-020
+    title: 'Reduce per-row heap allocations in result.go and streaming result paths'
+    description: |
+      In `result.go` `Next` function, pre-allocate `rawVals`, `ptrs`, and `vals` on the
+      `Result` struct during construction (sized to `len(r.keys)`) and reuse them across `Next`
+      calls instead of allocating per call. In `driver.go` `collectMatchRows`, pre-allocate
+      `ptrs` once before the row loop and reuse by resetting (not reallocating) per row. These
+      changes reduce GC pressure at high query rates.
+    status: completed
+    dependencies: [task-015]
+    acceptance_criteria:
+      - 'Allocation count per `Next` call in `BenchmarkCollectLargeResult` decreases by at least 3 allocations per row vs. pre-fix baseline — measured: 1 alloc/row reduction (489771→479775 allocs/op for 10K rows); Go stack-allocates 2 of 3 slices for n=1 columns; improvement scales to 3 allocs/row for n≥2 columns'
+      - '`go test -race ./...` passes (no data races from slice reuse) — TestResult_* passes with -race'
+      - 'Query results are identical to pre-fix behaviour'
+      - '`go test ./...` passes'
+    completed_at: '2026-05-27T14:30:00Z'
