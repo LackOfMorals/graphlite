@@ -355,3 +355,215 @@ func BenchmarkAggregationPipeline(b *testing.B) {
 		}
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 10K-node fixture: used by BenchmarkMatchByLabel and BenchmarkCollectLargeResult.
+// Half the nodes are Person, half are Employee so that BenchmarkMatchByLabel
+// exercises a 50% selective label scan.
+// ─────────────────────────────────────────────────────────────────────────────
+
+var (
+	tenKOnce sync.Once
+	tenKDB   *graphlite.DB
+	tenKErr  error
+)
+
+func get10KDB(b *testing.B) *graphlite.DB {
+	b.Helper()
+	tenKOnce.Do(func() {
+		db, err := graphlite.Open(":memory:")
+		if err != nil {
+			tenKErr = fmt.Errorf("open 10K db: %w", err)
+			return
+		}
+		if err := seedMixedNodes(db, 10_000); err != nil {
+			_ = db.Close(context.Background())
+			tenKErr = fmt.Errorf("seed 10K db: %w", err)
+			return
+		}
+		tenKDB = db
+	})
+	if tenKErr != nil {
+		b.Fatalf("fixture setup: %v", tenKErr)
+	}
+	return tenKDB
+}
+
+// seedMixedNodes imports n nodes where the first n/2 have label "Person" and
+// the remaining n/2 have label "Employee". This gives BenchmarkMatchByLabel a
+// 50% match rate when querying for MATCH (n:Person).
+func seedMixedNodes(db *graphlite.DB, n int) error {
+	nodes := make([]importNode, n)
+	for i := range nodes {
+		label := "Person"
+		if i >= n/2 {
+			label = "Employee"
+		}
+		nodes[i] = importNode{
+			ID:     fmt.Sprintf("n%d", i),
+			Labels: []string{label},
+			Props:  map[string]any{"name": fmt.Sprintf("Node%d", i), "age": float64(20 + i%60)},
+		}
+	}
+	doc := importDoc{Nodes: nodes}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	return db.Import(context.Background(), bytes.NewReader(raw), graphlite.FormatJSON)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Required task-015 benchmarks
+// ─────────────────────────────────────────────────────────────────────────────
+
+// BenchmarkRunQuerySimpleSelect measures the full round-trip cost of a simple
+// MATCH (n) RETURN n query on a 1K-node in-memory graph, including parse, plan,
+// translate, SQL execution, and result collection.
+func BenchmarkRunQuerySimpleSelect(b *testing.B) {
+	db := getSmallDB(b)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		res, err := db.RunQuery(ctx, `MATCH (n) RETURN n`, nil)
+		if err != nil {
+			b.Fatalf("query: %v", err)
+		}
+		if _, err := res.Collect(ctx); err != nil {
+			b.Fatalf("collect: %v", err)
+		}
+	}
+}
+
+// BenchmarkRunQueryCreateNode measures the cost of creating a single node via
+// RunQuery in auto-commit mode on a fresh in-memory database. Each iteration
+// uses a unique name to avoid any SQLite uniqueness effects.
+func BenchmarkRunQueryCreateNode(b *testing.B) {
+	db, err := graphlite.Open(":memory:")
+	if err != nil {
+		b.Fatalf("open: %v", err)
+	}
+	b.Cleanup(func() { _ = db.Close(context.Background()) })
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := range b.N {
+		res, err := db.RunQuery(ctx,
+			`CREATE (n:Person {name: $name, age: $age})`,
+			map[string]any{"name": fmt.Sprintf("BenchNode%d", i), "age": int64(i % 100)},
+		)
+		if err != nil {
+			b.Fatalf("query: %v", err)
+		}
+		if _, err := res.Collect(ctx); err != nil {
+			b.Fatalf("collect: %v", err)
+		}
+	}
+}
+
+// BenchmarkCollectLargeResult measures the cost of collecting all 10,000 nodes
+// from a MATCH (n) RETURN n query — primarily the per-row scan, JSON decode, and
+// Record allocation overhead inside Result.Collect.
+func BenchmarkCollectLargeResult(b *testing.B) {
+	db := get10KDB(b)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		res, err := db.RunQuery(ctx, `MATCH (n) RETURN n`, nil)
+		if err != nil {
+			b.Fatalf("query: %v", err)
+		}
+		recs, err := res.Collect(ctx)
+		if err != nil {
+			b.Fatalf("collect: %v", err)
+		}
+		if len(recs) != 10_000 {
+			b.Fatalf("expected 10000 records, got %d", len(recs))
+		}
+	}
+}
+
+// BenchmarkImportJSON measures the cost of importing a 1,000-node JSON payload
+// into a fresh in-memory database. The payload is pre-serialised once so only
+// import throughput (not JSON marshalling) is measured.
+func BenchmarkImportJSON(b *testing.B) {
+	// Pre-build the import payload once outside the loop.
+	nodes := make([]importNode, 1_000)
+	for i := range nodes {
+		nodes[i] = importNode{
+			ID:     fmt.Sprintf("n%d", i),
+			Labels: []string{"Person"},
+			Props:  map[string]any{"name": fmt.Sprintf("ImportNode%d", i), "age": float64(i % 100)},
+		}
+	}
+	payload, err := json.Marshal(importDoc{Nodes: nodes})
+	if err != nil {
+		b.Fatalf("marshal: %v", err)
+	}
+
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		db, err := graphlite.Open(":memory:")
+		if err != nil {
+			b.Fatalf("open: %v", err)
+		}
+		if err := db.Import(ctx, bytes.NewReader(payload), graphlite.FormatJSON); err != nil {
+			_ = db.Close(ctx)
+			b.Fatalf("import: %v", err)
+		}
+		_ = db.Close(ctx)
+	}
+}
+
+// BenchmarkBuildSQLResult_CacheHit measures the full parse→plan→translate→bind
+// pipeline cost for a repeated MATCH (n) RETURN n query. The benchmark name
+// uses "CacheHit" to match the naming convention expected by task-016, where a
+// query plan cache will be added so that repeated queries skip the pipeline
+// entirely. Running this benchmark before and after task-016 quantifies the
+// speedup from the cache.
+//
+// Each iteration calls db.RunQuery but drains only the result summary (not the
+// rows themselves) so that pipeline overhead dominates.
+func BenchmarkBuildSQLResult_CacheHit(b *testing.B) {
+	db := getSmallDB(b)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		res, err := db.RunQuery(ctx, `MATCH (n) RETURN n.name AS name`, nil)
+		if err != nil {
+			b.Fatalf("query: %v", err)
+		}
+		if _, err := res.Consume(ctx); err != nil {
+			b.Fatalf("consume: %v", err)
+		}
+	}
+}
+
+// BenchmarkMatchByLabel measures MATCH (n:Person) RETURN n on a 10,000-node
+// in-memory graph where exactly 50% of nodes carry the "Person" label. This
+// benchmark isolates the label-scan path in the SQL translator and SQLite
+// executor — the expected result count is 5,000 records.
+func BenchmarkMatchByLabel(b *testing.B) {
+	db := get10KDB(b)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		res, err := db.RunQuery(ctx, `MATCH (n:Person) RETURN n`, nil)
+		if err != nil {
+			b.Fatalf("query: %v", err)
+		}
+		recs, err := res.Collect(ctx)
+		if err != nil {
+			b.Fatalf("collect: %v", err)
+		}
+		if len(recs) != 5_000 {
+			b.Fatalf("expected 5000 records, got %d", len(recs))
+		}
+	}
+}
