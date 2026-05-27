@@ -226,14 +226,14 @@ tasks:
       `tx.Rollback()` only when `retErr != nil`, and remove all inline `_ = tx.Rollback()` calls
       from the function bodies. This requires task-012 to be complete first so that the deferred
       rollback after a successful commit is a no-op.
-    status: pending
+    status: completed
     dependencies: [task-012]
     acceptance_criteria:
       - '`grep -n ''tx.Rollback'' importer.go` returns zero results outside of the deferred closures'
       - 'All three import functions use the named-return defer pattern'
       - 'Import error paths still correctly roll back the transaction'
       - '`go test ./...` passes'
-    completed_at: null
+    completed_at: '2026-05-27T12:30:00Z'
 
   - id: task-014
     title: 'Respect context cancellation in Result.Next'

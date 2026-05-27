@@ -285,3 +285,26 @@ Key Decisions:
   transaction) to keep the test focused on the no-op Rollback semantics.
 
 Next Task: task-013
+
+================================================================================
+TASK-013: Use defer-based transaction rollback in importer.go
+Date: 2026-05-27T12:30:00Z
+================================================================================
+
+Summary:
+Refactored all three import functions (`importJSON`, `importCSVNodes`,
+`importCSVEdges`) in `importer.go` to use the standard Go defer+named-return
+rollback pattern. Added named return `(retErr error)` to each function and
+a deferred closure that calls `tx.Rollback()` only when `retErr != nil`.
+Removed all 14 inline `_ = tx.Rollback()` calls from function bodies
+(including the one after `tx.Commit()` in each function).
+
+Files Changed:
+- importer.go (3 function signatures → named return; 3 defer closures added; 14 inline rollbacks removed)
+- .plans/tasks-skill-review-remediation.yml (task-013 marked completed)
+
+Key Decisions:
+- Guard `if retErr != nil` in defer is preferred over unconditional `_ = tx.Rollback()` — clearer intent and avoids spurious Rollback on success path even though task-012 made it idempotent
+- Deferred rollback placed immediately after successful `d.st.Begin(ctx)` call, not earlier — no transaction to roll back before Begin
+
+Next Task: task-014

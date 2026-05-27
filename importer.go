@@ -142,7 +142,7 @@ func (d *DB) Export(ctx context.Context, w io.Writer, format ExportFormat) error
 // ─────────────────────────────────────────────────────────────────────────────
 
 // importJSON implements the JSON import path.
-func (d *DB) importJSON(ctx context.Context, r io.Reader) error {
+func (d *DB) importJSON(ctx context.Context, r io.Reader) (retErr error) {
 	// Enforce the 500 MiB size limit by wrapping with a counting reader.
 	lr := &limitedReader{r: io.LimitReader(r, importMaxBytes+1), limit: importMaxBytes}
 
@@ -162,6 +162,13 @@ func (d *DB) importJSON(ctx context.Context, r io.Reader) error {
 	if err != nil {
 		return fmt.Errorf("graphlite: import: begin transaction: %w", err)
 	}
+	// Rollback is a no-op after a successful Commit (task-012), so this deferred
+	// guard is always safe and eliminates per-error inline rollback calls.
+	defer func() {
+		if retErr != nil {
+			_ = tx.Rollback()
+		}
+	}()
 
 	// idMap maps the file-local node "id" string to its database integer ID.
 	idMap := make(map[string]int64, len(doc.Nodes))
@@ -170,17 +177,14 @@ func (d *DB) importJSON(ctx context.Context, r io.Reader) error {
 	for i, n := range doc.Nodes {
 		propsJSON, err := marshalProps(n.Props)
 		if err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: import: node %d (%q) props: %w", i, n.ID, err)
 		}
 		dbID, err := tx.InsertNode(ctx, store.Labels(n.Labels), propsJSON)
 		if err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: import: insert node %d (%q): %w", i, n.ID, err)
 		}
 		if n.ID != "" {
 			if _, dup := idMap[n.ID]; dup {
-				_ = tx.Rollback()
 				return fmt.Errorf("graphlite: import: duplicate node id %q", n.ID)
 			}
 			idMap[n.ID] = dbID
@@ -190,32 +194,26 @@ func (d *DB) importJSON(ctx context.Context, r io.Reader) error {
 	// Insert edges.
 	for i, e := range doc.Edges {
 		if e.Type == "" {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: import: edge %d: missing type", i)
 		}
 		startDBID, ok := idMap[e.StartID]
 		if !ok {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: import: edge %d: unknown startId %q", i, e.StartID)
 		}
 		endDBID, ok := idMap[e.EndID]
 		if !ok {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: import: edge %d: unknown endId %q", i, e.EndID)
 		}
 		propsJSON, err := marshalProps(e.Props)
 		if err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: import: edge %d props: %w", i, err)
 		}
 		if _, err := tx.InsertEdge(ctx, e.Type, startDBID, endDBID, propsJSON); err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: import: insert edge %d: %w", i, err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		_ = tx.Rollback()
 		return fmt.Errorf("graphlite: import: commit: %w", err)
 	}
 	return nil
@@ -307,7 +305,7 @@ func parseCSVPropValue(raw, propType string) (any, error) {
 }
 
 // importCSVNodes imports a node CSV file into the database atomically.
-func (d *DB) importCSVNodes(ctx context.Context, r io.Reader) error {
+func (d *DB) importCSVNodes(ctx context.Context, r io.Reader) (retErr error) {
 	cr := csv.NewReader(io.LimitReader(r, importMaxBytes+1))
 	cr.TrimLeadingSpace = true
 
@@ -349,10 +347,16 @@ func (d *DB) importCSVNodes(ctx context.Context, r io.Reader) error {
 	if err != nil {
 		return fmt.Errorf("graphlite: csv node import: begin transaction: %w", err)
 	}
+	// Rollback is a no-op after a successful Commit (task-012), so this deferred
+	// guard is always safe and eliminates per-error inline rollback calls.
+	defer func() {
+		if retErr != nil {
+			_ = tx.Rollback()
+		}
+	}()
 
 	for rowIdx, row := range rows {
 		if len(row) != len(defs) {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv node import: row %d: expected %d columns, got %d", rowIdx+2, len(defs), len(row))
 		}
 
@@ -372,7 +376,6 @@ func (d *DB) importCSVNodes(ctx context.Context, r io.Reader) error {
 				}
 				pv, err := parseCSVPropValue(val, def.propType)
 				if err != nil {
-					_ = tx.Rollback()
 					return fmt.Errorf("graphlite: csv node import: row %d col %q: %w", rowIdx+2, def.propName, err)
 				}
 				if pv != nil {
@@ -382,24 +385,20 @@ func (d *DB) importCSVNodes(ctx context.Context, r io.Reader) error {
 		}
 
 		if nodeID == "" {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv node import: row %d: empty :ID value", rowIdx+2)
 		}
 
 		propsJSON, err := marshalProps(props)
 		if err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv node import: row %d props: %w", rowIdx+2, err)
 		}
 
 		if _, err := tx.InsertNode(ctx, store.DecodeLabels(labelStr), propsJSON); err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv node import: row %d insert: %w", rowIdx+2, err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		_ = tx.Rollback()
 		return fmt.Errorf("graphlite: csv node import: commit: %w", err)
 	}
 	return nil
@@ -414,7 +413,7 @@ func (d *DB) importCSVNodes(ctx context.Context, r io.Reader) error {
 // importCSVEdges imports an edge CSV file into the database atomically.
 // The :START_ID and :END_ID values must match node row IDs already in the DB
 // (i.e. the integer primary keys stored as ElementId strings).
-func (d *DB) importCSVEdges(ctx context.Context, r io.Reader) error {
+func (d *DB) importCSVEdges(ctx context.Context, r io.Reader) (retErr error) {
 	cr := csv.NewReader(io.LimitReader(r, importMaxBytes+1))
 	cr.TrimLeadingSpace = true
 
@@ -461,10 +460,16 @@ func (d *DB) importCSVEdges(ctx context.Context, r io.Reader) error {
 	if err != nil {
 		return fmt.Errorf("graphlite: csv edge import: begin transaction: %w", err)
 	}
+	// Rollback is a no-op after a successful Commit (task-012), so this deferred
+	// guard is always safe and eliminates per-error inline rollback calls.
+	defer func() {
+		if retErr != nil {
+			_ = tx.Rollback()
+		}
+	}()
 
 	for rowIdx, row := range rows {
 		if len(row) != len(defs) {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv edge import: row %d: expected %d columns, got %d", rowIdx+2, len(defs), len(row))
 		}
 
@@ -486,7 +491,6 @@ func (d *DB) importCSVEdges(ctx context.Context, r io.Reader) error {
 				}
 				pv, err := parseCSVPropValue(val, def.propType)
 				if err != nil {
-					_ = tx.Rollback()
 					return fmt.Errorf("graphlite: csv edge import: row %d col %q: %w", rowIdx+2, def.propName, err)
 				}
 				if pv != nil {
@@ -496,45 +500,37 @@ func (d *DB) importCSVEdges(ctx context.Context, r io.Reader) error {
 		}
 
 		if edgeType == "" {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv edge import: row %d: empty :TYPE value", rowIdx+2)
 		}
 
 		startID, err := strconv.ParseInt(startIDStr, 10, 64)
 		if err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv edge import: row %d: invalid :START_ID %q: %w", rowIdx+2, startIDStr, err)
 		}
 		endID, err := strconv.ParseInt(endIDStr, 10, 64)
 		if err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv edge import: row %d: invalid :END_ID %q: %w", rowIdx+2, endIDStr, err)
 		}
 
 		// Verify that the referenced nodes exist.
 		if _, err := tx.GetNode(ctx, startID); err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv edge import: row %d: start node %d not found: %w", rowIdx+2, startID, err)
 		}
 		if _, err := tx.GetNode(ctx, endID); err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv edge import: row %d: end node %d not found: %w", rowIdx+2, endID, err)
 		}
 
 		propsJSON, err := marshalProps(props)
 		if err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv edge import: row %d props: %w", rowIdx+2, err)
 		}
 
 		if _, err := tx.InsertEdge(ctx, edgeType, startID, endID, propsJSON); err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv edge import: row %d insert: %w", rowIdx+2, err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		_ = tx.Rollback()
 		return fmt.Errorf("graphlite: csv edge import: commit: %w", err)
 	}
 	return nil
