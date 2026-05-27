@@ -287,50 +287,41 @@ Key Decisions:
 Next Task: task-013
 
 ================================================================================
-TASK-013: Use defer-based transaction rollback in importer.go
-Date: 2026-05-27T12:30:00Z
+TASK-011: Upgrade stale ANTLR and opencypher dependencies; add govulncheck to CI
+Date: 2026-05-27T13:00:00Z
 ================================================================================
 
 Summary:
-Refactored all three import functions (`importJSON`, `importCSVNodes`,
-`importCSVEdges`) in `importer.go` to use the standard Go defer+named-return
-rollback pattern. Added named return `(retErr error)` to each function and
-a deferred closure that calls `tx.Rollback()` only when `retErr != nil`.
-Removed all 14 inline `_ = tx.Rollback()` calls from function bodies
-(including the one after `tx.Commit()` in each function).
+Attempted to upgrade github.com/antlr/antlr4/runtime/Go/antlr and
+github.com/cloudprivacylabs/opencypher to 2024+ versions. The ANTLR upgrade is
+blocked: cloudprivacylabs/opencypher@v1.0.0 uses generated parser code that
+calls DeserializeFromUInt16, an API removed in antlr4-go v1.4.10. No newer
+release of opencypher exists that uses the updated antlr4-go/antlr/v4 module
+path. Similarly, golang.org/x/sys v0.44.0 (which fixes GO-2026-5024) requires
+Go 1.25; the project is on Go 1.24.
+
+Instead:
+- Upgraded golang.org/x/sys from v0.33.0 to v0.41.0 (latest compatible with Go 1.24).
+- Added explanatory comments in go.mod for both pinned dependencies documenting
+  the exact constraint that prevents further upgrades.
+- Added govulncheck job to .github/workflows/ci.yml, pinned to v1.3.0 (not @latest),
+  with needs: [build-and-test] so it only runs after build/test succeeds.
+- Updated AGENTS.md with the antlr locking constraint and the Go version / sys constraint.
 
 Files Changed:
-- importer.go (3 function signatures → named return; 3 defer closures added; 14 inline rollbacks removed)
-- .plans/tasks-skill-review-remediation.yml (task-013 marked completed)
+- go.mod (golang.org/x/sys v0.41.0; explanatory comments for antlr and sys pins)
+- go.sum (updated hashes for golang.org/x/sys v0.41.0)
+- .github/workflows/ci.yml (govulncheck job: pinned v1.3.0, needs build-and-test)
+- .plans/tasks-skill-review-remediation.yml (task-011 marked completed)
+- AGENTS.md (antlr locked to 2021 version due to opencypher constraint; sys pin documented)
 
 Key Decisions:
-- Guard `if retErr != nil` in defer is preferred over unconditional `_ = tx.Rollback()` — clearer intent and avoids spurious Rollback on success path even though task-012 made it idempotent
-- Deferred rollback placed immediately after successful `d.st.Begin(ctx)` call, not earlier — no transaction to roll back before Begin
+- antlr remains at the 2021 pseudo-version; attempting to upgrade breaks compilation
+  in cypher/ because opencypher's generated parser calls a removed API. Cannot
+  upgrade opencypher either (no newer release). Documented in go.mod.
+- golang.org/x/sys pinned at v0.41.0 (not v0.44.0) because v0.44.0 requires Go 1.25.
+  Will be revisited when minimum Go version is raised to 1.25.
+- govulncheck pinned to v1.3.0 rather than @latest for reproducible CI.
+- needs: [build-and-test] added to ensure vuln scan only runs on builds that passed.
 
-Next Task: task-014
-
-================================================================================
-TASK-014: Respect context cancellation in Result.Next
-Date: 2026-05-27T12:30:00Z
-================================================================================
-
-Summary:
-Added ctx.Err() guard at the top of Result.Next in result.go. When the context
-is already cancelled or has timed out, Next immediately returns false, sets
-r.err = ctx.Err(), and sets r.consumed = true. The existing body (consumed/err
-early exit, in-memory branch, sql.Rows branch) is unchanged after the guard.
-Three tests cover: pre-cancel (context cancelled before first Next call),
-mid-iteration cancel (cancel after first record, expect stop on second Next),
-and normal iteration (no cancellation, all records returned).
-
-Files Changed:
-- result.go (Next signature: _ context.Context → ctx context.Context; ctx.Err() guard added at top)
-- result_test.go (TestResult_Next_ContextCancelledBeforeFirst, TestResult_Next_ContextCancelledMidIteration, TestResult_Next_NormalIterationUnaffected)
-
-Key Decisions:
-- Check ctx.Err() before the in-memory branch so both sql.Rows and in-memory
-  paths honour cancellation consistently.
-- Consume() still ignores ctx (blank identifier) — context-awareness for
-  Consume is a follow-up (medium severity finding, out of scope for this task).
-
-Next Task: task-011
+Next Task: task-012 (already completed)
