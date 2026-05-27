@@ -794,7 +794,7 @@ func planSetClause(sc *SetClause, scope *BindingScope) ([]LogicalPlan, error) {
 		}
 		// Detect undefined variable references in the SET value: a bare identifier
 		// that fell through to RawExpr and is not in scope is an undefined variable.
-		if raw, ok := valueExpr.(*RawExpr); ok && isIdentifier(raw.Text) {
+		if raw, ok := valueExpr.(*RawExpr); ok && IsIdentifier(raw.Text) {
 			if _, inScope := scope.Resolve(raw.Text); !inScope {
 				return nil, fmt.Errorf("cypher: undefined variable %q in SET value: SyntaxError UndefinedVariable", raw.Text)
 			}
@@ -996,13 +996,13 @@ func parseExprText(text string, scope *BindingScope) (Expr, error) {
 		varPart := text[:idx]
 		propPart := text[idx+1:]
 		// Only treat as PropExpr if varPart looks like a simple identifier.
-		if isIdentifier(varPart) && isIdentifier(propPart) {
+		if IsIdentifier(varPart) && IsIdentifier(propPart) {
 			return &PropExpr{Variable: varPart, Property: propPart}, nil
 		}
 	}
 
 	// Bare variable reference — only if the variable is in scope.
-	if isIdentifier(text) {
+	if IsIdentifier(text) {
 		if _, ok := scope.Resolve(text); ok {
 			return &VarExpr{Name: text}, nil
 		}
@@ -1014,9 +1014,11 @@ func parseExprText(text string, scope *BindingScope) (Expr, error) {
 	return &RawExpr{Text: text}, nil
 }
 
-// isIdentifier returns true if s looks like a simple Cypher/SQL identifier:
+// IsIdentifier returns true if s looks like a simple Cypher/SQL identifier:
 // starts with a letter or underscore, followed by letters, digits, or underscores.
-func isIdentifier(s string) bool {
+// It is used as an allowlist to prevent SQL injection when interpolating expression
+// text into generated SQL.
+func IsIdentifier(s string) bool {
 	if len(s) == 0 {
 		return false
 	}
@@ -1090,7 +1092,7 @@ func planPropsMapValidated(raw map[string]string, scope *BindingScope) (map[stri
 		// expressions (those that resolved to RawExpr because they weren't in the
 		// scope) are not undefined variables.
 		if scope != nil {
-			if raw, ok := expr.(*RawExpr); ok && isIdentifier(raw.Text) {
+			if raw, ok := expr.(*RawExpr); ok && IsIdentifier(raw.Text) {
 				// Bare identifier not matched as literal/param/prop — check scope.
 				if _, inScope := scope.Resolve(raw.Text); !inScope {
 					return nil, fmt.Errorf("cypher: undefined variable %q in property value: SyntaxError UndefinedVariable", raw.Text)

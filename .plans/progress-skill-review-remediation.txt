@@ -72,3 +72,28 @@ Key Decisions:
 - Commit/Rollback return a sentinel error when called on a non-transactional SQLiteStore; task-012 will make Rollback idempotent after Commit
 
 Next Task: task-004
+
+================================================================================
+TASK-004: Fix RawExpr SQL injection: return error instead of interpolating verbatim
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary: Closed the highest-severity SQL injection vector in the translator.
+The `case *cypher.RawExpr` branch in `exprToSQL` previously returned `e.Text`
+verbatim into the generated SQL string. It now gates on `cypher.IsIdentifier(e.Text)`:
+safe identifiers (letters/digits/underscores only) are passed through; all other
+values return a descriptive error. To enable cross-package use, `isIdentifier` in
+`cypher/planner.go` was exported to `IsIdentifier` and all callers in
+`cypher/planner.go` and `cypher/parser.go` were updated accordingly.
+
+Files Changed:
+- sql/translator.go (case *cypher.RawExpr: gate on IsIdentifier, return error for unsafe inputs)
+- cypher/planner.go (export isIdentifier → IsIdentifier; update all internal callers; improve doc comment)
+- cypher/parser.go (update sole caller to IsIdentifier)
+
+Key Decisions:
+- Exported `isIdentifier` rather than duplicating the logic in the sql package — keeps a single source of truth for the allowlist
+- Simple identifiers (variable names resolved via RawExpr) remain valid passthroughs; complex expressions (function calls, arithmetic, etc.) now error cleanly
+- No existing tests exercise the RawExpr passthrough path in translator, so no test changes were needed
+
+Next Task: task-005

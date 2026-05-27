@@ -341,7 +341,7 @@ func buildSetItem(ctx *parser.OC_SetItemContext) (SetItem, error) {
 				innerExpr := parenCtx.(*parser.OC_ParenthesizedExpressionContext).OC_Expression()
 				if innerExpr != nil {
 					innerText := trimWhitespace(innerExpr.GetText())
-					if isIdentifier(innerText) {
+					if IsIdentifier(innerText) {
 						varName = nil // will use innerText directly below
 						lookups := pe.AllOC_PropertyLookup()
 						if len(lookups) != 1 {

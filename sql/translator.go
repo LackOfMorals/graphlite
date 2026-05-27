@@ -1615,9 +1615,15 @@ func (t *Translator) exprToSQL(expr cypher.Expr, scope *cypher.BindingScope) (st
 		return "?", nil
 
 	case *cypher.RawExpr:
-		// RawExpr: unsupported sub-expression; return as-is (best effort).
-		// The translator cannot produce correct SQL for this but should not crash.
-		return e.Text, nil
+		// RawExpr carries an unparsed expression text from the planner.
+		// Interpolating arbitrary text directly into SQL would open a SQL injection
+		// vector, so we only allow values that pass the isIdentifier allowlist
+		// (letters, digits, underscores — no SQL metacharacters). All other values
+		// are rejected with an error.
+		if cypher.IsIdentifier(e.Text) {
+			return e.Text, nil
+		}
+		return "", fmt.Errorf("sql: unsupported expression %q: complex expressions are not yet supported in this context", e.Text)
 
 	default:
 		return "", fmt.Errorf("sql: unsupported expression type %T", expr)

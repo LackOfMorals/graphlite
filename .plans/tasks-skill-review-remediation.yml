@@ -66,14 +66,14 @@ tasks:
       If future callers need best-effort passthrough for trusted internal use, gate it behind an
       explicit allowlist validated with the `isIdentifier` function from `cypher/planner.go`.
       This closes the highest-severity SQL injection vector identified in the security review.
-    status: pending
+    status: completed
     dependencies: []
     acceptance_criteria:
       - 'No path through `exprToSQL` returns unvalidated user-supplied text into the SQL string'
       - 'A Cypher expression that triggers `*cypher.RawExpr` returns a descriptive error'
       - 'Existing query tests that do not use `RawExpr` continue to pass'
       - '`go test ./...` passes'
-    completed_at: null
+    completed_at: '2026-05-27T00:00:00Z'
 
   - id: task-005
     title: 'Validate property key names before JSON path construction'
