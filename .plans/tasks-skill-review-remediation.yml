@@ -84,7 +84,7 @@ tasks:
       a descriptive error if validation fails. Document which characters are rejected and why
       in a comment. This prevents malformed JSON path injection via bracket characters or null
       bytes in property key names.
-    status: pending
+    status: in_progress
     dependencies: [task-004]
     acceptance_criteria:
       - 'A property key containing `]` causes `exprToSQL` to return an error'

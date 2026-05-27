@@ -133,6 +133,28 @@ func NewTranslator(d Dialect) *Translator {
 	return &Translator{dialect: d}
 }
 
+// validatePropKey checks that a property key name is safe to embed in a JSON
+// path expression such as "$.key". It rejects any name that is not a simple
+// identifier (letters, digits, underscores only, non-empty, starts with a
+// letter or underscore). This prevents JSON path injection attacks via
+// characters such as ']', '[', '"', or null bytes in property key names.
+//
+// The special sentinel key "$" used by the planner for whole-properties
+// parameter matching (MATCH (n $param)) is exempt — it never reaches a JSON
+// path construction site and must not be rejected.
+//
+// For example, a key like `foo]` would silently corrupt the JSON path fragment
+// produced by json_extract(props, '$.foo]') if not validated here.
+func validatePropKey(key string) error {
+	if key == "$" {
+		return nil // planner sentinel for whole-properties parameter matching
+	}
+	if !cypher.IsIdentifier(key) {
+		return fmt.Errorf("sql: property key %q is not a valid identifier (only letters, digits and underscores are allowed)", key)
+	}
+	return nil
+}
+
 // Translate walks plan and returns the SQL string and argument slice.
 // It returns an error when the plan contains unsupported constructs.
 //
@@ -641,6 +663,9 @@ func (t *Translator) buildFromClauseForMatchNode(mnp *cypher.MatchNodePlan, scop
 
 	// Inline property constraints.
 	for key, expr := range mnp.Props {
+		if err := validatePropKey(key); err != nil {
+			return fromClause{}, err
+		}
 		sub := &Translator{dialect: t.dialect}
 		valSQL, err := sub.exprToSQL(expr, scope)
 		if err != nil {
@@ -715,6 +740,9 @@ func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope 
 			edgeOnParts = append(edgeOnParts, "("+strings.Join(typeParts, " OR ")+")")
 		}
 		for key, expr := range mrp.RelProps {
+			if err := validatePropKey(key); err != nil {
+				return fromClause{}, err
+			}
 			sub := &Translator{dialect: t.dialect}
 			valSQL, err := sub.exprToSQL(expr, scope)
 			if err != nil {
@@ -734,6 +762,9 @@ func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope 
 			fc.joinArgs = append(fc.joinArgs, args...)
 		}
 		for key, expr := range mrp.EndNode.Props {
+			if err := validatePropKey(key); err != nil {
+				return fromClause{}, err
+			}
 			sub := &Translator{dialect: t.dialect}
 			valSQL, err := sub.exprToSQL(expr, scope)
 			if err != nil {
@@ -753,6 +784,9 @@ func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope 
 			fc.whereArgs = append(fc.whereArgs, args...)
 		}
 		for key, expr := range mrp.StartNode.Props {
+			if err := validatePropKey(key); err != nil {
+				return fromClause{}, err
+			}
 			sub := &Translator{dialect: t.dialect}
 			valSQL, err := sub.exprToSQL(expr, scope)
 			if err != nil {
@@ -774,6 +808,9 @@ func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope 
 			fc.whereArgs = append(fc.whereArgs, args...)
 		}
 		for key, expr := range mrp.StartNode.Props {
+			if err := validatePropKey(key); err != nil {
+				return fromClause{}, err
+			}
 			sub := &Translator{dialect: t.dialect}
 			valSQL, err := sub.exprToSQL(expr, scope)
 			if err != nil {
@@ -800,6 +837,9 @@ func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope 
 			whereParts = append(whereParts, "("+strings.Join(typeParts, " OR ")+")")
 		}
 		for key, expr := range mrp.RelProps {
+			if err := validatePropKey(key); err != nil {
+				return fromClause{}, err
+			}
 			sub := &Translator{dialect: t.dialect}
 			valSQL, err := sub.exprToSQL(expr, scope)
 			if err != nil {
@@ -820,6 +860,9 @@ func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope 
 			fc.whereArgs = append(fc.whereArgs, args...)
 		}
 		for key, expr := range mrp.EndNode.Props {
+			if err := validatePropKey(key); err != nil {
+				return fromClause{}, err
+			}
 			sub := &Translator{dialect: t.dialect}
 			valSQL, err := sub.exprToSQL(expr, scope)
 			if err != nil {
@@ -968,6 +1011,9 @@ func (t *Translator) buildFromClauseForVarLengthRel(vlp *cypher.VariableLengthRe
 		whereArgs = append(whereArgs, args...)
 	}
 	for key, expr := range vlp.StartNode.Props {
+		if err := validatePropKey(key); err != nil {
+			return fromClause{}, err
+		}
 		sub := &Translator{dialect: t.dialect}
 		valSQL, err := sub.exprToSQL(expr, scope)
 		if err != nil {
@@ -984,6 +1030,9 @@ func (t *Translator) buildFromClauseForVarLengthRel(vlp *cypher.VariableLengthRe
 		whereArgs = append(whereArgs, args...)
 	}
 	for key, expr := range vlp.EndNode.Props {
+		if err := validatePropKey(key); err != nil {
+			return fromClause{}, err
+		}
 		sub := &Translator{dialect: t.dialect}
 		valSQL, err := sub.exprToSQL(expr, scope)
 		if err != nil {
@@ -1202,6 +1251,9 @@ func (t *Translator) toGroupBySQL(expr cypher.Expr, scope *cypher.BindingScope) 
 		if !ok {
 			return "", fmt.Errorf("sql: variable %q not in scope for GROUP BY", e.Variable)
 		}
+		if err := validatePropKey(e.Property); err != nil {
+			return "", err
+		}
 		return t.dialect.JSONExtract(b.Alias+".props", "$."+e.Property), nil
 	case *cypher.LiteralExpr:
 		// Literals are constants — no GROUP BY column needed.
@@ -1288,6 +1340,9 @@ func (t *Translator) exprToSQL(expr cypher.Expr, scope *cypher.BindingScope) (st
 		binding, ok := scope.Resolve(e.Variable)
 		if !ok {
 			return "", fmt.Errorf("sql: variable %q not in scope", e.Variable)
+		}
+		if err := validatePropKey(e.Property); err != nil {
+			return "", err
 		}
 		// In an UPDATE context for this variable, use the unqualified column name
 		// since UPDATE statements cannot reference table aliases.
@@ -1505,6 +1560,9 @@ func (t *Translator) exprToSQL(expr cypher.Expr, scope *cypher.BindingScope) (st
 		binding, ok := scope.Resolve(e.Prop.Variable)
 		if !ok {
 			return "", fmt.Errorf("sql: variable %q not in scope for exists()", e.Prop.Variable)
+		}
+		if err := validatePropKey(e.Prop.Property); err != nil {
+			return "", err
 		}
 		jsonExpr := t.dialect.JSONExtract(binding.Alias+".props", "$."+e.Prop.Property)
 		return fmt.Sprintf("(%s IS NOT NULL)", jsonExpr), nil
@@ -2098,6 +2156,10 @@ func (t *Translator) translateSetProp(p *cypher.SetPropPlan, scope *cypher.Bindi
 		return Statement{}, fmt.Errorf("sql: variable %q not in scope for SET", p.Variable)
 	}
 
+	if err := validatePropKey(p.Property); err != nil {
+		return Statement{}, err
+	}
+
 	// Build the value SQL fragment (with its own fresh arg list).
 	valTranslator := &Translator{dialect: t.dialect, updateVar: p.Variable}
 	valSQL, err := valTranslator.exprToSQL(p.Value, scope)
@@ -2148,6 +2210,9 @@ func (t *Translator) translateSetMerge(p *cypher.SetMergePlan, scope *cypher.Bin
 	var args []any
 	jsonSetParts = append(jsonSetParts, "props")
 	for _, k := range keys {
+		if err := validatePropKey(k); err != nil {
+			return Statement{}, err
+		}
 		expr := p.Props[k]
 		valT := &Translator{dialect: t.dialect}
 		valSQL, err := valT.exprToSQL(expr, scope)
@@ -2182,6 +2247,9 @@ func (t *Translator) translateRemoveProp(p *cypher.RemovePropPlan, scope *cypher
 		return Statement{}, fmt.Errorf("sql: variable %q not in scope for REMOVE prop", p.Variable)
 	}
 
+	if err := validatePropKey(p.Property); err != nil {
+		return Statement{}, err
+	}
 	removeExpr := t.dialect.JSONRemove("props", "$."+p.Property)
 	table := "nodes"
 	if binding.IsRel {
@@ -2346,6 +2414,9 @@ func (t *Translator) translateMerge(p *cypher.MergePlan, scope *cypher.BindingSc
 	var externalRefs []externalRef
 
 	for _, key := range propKeys {
+		if err := validatePropKey(key); err != nil {
+			return nil, err
+		}
 		expr := p.Props[key]
 		sub := &Translator{dialect: t.dialect}
 		valSQL, err := sub.exprToSQL(expr, scope)
@@ -2753,6 +2824,9 @@ func (t *Translator) buildPropsJSON(props map[string]cypher.Expr, scope *cypher.
 	parts := make([]string, 0, len(keys)*2)
 	var args []any
 	for _, key := range keys {
+		if err := validatePropKey(key); err != nil {
+			return "", nil, err
+		}
 		expr := props[key]
 		// Use a fresh translator so we can collect the arg values cleanly.
 		sub := &Translator{dialect: t.dialect}

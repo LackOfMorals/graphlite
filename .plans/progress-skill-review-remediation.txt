@@ -97,3 +97,29 @@ Key Decisions:
 - No existing tests exercise the RawExpr passthrough path in translator, so no test changes were needed
 
 Next Task: task-005
+
+================================================================================
+TASK-005: Validate property key names before JSON path construction
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Added `validatePropKey(key string) error` to `sql/translator.go`. Validation
+gates on `cypher.IsIdentifier`, rejecting keys that contain injection characters
+(`]`, `[`, `"`, null bytes, etc.). Applied at all JSON path construction sites:
+MATCH node/rel/var-length prop loops, exprToSQL PropExpr, ExistsPropExpr,
+GROUP BY PropExpr, translateSetProp, translateSetMerge, translateRemoveProp,
+translateMerge, and buildPropsJSON (CREATE path). The `$` planner sentinel key
+is explicitly exempted. Key validation in translateSetProp was reordered to
+occur before value expression evaluation.
+
+Files Changed:
+- sql/translator.go (validatePropKey + calls at all JSON path sites; $ sentinel exemption; translateSetProp reorder; buildPropsJSON coverage)
+- sql/translator_test.go (3 new tests: ClosingBracket, OpeningBracket, NullByte rejection)
+
+Key Decisions:
+- $ is exempted in validatePropKey itself (not at call sites) so the exemption is documented once and cannot be missed by new call sites
+- translateSetProp validates key before building value expression to surface the security-relevant error first
+- buildPropsJSON now validates keys, closing the CREATE/MERGE injection path
+
+Next Task: task-006

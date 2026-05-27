@@ -2181,3 +2181,129 @@ func TestTranslate_MatchCreate_AnonymousEnd(t *testing.T) {
 		t.Errorf("KindMatchForWrite SELECT should reference n0 (matched node): %s", matchStmt.SQL)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Property key validation tests (task-005)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// translateCypherWantError is like translateCypher but expects an error from
+// Translate. It returns the error string for further assertions.
+func translateCypherWantError(t *testing.T, plan cypher.LogicalPlan, scope *cypher.BindingScope) error {
+	t.Helper()
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	_, err := tr.Translate(plan, scope)
+	if err == nil {
+		t.Fatal("expected Translate to return an error, got nil")
+	}
+	return err
+}
+
+// buildScopeWithNode returns a scope pre-populated with a single node binding
+// named "n" with alias "n0".
+func buildScopeWithNode() *cypher.BindingScope {
+	scope := cypher.NewScope()
+	scope.Bind("n", cypher.Binding{
+		Alias:  "n0",
+		Column: "n0.id",
+		IsNode: true,
+	})
+	return scope
+}
+
+// TestTranslate_PropKeyValidation_ClosingBracket verifies that a property key
+// containing ']' causes Translate to return an error, preventing JSON path
+// injection via json_extract(props, '$.foo]bar').
+func TestTranslate_PropKeyValidation_ClosingBracket(t *testing.T) {
+	scope := buildScopeWithNode()
+	plan := &cypher.ReturnPlan{
+		Source: &cypher.MatchNodePlan{Variable: "n", SQLAlias: "n0"},
+		Projections: []cypher.ProjectionItem{
+			{Expr: &cypher.PropExpr{Variable: "n", Property: "foo]bar"}, Alias: "v"},
+		},
+	}
+	err := translateCypherWantError(t, plan, scope)
+	if !strings.Contains(err.Error(), "foo]bar") {
+		t.Errorf("error should mention the rejected key; got: %v", err)
+	}
+}
+
+// TestTranslate_PropKeyValidation_OpeningBracket verifies that a property key
+// containing '[' causes Translate to return an error.
+func TestTranslate_PropKeyValidation_OpeningBracket(t *testing.T) {
+	scope := buildScopeWithNode()
+	plan := &cypher.ReturnPlan{
+		Source: &cypher.MatchNodePlan{Variable: "n", SQLAlias: "n0"},
+		Projections: []cypher.ProjectionItem{
+			{Expr: &cypher.PropExpr{Variable: "n", Property: "foo[0]"}, Alias: "v"},
+		},
+	}
+	err := translateCypherWantError(t, plan, scope)
+	if !strings.Contains(err.Error(), "foo[0]") {
+		t.Errorf("error should mention the rejected key; got: %v", err)
+	}
+}
+
+// TestTranslate_PropKeyValidation_NullByte verifies that a property key
+// containing a null byte causes Translate to return an error.
+func TestTranslate_PropKeyValidation_NullByte(t *testing.T) {
+	scope := buildScopeWithNode()
+	plan := &cypher.ReturnPlan{
+		Source: &cypher.MatchNodePlan{Variable: "n", SQLAlias: "n0"},
+		Projections: []cypher.ProjectionItem{
+			{Expr: &cypher.PropExpr{Variable: "n", Property: "foo\x00bar"}, Alias: "v"},
+		},
+	}
+	err := translateCypherWantError(t, plan, scope)
+	if err == nil {
+		t.Fatal("expected an error for null-byte property key")
+	}
+}
+
+// TestTranslate_PropKeyValidation_ValidKey verifies that a valid property key
+// (letters, digits, underscores) produces correct JSON path output and no error.
+func TestTranslate_PropKeyValidation_ValidKey(t *testing.T) {
+	scope := buildScopeWithNode()
+	plan := &cypher.ReturnPlan{
+		Source: &cypher.MatchNodePlan{Variable: "n", SQLAlias: "n0"},
+		Projections: []cypher.ProjectionItem{
+			{Expr: &cypher.PropExpr{Variable: "n", Property: "first_name"}, Alias: "v"},
+		},
+	}
+	tr := sqldialect.NewTranslator(sqldialect.SQLiteDialect{})
+	result, err := tr.Translate(plan, scope)
+	if err != nil {
+		t.Fatalf("unexpected error for valid key: %v", err)
+	}
+	if !strings.Contains(result.SQL, "$.first_name") {
+		t.Errorf("expected $.first_name in SQL; got: %s", result.SQL)
+	}
+}
+
+// TestTranslate_PropKeyValidation_SetProp verifies that translateSetProp
+// rejects a property key containing forbidden characters.
+func TestTranslate_PropKeyValidation_SetProp(t *testing.T) {
+	scope := buildScopeWithNode()
+	plan := &cypher.SetPropPlan{
+		Variable: "n",
+		Property: "bad]key",
+		Value:    &cypher.LiteralExpr{Value: "v"},
+	}
+	err := translateCypherWantError(t, plan, scope)
+	if !strings.Contains(err.Error(), "bad]key") {
+		t.Errorf("error should mention the rejected key; got: %v", err)
+	}
+}
+
+// TestTranslate_PropKeyValidation_RemoveProp verifies that translateRemoveProp
+// rejects a property key containing forbidden characters.
+func TestTranslate_PropKeyValidation_RemoveProp(t *testing.T) {
+	scope := buildScopeWithNode()
+	plan := &cypher.RemovePropPlan{
+		Variable: "n",
+		Property: "bad[key",
+	}
+	err := translateCypherWantError(t, plan, scope)
+	if !strings.Contains(err.Error(), "bad[key") {
+		t.Errorf("error should mention the rejected key; got: %v", err)
+	}
+}
