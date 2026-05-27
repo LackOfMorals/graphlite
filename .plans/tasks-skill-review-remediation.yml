@@ -317,14 +317,14 @@ tasks:
       Rely on the `PRAGMA foreign_keys = ON` constraint (from task-002) to reject dangling edges
       natively. Map the resulting SQLite `FOREIGN KEY constraint failed` error to the appropriate
       graphlite error type with a clear error message.
-    status: pending
+    status: completed
     dependencies: [task-002, task-015]
     acceptance_criteria:
       - 'CSV edge import no longer executes `GetNode` calls per edge row'
       - 'Importing an edge with a non-existent node ID still fails with a clear, correctly-typed error'
       - '`BenchmarkImportCSVEdges` shows measurably improved throughput vs. pre-fix baseline'
       - '`go test ./...` passes with no regression in import correctness'
-    completed_at: null
+    completed_at: '2026-05-27T17:00:00Z'
 
   - id: task-019
     title: 'Eliminate triple JSON parse pass in importJSON'

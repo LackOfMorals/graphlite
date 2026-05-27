@@ -416,3 +416,31 @@ Key Decisions:
 - LabelContains returns EXISTS subquery instead of 4-branch LIKE; node ID column (not labels column) is now the join target.
 
 Next Task: task-018
+
+================================================================================
+TASK-018: Remove redundant GetNode lookups on CSV edge import
+Date: 2026-05-27T17:00:00Z
+================================================================================
+
+Summary:
+Removed the two per-row GetNode/SELECT existence checks from importCSVEdges
+in importer.go. The PRAGMA foreign_keys = ON constraint (task-002) already
+enforces referential integrity at the SQLite level, making these checks
+redundant. The FOREIGN KEY constraint error from InsertEdge is now caught via
+strings.Contains and translated into a clear "node not found (start_id=X,
+end_id=Y)" message without exposing the raw SQLite constraint text.
+Added BenchmarkImportCSVEdges to bench/bench_test.go (1K nodes + 1K edges,
+pre-built payloads, b.ReportAllocs()). Enhanced TestImport_CSVEdges_InvalidNodeRef
+to verify the new error message format.
+
+Files Changed:
+- importer.go (removed GetNode calls; added FK error mapping in InsertEdge handler; updated section comment)
+- exporter_test.go (enhanced TestImport_CSVEdges_InvalidNodeRef to assert "node not found" and no raw FK text)
+- bench/bench_test.go (added BenchmarkImportCSVEdges with pre-built CSV payloads)
+
+Key Decisions:
+- FK error detected via strings.Contains(err.Error(), "FOREIGN KEY constraint failed") — reliable for modernc.org/sqlite
+- Error message includes both start_id and end_id since a single InsertEdge call cannot distinguish which was missing
+- Benchmark pre-builds payloads outside the iteration loop; nodes auto-assigned IDs 1..N in a fresh DB match the CSV :ID values exactly
+
+Next Task: task-019
