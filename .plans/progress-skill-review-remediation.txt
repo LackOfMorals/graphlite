@@ -382,3 +382,37 @@ Key Decisions:
 - The `size` parameter in newPlanCache avoids shadowing the builtin `cap`.
 
 Next Task: task-017
+
+================================================================================
+TASK-017: Replace LIKE-based label lookup with a node_labels junction table
+Date: 2026-05-27T16:30:00Z
+================================================================================
+
+Summary:
+Replaced the LIKE-based label predicate (`labels LIKE '%,Label,%'`) with a
+dedicated `node_labels(node_id, label)` junction table. SQLite triggers maintain
+the junction table automatically on every INSERT or UPDATE to `nodes.labels`,
+so all code paths (store layer, translator, importer) stay in sync without
+modification. `listNodesByLabel` now JOINs against `node_labels`. The SQL
+dialect's `LabelContains` was redesigned from a 4-arg LIKE expression to a
+1-arg EXISTS subquery against `node_labels`. A UNIQUE(node_id, label) constraint
+was added to enable `INSERT OR IGNORE` idempotency in the Open-time backfill.
+
+Files Changed:
+- store/schema.go (added node_labels table with UNIQUE constraint, two triggers for INSERT/UPDATE of labels, backfillMigrationSQL)
+- store/sqlite.go (added backfill call in Open; rewrote listNodesByLabel to JOIN node_labels)
+- sql/dialect.go (LabelContains signature changed to nodeIDExpr+labelName → EXISTS subquery, 1 arg)
+- sql/translator.go (all 9 LabelContains call sites use alias+".id" not alias+".labels")
+- sql/dialect_test.go (rewrote LabelContains tests for EXISTS/1-arg behavior)
+- sql/translator_test.go (updated arg count assertions: 4→1 per label, 5→2, 8→2; golden fixture checks "node_labels")
+- store/crud_test.go (added 4 junction table tests: trigger population, cascade delete, update sync, backfill)
+- store/store_test.go (TestSchemaTablesAndIndexes now checks node_labels table and idx_node_labels_label index)
+
+Key Decisions:
+- Used SQLite triggers (not Go-level code) to maintain node_labels — guarantees all write paths (including raw SQL from the translator) stay in sync automatically.
+- Recursive CTE string splitting inside triggers because SQLite has no native STRING_SPLIT.
+- UNIQUE(node_id, label) constraint on node_labels: enables INSERT OR IGNORE in backfill and prevents duplicate junction rows.
+- Backfill uses WHERE NOT EXISTS (SELECT 1 FROM node_labels WHERE node_id = n.id) to skip already-migrated nodes (trigger-populated), plus INSERT OR IGNORE for the UNIQUE constraint.
+- LabelContains returns EXISTS subquery instead of 4-branch LIKE; node ID column (not labels column) is now the join target.
+
+Next Task: task-018

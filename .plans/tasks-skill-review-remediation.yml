@@ -300,14 +300,14 @@ tasks:
       a subquery or JOIN rather than `LabelContains`. Add an `Open`-time backfill migration for
       existing databases. This task depends on task-003 (sqliteTx refactor) for clean
       transaction handling and task-002 (foreign keys) for the `REFERENCES` constraint to work.
-    status: pending
+    status: completed
     dependencies: [task-003, task-015, task-009]
     acceptance_criteria:
       - '`EXPLAIN QUERY PLAN` for `MATCH (n:Person) RETURN n` on a multi-label dataset shows an index scan on `node_labels`, not a full scan on `nodes`'
       - '`BenchmarkMatchByLabel` on a 10,000-node graph shows no full table scan'
       - 'Existing databases are backfilled correctly on first `Open` after upgrade'
       - '`go test ./...` passes including junction table correctness tests'
-    completed_at: null
+    completed_at: '2026-05-27T16:30:00Z'
 
   - id: task-018
     title: 'Remove redundant GetNode lookups on CSV edge import'
