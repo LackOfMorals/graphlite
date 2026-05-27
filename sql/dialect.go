@@ -49,16 +49,19 @@ type Dialect interface {
 	// another label).
 	//
 	// The colExpr is a fully-qualified column reference such as "n0.labels".
-	// labelName is an unquoted, unescaped label string.
+	// labelName is an unquoted label string; implementations must escape LIKE
+	// wildcard characters ('%', '_', '\') before using labelName in LIKE branches
+	// so that label names containing those characters match only themselves.
 	//
 	//	SQLite emits four OR branches to cover all positions in the list:
-	//	  exact match:    colExpr = ?
-	//	  prefix:         colExpr LIKE ? || ',%'
-	//	  suffix:         colExpr LIKE '%,' || ?
-	//	  middle:         colExpr LIKE '%,' || ? || ',%'
+	//	  exact match:    colExpr = ?           (unescaped labelName)
+	//	  prefix:         colExpr LIKE ? || ',%' ESCAPE '\'
+	//	  suffix:         colExpr LIKE '%,' || ? ESCAPE '\'
+	//	  middle:         colExpr LIKE '%,' || ? || ',%' ESCAPE '\'
 	//
 	// args receives the label values in the order they must appear in the SQL
-	// argument slice.
+	// argument slice: one unescaped value for the exact-match branch, followed
+	// by three escaped values for the LIKE branches.
 	LabelContains(colExpr, labelName string) (predicate string, args []any)
 
 	// Placeholder returns the SQL positional placeholder for the nth argument
@@ -138,18 +141,32 @@ func escapeJSONPath(p string) string {
 //  3. Suffix     (labelName is the last entry, preceded by a comma)
 //  4. Middle     (labelName is surrounded by commas)
 //
-// The returned args slice always contains four copies of labelName, one per
-// branch; they are bound to the "?" placeholders in the predicate.
+// labelName is escaped before use in the three LIKE branches: backslashes are
+// doubled, '%' is replaced with '\%', and '_' is replaced with '\_'. This
+// prevents label names that contain SQL LIKE wildcard characters from matching
+// unintended labels. Each LIKE branch carries an explicit ESCAPE '\' clause.
+// The exact-match (=) branch receives the original unescaped value.
+//
+// The returned args slice contains four values: the unescaped name for the
+// exact-match branch, then three copies of the escaped name for the LIKE
+// branches.
 //
 //	LabelContains("n0.labels", "Person") →
-//	  "( n0.labels = ? OR n0.labels LIKE ? || ',%' OR n0.labels LIKE '%,' || ? OR n0.labels LIKE '%,' || ? || ',%' )"
+//	  "( n0.labels = ? OR n0.labels LIKE ? || ',%' ESCAPE '\' OR n0.labels LIKE '%,' || ? ESCAPE '\' OR n0.labels LIKE '%,' || ? || ',%' ESCAPE '\' )"
 //	  ["Person", "Person", "Person", "Person"]
 func (SQLiteDialect) LabelContains(colExpr, labelName string) (string, []any) {
+	// Escape LIKE wildcard characters so label names containing '%', '_', or '\'
+	// are matched literally rather than as SQL LIKE patterns.
+	// Order matters: backslash must be escaped first to avoid double-escaping.
+	escaped := strings.ReplaceAll(labelName, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, "%", `\%`)
+	escaped = strings.ReplaceAll(escaped, "_", `\_`)
+
 	predicate := fmt.Sprintf(
-		"( %[1]s = ? OR %[1]s LIKE ? || ',%%' OR %[1]s LIKE '%%,' || ? OR %[1]s LIKE '%%,' || ? || ',%%' )",
+		`( %[1]s = ? OR %[1]s LIKE ? || ',%%' ESCAPE '\' OR %[1]s LIKE '%%,' || ? ESCAPE '\' OR %[1]s LIKE '%%,' || ? || ',%%' ESCAPE '\' )`,
 		colExpr,
 	)
-	args := []any{labelName, labelName, labelName, labelName}
+	args := []any{labelName, escaped, escaped, escaped}
 	return predicate, args
 }
 

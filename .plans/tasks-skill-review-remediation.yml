@@ -153,7 +153,7 @@ tasks:
       `ESCAPE '\'` to each LIKE predicate. Use the same escaping already present in
       `stringMatchPattern` (approximately lines 1715–1718 of `sql/translator.go`). Update the
       `LabelContains` function signature comment to document this escaping behaviour.
-    status: pending
+    status: completed
     dependencies: []
     acceptance_criteria:
       - 'A node with label `"50%_off"` is NOT matched by `MATCH (n:Person)`'

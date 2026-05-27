@@ -122,9 +122,8 @@ func TestSQLiteDialect_LabelContains_PredicateFormat(t *testing.T) {
 
 	pred, args := d.LabelContains("n0.labels", "Person")
 
-	// The predicate must contain four OR branches.
-	// We do not assert the exact string (minor whitespace can vary) but we
-	// verify structural properties.
+	// The predicate must contain four OR branches (exact match + 3 LIKE).
+	// args has 4 values: 1 unescaped for =, 3 escaped for LIKE.
 	if len(args) != 4 {
 		t.Errorf("LabelContains args length = %d; want 4", len(args))
 	}
@@ -145,7 +144,7 @@ func TestSQLiteDialect_LabelContains_PredicateFormat(t *testing.T) {
 func TestSQLiteDialect_LabelContains_ExactSQL(t *testing.T) {
 	d := sqldialect.SQLiteDialect{}
 
-	want := "( n0.labels = ? OR n0.labels LIKE ? || ',%' OR n0.labels LIKE '%,' || ? OR n0.labels LIKE '%,' || ? || ',%' )"
+	want := `( n0.labels = ? OR n0.labels LIKE ? || ',%' ESCAPE '\' OR n0.labels LIKE '%,' || ? ESCAPE '\' OR n0.labels LIKE '%,' || ? || ',%' ESCAPE '\' )`
 	got, args := d.LabelContains("n0.labels", "Employee")
 
 	if got != want {
@@ -182,6 +181,64 @@ func TestSQLiteDialect_LabelContains_ColExpr(t *testing.T) {
 		if len(args) != 4 {
 			t.Errorf("LabelContains(%q, %q): args length = %d; want 4",
 				tc.colExpr, tc.labelName, len(args))
+		}
+	}
+}
+
+// TestSQLiteDialect_LabelContains_WildcardEscaping verifies that label names
+// containing LIKE wildcard characters are escaped so they match literally.
+func TestSQLiteDialect_LabelContains_WildcardEscaping(t *testing.T) {
+	d := sqldialect.SQLiteDialect{}
+
+	cases := []struct {
+		labelName    string
+		wantExact    string // arg[0]: unescaped, used in the = branch
+		wantEscaped  string // args[1..3]: escaped, used in the LIKE branches
+	}{
+		{
+			labelName:   "50%_off",
+			wantExact:   "50%_off",
+			wantEscaped: `50\%\_off`,
+		},
+		{
+			labelName:   "100%",
+			wantExact:   "100%",
+			wantEscaped: `100\%`,
+		},
+		{
+			labelName:   "under_score",
+			wantExact:   "under_score",
+			wantEscaped: `under\_score`,
+		},
+		{
+			// Backslash must be escaped first to avoid double-escaping.
+			labelName:   `back\slash`,
+			wantExact:   `back\slash`,
+			wantEscaped: `back\\slash`,
+		},
+		{
+			// Label without wildcards: escaped value equals original.
+			labelName:   "Person",
+			wantExact:   "Person",
+			wantEscaped: "Person",
+		},
+	}
+
+	for _, tc := range cases {
+		_, args := d.LabelContains("n0.labels", tc.labelName)
+		if len(args) != 4 {
+			t.Errorf("label %q: args length = %d; want 4", tc.labelName, len(args))
+			continue
+		}
+		// args[0]: unescaped value for the exact-match (=) branch.
+		if args[0] != tc.wantExact {
+			t.Errorf("label %q: args[0] (exact) = %q; want %q", tc.labelName, args[0], tc.wantExact)
+		}
+		// args[1..3]: escaped values for the LIKE branches.
+		for i := 1; i <= 3; i++ {
+			if args[i] != tc.wantEscaped {
+				t.Errorf("label %q: args[%d] (LIKE) = %q; want %q", tc.labelName, i, args[i], tc.wantEscaped)
+			}
 		}
 	}
 }

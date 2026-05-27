@@ -200,3 +200,27 @@ Key Decisions:
 - Absolute paths are not rejected (consistent with driver.Open behaviour); doc comment explicitly documents this limitation
 
 Next Task: task-009
+
+================================================================================
+TASK-009: Escape LIKE wildcards in LabelContains
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Added LIKE wildcard escaping to SQLiteDialect.LabelContains. Label names
+containing '%', '_', or '\' are now escaped before use in the three LIKE
+branches; the exact-match (=) branch continues to use the unescaped value.
+Each LIKE clause gains an ESCAPE '\' clause. Updated the interface doc comment
+to document the escaping contract and corrected the args-count doc from "five"
+to "four". Unit tests added covering %, _, \, and combinations.
+
+Files Changed:
+- sql/dialect.go (LabelContains escaping + ESCAPE clause; corrected args count doc)
+- sql/dialect_test.go (wildcard escaping unit tests)
+
+Key Decisions:
+- Backslash escaped first to avoid double-escaping (\ → \\ before % → \%)
+- Exact-match branch uses original unescaped value (SQLite = is literal, not a pattern)
+- Interface doc updated at the definition level so custom dialect implementors see the escaping contract
+
+Next Task: task-010
