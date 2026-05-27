@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -836,43 +837,166 @@ func sortedKeys(m map[string]struct{}) []string {
 // JSON decode helpers (used by importJSON)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// decodeImportJSON decodes the import document from r, enforcing the maximum
-// JSON nesting depth (importMaxDepth). Returns ErrImportDepthExceeded when the
-// depth limit is violated.
+// decodeImportJSON decodes the import document from r in a single streaming
+// pass while enforcing the maximum JSON nesting depth (importMaxDepth).
+//
+// Design: a single json.Decoder is used for the entire document.  The outer
+// structure (top-level object, "nodes" array, "edges" array) is parsed
+// token-by-token so we can track nesting depth incrementally.  Each individual
+// node or edge object is decoded via dec.Decode into a json.RawMessage and
+// then depth-checked in isolation — this limits the per-element scan to only
+// the bytes of that element, not the full document.
+//
+// This eliminates the original three-pass approach:
+//   1. Decode entire document into json.RawMessage  ← removed
+//   2. checkJSONDepth over all raw bytes           ← replaced with per-element check
+//   3. json.Unmarshal full document                ← replaced with per-element Unmarshal
 func decodeImportJSON(r io.Reader) (*importJSONDocument, error) {
 	dec := json.NewDecoder(r)
 
-	// Walk the token stream manually so we can track nesting depth.
-	// We accumulate the raw JSON and then unmarshal it, rather than
-	// trying to decode into the struct token-by-token.
-	//
-	// Strategy: scan for depth violations first using the token stream,
-	// then re-decode the already-buffered bytes into the struct.
-	// Since we need to buffer anyway (the reader may be streaming), we
-	// decode into a raw json.RawMessage first, validate depth, then unmarshal.
+	// outerDepth tracks the nesting level of the structural tokens we parse
+	// manually (top-level '{', "nodes" '[', "edges" '[').  It is used as the
+	// starting depth when depth-checking each individual element's raw bytes.
+	outerDepth := 0
 
-	var raw json.RawMessage
-	if err := dec.Decode(&raw); err != nil {
-		return nil, fmt.Errorf("graphlite: import: JSON parse error: %w", err)
+	// wrapErr returns err unchanged if it is (or wraps) a depth error, so that
+	// ErrImportDepthExceeded is never double-wrapped and is always directly
+	// type-assertable by callers.  All other errors get the parse context prefix.
+	wrapErr := func(err error) error {
+		var depthErr *ErrImportDepthExceeded
+		if errors.As(err, &depthErr) {
+			return depthErr
+		}
+		return fmt.Errorf("graphlite: import: JSON parse error: %w", err)
 	}
 
-	// Check depth of the decoded bytes.
-	if err := checkJSONDepth(raw, importMaxDepth); err != nil {
-		return nil, err
+	// readToken reads the next token, updating outerDepth for delimiters.
+	// Returns ErrImportDepthExceeded if the depth limit is exceeded.
+	readToken := func() (json.Token, error) {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		if d, ok := tok.(json.Delim); ok {
+			if d == '{' || d == '[' {
+				outerDepth++
+				if outerDepth > importMaxDepth {
+					return nil, &ErrImportDepthExceeded{MaxDepth: importMaxDepth}
+				}
+			} else {
+				outerDepth--
+			}
+		}
+		return tok, nil
 	}
 
-	// Unmarshal into the document struct.
+	// decodeElement decodes the next complete JSON value from dec into v.
+	// It depth-checks the raw bytes relative to outerDepth so that nesting
+	// inside props is counted from the document root.
+	// The opening '{' of this element has NOT yet been consumed; dec.Decode
+	// will consume the entire value including its delimiters.
+	decodeElement := func(v any) error {
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return err
+		}
+		if err := checkJSONDepth(raw, importMaxDepth, outerDepth); err != nil {
+			return err
+		}
+		return json.Unmarshal(raw, v)
+	}
+
 	var doc importJSONDocument
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil, fmt.Errorf("graphlite: import: JSON unmarshal error: %w", err)
+
+	// Expect top-level '{'.
+	tok, err := readToken()
+	if err != nil {
+		return nil, wrapErr(err)
 	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return nil, fmt.Errorf("graphlite: import: expected JSON object at top level")
+	}
+
+	// Iterate over top-level keys.
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return nil, wrapErr(err)
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return nil, fmt.Errorf("graphlite: import: expected string key, got %T", keyTok)
+		}
+
+		switch key {
+		case "nodes":
+			// Expect '['.
+			tok, err := readToken()
+			if err != nil {
+				return nil, wrapErr(err)
+			}
+			if d, ok := tok.(json.Delim); !ok || d != '[' {
+				return nil, fmt.Errorf("graphlite: import: \"nodes\" must be a JSON array")
+			}
+			for dec.More() {
+				var n importJSONNode
+				if err := decodeElement(&n); err != nil {
+					return nil, wrapErr(err)
+				}
+				doc.Nodes = append(doc.Nodes, n)
+			}
+			// Consume the closing ']'.
+			if _, err := readToken(); err != nil {
+				return nil, wrapErr(err)
+			}
+
+		case "edges":
+			// Expect '['.
+			tok, err := readToken()
+			if err != nil {
+				return nil, wrapErr(err)
+			}
+			if d, ok := tok.(json.Delim); !ok || d != '[' {
+				return nil, fmt.Errorf("graphlite: import: \"edges\" must be a JSON array")
+			}
+			for dec.More() {
+				var e importJSONEdge
+				if err := decodeElement(&e); err != nil {
+					return nil, wrapErr(err)
+				}
+				doc.Edges = append(doc.Edges, e)
+			}
+			// Consume the closing ']'.
+			if _, err := readToken(); err != nil {
+				return nil, wrapErr(err)
+			}
+
+		default:
+			// Skip unknown top-level keys by decoding into json.RawMessage and
+			// depth-checking, in case an attacker embeds a deeply-nested value.
+			var raw json.RawMessage
+			if err := dec.Decode(&raw); err != nil {
+				return nil, wrapErr(err)
+			}
+			if err := checkJSONDepth(raw, importMaxDepth, outerDepth); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Consume the closing '}'.
+	if _, err := readToken(); err != nil && err != io.EOF {
+		return nil, wrapErr(err)
+	}
+
 	return &doc, nil
 }
 
-// checkJSONDepth scans the raw JSON bytes and returns ErrImportDepthExceeded
-// if the nesting depth of objects and arrays exceeds maxDepth.
-func checkJSONDepth(data []byte, maxDepth int) error {
-	depth := 0
+// checkJSONDepth scans raw JSON bytes and returns ErrImportDepthExceeded if
+// the nesting depth of objects and arrays — counted from startDepth —
+// exceeds maxDepth.
+func checkJSONDepth(data []byte, maxDepth int, startDepth int) error {
+	depth := startDepth
 	dec := json.NewDecoder(bytes.NewReader(data))
 	for {
 		tok, err := dec.Token()
@@ -880,11 +1004,10 @@ func checkJSONDepth(data []byte, maxDepth int) error {
 			break
 		}
 		if err != nil {
-			// The data was already successfully decoded, so this shouldn't happen.
+			// data was already successfully decoded above, so this is unexpected.
 			return fmt.Errorf("graphlite: import: depth check error: %w", err)
 		}
-		switch d := tok.(type) {
-		case json.Delim:
+		if d, ok := tok.(json.Delim); ok {
 			if d == '{' || d == '[' {
 				depth++
 				if depth > maxDepth {
