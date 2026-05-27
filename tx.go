@@ -10,7 +10,15 @@ import (
 // Tx is an explicit graphlite transaction. All queries run via Run share the
 // same underlying database transaction. Call Commit or Rollback to finish.
 //
-// A Tx must not be used after Commit or Rollback returns.
+// Run returns an error if called after Commit or Rollback. However, calling
+// Rollback after a successful Commit is explicitly safe and returns nil —
+// this makes the standard defer-rollback guard pattern work without
+// special-casing the success path:
+//
+//	tx, _ := db.BeginTx(ctx)
+//	defer tx.Rollback() // no-op if tx.Commit() already succeeded
+//	if err := doWork(tx); err != nil { return err }
+//	return tx.Commit()
 type Tx struct {
 	rawTx       store.TxExecer
 	done        bool
@@ -42,10 +50,20 @@ func (t *Tx) Commit() error {
 	return nil
 }
 
-// Rollback aborts the transaction.
+// Rollback aborts the transaction. If the transaction has already been committed
+// or rolled back, Rollback returns nil without doing anything. This follows the
+// database/sql.Tx convention, which makes it safe to use in a deferred rollback
+// guard alongside an explicit Commit call:
+//
+//	tx, _ := db.BeginTx(ctx)
+//	defer tx.Rollback() // no-op if tx.Commit() already succeeded
+//	if err := doWork(tx); err != nil { return err }
+//	return tx.Commit()
 func (t *Tx) Rollback() error {
 	if t.done {
-		return fmt.Errorf("graphlite: transaction already closed")
+		// Already committed or rolled back — this is a deliberate no-op so that
+		// the defer-rollback pattern works without special-casing the success path.
+		return nil
 	}
 	t.done = true
 	if err := t.rawTx.Rollback(); err != nil {
