@@ -177,3 +177,26 @@ Key Decisions:
   implementation detail that could change.
 
 Next Task: task-008
+
+================================================================================
+TASK-008: Apply path-traversal protection to Snapshot
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Added filepath.Clean + EvalSymlinks + ".." component check to store.Snapshot,
+matching the protection already in driver.Open. Replaced the unsafe single-quote
+string concatenation with a parameterised `VACUUM INTO ?` bind argument (SQLite
+supports this). Doc comment corrected to accurately state that ".." traversal is
+rejected but absolute paths with no ".." components are accepted; callers needing
+stricter directory confinement must enforce it themselves.
+
+Files Changed:
+- store/sqlite.go (path-traversal check; VACUUM INTO ?; corrected doc comment)
+- store/crud_test.go (TestSnapshotPathTraversal_DotDot, TestSnapshotPathTraversal_RelativeEscape, TestSnapshotValidPath)
+
+Key Decisions:
+- VACUUM INTO ? (bind parameter) is supported in SQLite 3.32+ and is safe; confirmed by TestSnapshotValidPath passing with an absolute path
+- Absolute paths are not rejected (consistent with driver.Open behaviour); doc comment explicitly documents this limitation
+
+Next Task: task-009

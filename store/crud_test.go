@@ -1148,3 +1148,61 @@ func TestInsertEdgeMissingEndNode(t *testing.T) {
 		t.Errorf("expected FOREIGN KEY error, got: %v", err)
 	}
 }
+
+// ============================================================
+// Snapshot path-traversal protection (task-008)
+// ============================================================
+
+// TestSnapshotPathTraversal_DotDot verifies that a path containing ".."
+// components is rejected before VACUUM INTO is executed.
+func TestSnapshotPathTraversal_DotDot(t *testing.T) {
+	s := openMemory(t)
+	err := s.Snapshot("../../etc/malicious.db")
+	if err == nil {
+		t.Fatal("expected path traversal error, got nil")
+	}
+	if !strings.Contains(err.Error(), "path traversal not allowed") {
+		t.Errorf("unexpected error text: %v", err)
+	}
+}
+
+// TestSnapshotPathTraversal_RelativeEscape verifies that a relative path
+// whose cleaned form still escapes the current directory via ".." is rejected.
+// Note: filepath.Clean resolves ".." in absolute paths inline, so this check
+// protects relative paths that traverse above the working directory.
+func TestSnapshotPathTraversal_RelativeEscape(t *testing.T) {
+	s := openMemory(t)
+	// "./sub/../../etc/malicious.db" cleans to "../etc/malicious.db" — still
+	// contains ".." and must be rejected.
+	err := s.Snapshot("./sub/../../etc/malicious.db")
+	if err == nil {
+		t.Fatal("expected path traversal error, got nil")
+	}
+	if !strings.Contains(err.Error(), "path traversal not allowed") {
+		t.Errorf("unexpected error text: %v", err)
+	}
+}
+
+// TestSnapshotValidPath verifies that a valid path within a temporary directory
+// succeeds and produces a readable SQLite file.
+func TestSnapshotValidPath(t *testing.T) {
+	dir := t.TempDir()
+	// Use a file-backed source DB so VACUUM INTO works.
+	src := dir + "/source.db"
+	s, err := store.Open(src, store.Config{})
+	if err != nil {
+		t.Fatalf("Open file DB: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	dest := dir + "/snapshot.db"
+	if err := s.Snapshot(dest); err != nil {
+		t.Fatalf("Snapshot(%q): %v", dest, err)
+	}
+	// Verify the snapshot can be opened as a store.
+	snap, err := store.Open(dest, store.Config{})
+	if err != nil {
+		t.Fatalf("Open snapshot: %v", err)
+	}
+	_ = snap.Close()
+}

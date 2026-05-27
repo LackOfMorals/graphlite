@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -113,9 +115,25 @@ func (s *SQLiteStore) Close() error { return s.db.Close() }
 
 // Snapshot writes an atomic, consistent copy of the database to path using
 // VACUUM INTO. path must not already exist.
+//
+// Path-traversal protection: the path is cleaned via filepath.Clean and any
+// remaining ".." components are rejected. Symlinks in the parent directory
+// are resolved so that ".." after symlink expansion is also caught. Note that
+// absolute paths with no ".." components are accepted; callers that need to
+// restrict snapshot destinations to a specific directory must enforce that
+// constraint themselves.
 func (s *SQLiteStore) Snapshot(path string) error {
-	escaped := strings.ReplaceAll(path, "'", "''")
-	if _, err := s.db.Exec("VACUUM INTO '" + escaped + "'"); err != nil {
+	// Apply the same path-traversal protection used in driver.Open: clean the
+	// path, resolve parent-directory symlinks, then reject any ".." component.
+	cleaned := filepath.Clean(path)
+	if dir, err := filepath.EvalSymlinks(filepath.Dir(cleaned)); err == nil {
+		cleaned = filepath.Join(dir, filepath.Base(cleaned))
+	}
+	if slices.Contains(strings.Split(cleaned, string(filepath.Separator)), "..") {
+		return fmt.Errorf("store: snapshot: path traversal not allowed: %q", path)
+	}
+
+	if _, err := s.db.Exec("VACUUM INTO ?", cleaned); err != nil {
 		return fmt.Errorf("store: snapshot: %w", err)
 	}
 	return nil

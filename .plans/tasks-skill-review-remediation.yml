@@ -136,7 +136,7 @@ tasks:
       the `path` argument before executing `VACUUM INTO`. Return an error if the resolved path
       contains `..` components or resolves outside the working directory in the same manner as
       `Open` enforces.
-    status: pending
+    status: completed
     dependencies: []
     acceptance_criteria:
       - '`db.Snapshot("../../etc/malicious.db")` returns an error without executing `VACUUM INTO`'
