@@ -33,6 +33,25 @@ var lowerLetters = func() []rune {
 	return r
 }()
 
+// cypherReservedWords is the set of lowercase Cypher keywords that the
+// opencypher parser rejects when used as bare (unquoted) property key names.
+// genPropKey skips any generated key that matches one of these strings so that
+// property-based tests do not hit parser errors unrelated to the feature under
+// test.
+var cypherReservedWords = map[string]struct{}{
+	"all": {}, "and": {}, "as": {}, "asc": {}, "ascending": {},
+	"by": {}, "call": {}, "case": {}, "contains": {}, "create": {},
+	"delete": {}, "desc": {}, "descending": {}, "detach": {}, "distinct": {},
+	"do": {}, "else": {}, "end": {}, "exists": {}, "false": {},
+	"for": {}, "foreach": {}, "in": {}, "is": {}, "limit": {},
+	"mandatory": {}, "match": {}, "merge": {}, "not": {}, "null": {},
+	"of": {}, "on": {}, "optional": {}, "or": {}, "order": {},
+	"remove": {}, "return": {}, "schema": {}, "set": {}, "skip": {},
+	"then": {}, "true": {}, "union": {}, "unique": {}, "unwind": {},
+	"using": {}, "when": {}, "where": {}, "with": {}, "xor": {},
+	"yield": {},
+}
+
 // alphanumChars is the set of ASCII letters (lower + upper) and digits used
 // for the tail of identifiers.
 var alphanumChars = func() []rune {
@@ -100,14 +119,21 @@ func genLabels(t *rapid.T, maxN int) []string {
 	return labels
 }
 
-// genPropKey generates a valid Cypher property key: 1–10 lowercase letters.
+// genPropKey generates a valid Cypher property key: 1–10 lowercase letters,
+// excluding Cypher reserved words that the parser rejects as bare identifiers.
+// Any generated key that is a reserved word gets a "k" prefix so it is never
+// mistaken for a keyword (no Cypher keyword starts with "kk…" or "k<keyword>").
 func genPropKey(t *rapid.T, suffix string) string {
 	chars := rapid.SliceOfN(rapid.SampledFrom(lowerLetters), 1, 10).Draw(t, "propKeyChars"+suffix)
 	sb := strings.Builder{}
 	for _, r := range chars {
 		sb.WriteRune(r)
 	}
-	return sb.String()
+	key := sb.String()
+	if _, reserved := cypherReservedWords[key]; reserved {
+		key = "k" + key
+	}
+	return key
 }
 
 // genPropValue generates one of the supported property value types:
