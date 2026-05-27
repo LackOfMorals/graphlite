@@ -418,6 +418,42 @@ func TestBeginTx_ClosedAfterRollback(t *testing.T) {
 	}
 }
 
+// TestBeginTx_RollbackAfterCommitIsNoOp verifies that calling Rollback after
+// Commit returns nil, following the database/sql.Tx convention that makes the
+// defer-rollback guard pattern safe to use.
+func TestBeginTx_RollbackAfterCommitIsNoOp(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+
+	tx, err := db.BeginTx(ctx)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	if _, err := tx.Run(ctx, `CREATE (n:IdempotentNode {v: 1})`, nil); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("Run: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	// Rollback after Commit must be a no-op (returns nil, not an error).
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback after Commit: got %v, want nil", err)
+	}
+	// The committed data must still be visible after the no-op Rollback.
+	qr, err := db.RunQuery(ctx, `MATCH (n:IdempotentNode) RETURN n`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery after Rollback: %v", err)
+	}
+	records, err := qr.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 committed node to remain visible, got %d", len(records))
+	}
+}
+
 // TestRunQuery_NodeProjection verifies that a whole-node RETURN populates a
 // *Node value with Labels and Props.
 func TestRunQuery_NodeProjection(t *testing.T) {

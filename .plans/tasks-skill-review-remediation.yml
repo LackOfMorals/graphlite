@@ -171,7 +171,7 @@ tasks:
       Unrecognised backslash sequences should return an error (or optionally pass through with
       a comment explaining the forward-compatibility choice). Currently only five sequences are
       handled and unrecognised ones silently pass through as literal backslashes.
-    status: in_progress
+    status: completed
     dependencies: []
     acceptance_criteria:
       - "The Cypher literal `'Hello\\nWorld'` produces a Go string containing a real newline character"
@@ -179,7 +179,7 @@ tasks:
       - "The Cypher literal `'\\u0041'` produces the Go string `\"A\"`"
       - 'Unrecognised backslash sequences return an error or are documented as pass-through'
       - '`go test ./...` passes'
-    completed_at: null
+    completed_at: '2026-05-27T00:00:00Z'
 
   - id: task-011
     title: 'Upgrade stale ANTLR and opencypher dependencies; add govulncheck to CI'
@@ -209,14 +209,14 @@ tasks:
       explaining that this matches the standard Go convention where `Rollback` after `Commit` is
       a no-op. This fix unblocks the defer-based rollback pattern required by task-013 and
       task-014.
-    status: pending
+    status: completed
     dependencies: []
     acceptance_criteria:
       - 'Calling `tx.Rollback()` after `tx.Commit()` returns `nil` without error'
       - 'Calling `tx.Rollback()` before `tx.Commit()` still performs the rollback'
       - 'A comment explains the `database/sql` convention rationale'
       - '`go test ./...` passes'
-    completed_at: null
+    completed_at: '2026-05-27T12:00:00Z'
 
   - id: task-013
     title: 'Use defer-based transaction rollback in importer.go'
