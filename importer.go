@@ -405,9 +405,7 @@ func (d *DB) importCSVNodes(ctx context.Context, r io.Reader) (retErr error) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CSV import (edges) — requires a pre-existing node idMap from a prior node CSV
-// import. Since Import is called per-file, edges reference :ID values that must
-// already be in the database. We look them up by scanning the nodes table.
+// CSV import (edges)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // importCSVEdges imports an edge CSV file into the database atomically.
@@ -512,20 +510,18 @@ func (d *DB) importCSVEdges(ctx context.Context, r io.Reader) (retErr error) {
 			return fmt.Errorf("graphlite: csv edge import: row %d: invalid :END_ID %q: %w", rowIdx+2, endIDStr, err)
 		}
 
-		// Verify that the referenced nodes exist.
-		if _, err := tx.GetNode(ctx, startID); err != nil {
-			return fmt.Errorf("graphlite: csv edge import: row %d: start node %d not found: %w", rowIdx+2, startID, err)
-		}
-		if _, err := tx.GetNode(ctx, endID); err != nil {
-			return fmt.Errorf("graphlite: csv edge import: row %d: end node %d not found: %w", rowIdx+2, endID, err)
-		}
-
 		propsJSON, err := marshalProps(props)
 		if err != nil {
 			return fmt.Errorf("graphlite: csv edge import: row %d props: %w", rowIdx+2, err)
 		}
 
 		if _, err := tx.InsertEdge(ctx, edgeType, startID, endID, propsJSON); err != nil {
+			// PRAGMA foreign_keys = ON causes SQLite to reject edges whose
+			// start_id or end_id do not exist in the nodes table. Translate
+			// the opaque constraint error into a clear, actionable message.
+			if strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
+				return fmt.Errorf("graphlite: csv edge import: row %d: node not found (start_id=%d, end_id=%d)", rowIdx+2, startID, endID)
+			}
 			return fmt.Errorf("graphlite: csv edge import: row %d insert: %w", rowIdx+2, err)
 		}
 	}

@@ -567,3 +567,56 @@ func BenchmarkMatchByLabel(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkImportCSVEdges measures the throughput of importing 1,000 edges via
+// FormatCSVEdges into a fresh in-memory database that already contains 1,000
+// nodes. The node and edge CSV payloads are pre-built outside the loop so only
+// import throughput — not CSV serialisation — is measured.
+//
+// After task-018 (removal of per-edge GetNode lookups), each iteration should
+// perform exactly one round-trip per edge (InsertEdge) rather than three
+// (GetNode(start) + GetNode(end) + InsertEdge). Run before/after to quantify
+// the improvement.
+func BenchmarkImportCSVEdges(b *testing.B) {
+	const nodeCount = 1_000
+	const edgeCount = 1_000
+
+	// Pre-build node CSV: :ID,:LABEL
+	var nodeBuf bytes.Buffer
+	nodeBuf.WriteString(":ID,:LABEL\n")
+	for i := 1; i <= nodeCount; i++ {
+		nodeBuf.WriteString(fmt.Sprintf("%d,Person\n", i))
+	}
+	nodePayload := nodeBuf.Bytes()
+
+	// Pre-build edge CSV: :START_ID,:END_ID,:TYPE
+	// Each edge i → i+1 (mod nodeCount), wrapping around.
+	var edgeBuf bytes.Buffer
+	edgeBuf.WriteString(":START_ID,:END_ID,:TYPE\n")
+	for i := 1; i <= edgeCount; i++ {
+		start := i
+		end := (i % nodeCount) + 1
+		edgeBuf.WriteString(fmt.Sprintf("%d,%d,KNOWS\n", start, end))
+	}
+	edgePayload := edgeBuf.Bytes()
+
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		db, err := graphlite.Open(":memory:")
+		if err != nil {
+			b.Fatalf("open: %v", err)
+		}
+		// Import nodes first so foreign-key constraints are satisfiable.
+		if err := db.Import(ctx, bytes.NewReader(nodePayload), graphlite.FormatCSVNodes); err != nil {
+			_ = db.Close(ctx)
+			b.Fatalf("import nodes: %v", err)
+		}
+		if err := db.Import(ctx, bytes.NewReader(edgePayload), graphlite.FormatCSVEdges); err != nil {
+			_ = db.Close(ctx)
+			b.Fatalf("import edges: %v", err)
+		}
+		_ = db.Close(ctx)
+	}
+}
