@@ -62,7 +62,14 @@ func (r *Result) Keys() []string {
 
 // Next advances the cursor to the next record. Returns true if a record is
 // available; false when the result set is exhausted or an error occurred.
-func (r *Result) Next(_ context.Context) bool {
+// If the context is already cancelled or has timed out, Next immediately
+// returns false and sets Err to ctx.Err().
+func (r *Result) Next(ctx context.Context) bool {
+	if err := ctx.Err(); err != nil {
+		r.err = err
+		r.consumed = true
+		return false
+	}
 	if r.consumed || r.err != nil {
 		return false
 	}

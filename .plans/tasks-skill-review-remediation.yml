@@ -243,14 +243,14 @@ tasks:
       is already cancelled or has timed out. The existing body remains unchanged after this guard.
       This fixes the false API contract where callers pass cancellable contexts expecting
       iteration to stop.
-    status: pending
+    status: completed
     dependencies: []
     acceptance_criteria:
       - 'A test that cancels the context mid-iteration sees `Next` return `false`'
       - '`result.Err()` returns `context.Canceled` after the context is cancelled'
       - 'Iteration completes normally when the context is not cancelled'
       - '`go test ./...` passes'
-    completed_at: null
+    completed_at: '2026-05-27T12:30:00Z'
 
   - id: task-015
     title: 'Add benchmark suite for core hot paths'

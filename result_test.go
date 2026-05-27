@@ -412,6 +412,94 @@ func TestSingle_ErrMultipleRecords(t *testing.T) {
 // Record helper tests
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Context cancellation tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestResult_Next_ContextCancelledBeforeFirst(t *testing.T) {
+	db := openDB(t)
+	ctx := context.Background()
+
+	if _, err := db.RunQuery(ctx, `CREATE (:CtxTest {v: 1})`, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	qr, err := db.RunQuery(ctx, `MATCH (n:CtxTest) RETURN n`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
+
+	// Cancel before the first Next call.
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if qr.Next(cancelCtx) {
+		t.Error("expected Next to return false on cancelled context")
+	}
+	if !errors.Is(qr.Err(), context.Canceled) {
+		t.Errorf("expected context.Canceled error, got %v", qr.Err())
+	}
+}
+
+func TestResult_Next_ContextCancelledMidIteration(t *testing.T) {
+	db := openDB(t)
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		if _, err := db.RunQuery(ctx, `CREATE (:CtxMid {v: $v})`, map[string]any{"v": i}); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+	}
+
+	qr, err := db.RunQuery(ctx, `MATCH (n:CtxMid) RETURN n`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+
+	// Advance one record successfully, then cancel.
+	if !qr.Next(cancelCtx) {
+		t.Fatalf("expected first record; err=%v", qr.Err())
+	}
+	cancel()
+
+	// Subsequent Next should stop immediately.
+	if qr.Next(cancelCtx) {
+		t.Error("expected Next to return false after context cancel")
+	}
+	if !errors.Is(qr.Err(), context.Canceled) {
+		t.Errorf("expected context.Canceled error, got %v", qr.Err())
+	}
+}
+
+func TestResult_Next_NormalIterationUnaffected(t *testing.T) {
+	db := openDB(t)
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		if _, err := db.RunQuery(ctx, `CREATE (:CtxNorm {v: $v})`, map[string]any{"v": i}); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+	}
+
+	qr, err := db.RunQuery(ctx, `MATCH (n:CtxNorm) RETURN n ORDER BY n.v`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
+
+	count := 0
+	for qr.Next(ctx) {
+		count++
+	}
+	if qr.Err() != nil {
+		t.Errorf("unexpected error: %v", qr.Err())
+	}
+	if count != 3 {
+		t.Errorf("expected 3 records, got %d", count)
+	}
+}
+
 // Ensure Record.Get returns false for missing keys (via a query-created record).
 func TestRecord_MissingKey(t *testing.T) {
 	db := openDB(t)
