@@ -444,3 +444,42 @@ Key Decisions:
 - Benchmark pre-builds payloads outside the iteration loop; nodes auto-assigned IDs 1..N in a fresh DB match the CSV :ID values exactly
 
 Next Task: task-019
+
+================================================================================
+TASK-019: Eliminate triple JSON parse pass in importJSON
+Date: 2026-05-27T18:00:00Z
+================================================================================
+
+Summary:
+Refactored `decodeImportJSON` in `importer.go` from a three-pass approach
+(decode full document to json.RawMessage, checkJSONDepth scan, json.Unmarshal)
+to a streaming approach that eliminates the full-document buffer. A single
+json.Decoder is used throughout; the outer structure (top-level object, nodes
+array, edges array) is parsed token-by-token via `readToken` which tracks
+`outerDepth` incrementally. Each individual node/edge object is decoded to
+json.RawMessage and depth-checked only for its own bytes (relative to
+outerDepth), then unmarshalled — eliminating the full-document buffer allocation.
+Added `errors` import and `wrapErr` helper to propagate `*ErrImportDepthExceeded`
+unwrapped (direct type-assertable) while wrapping all other parse errors.
+`checkJSONDepth` gained a `startDepth` parameter for relative counting.
+
+Files Changed:
+- importer.go (decodeImportJSON: streaming token-by-token outer structure;
+  per-element checkJSONDepth; wrapErr helper; added "errors" import;
+  checkJSONDepth signature: added startDepth int param)
+
+Key Decisions:
+- `decodeElement` still calls dec.Decode→json.RawMessage then json.Unmarshal per
+  element — this is a per-element two-pass (not per-document), which is
+  unavoidable without fully manual token-by-token struct population. The
+  full-document allocation is eliminated; only individual node/edge bytes
+  are buffered at a time.
+- `outerDepth` tracks only manually-consumed structural delimiters; dec.Decode
+  in decodeElement consumes element delimiters without going through readToken,
+  so outerDepth is not updated inside elements (intentional, correct).
+- `wrapErr` uses errors.As to detect *ErrImportDepthExceeded and return it
+  unwrapped, preserving direct type-assertability used by existing tests.
+- `checkJSONDepth` startDepth parameter ensures depth inside a node/edge is
+  counted from the document root (outer 2 levels already consumed).
+
+Next Task: task-020

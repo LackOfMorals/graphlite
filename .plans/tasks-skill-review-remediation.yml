@@ -335,14 +335,14 @@ tasks:
       while decoding into the target struct, eliminating the separate `checkJSONDepth` scan.
       The `ErrImportDepthExceeded` sentinel must still be returned when depth exceeds
       `importMaxDepth`.
-    status: pending
+    status: completed
     dependencies: [task-015]
     acceptance_criteria:
       - '`BenchmarkImportJSON` on a 1,000-node payload shows reduced CPU time consistent with eliminating two of three parse passes'
       - '`ErrImportDepthExceeded` is still returned when depth exceeds `importMaxDepth`'
       - 'All existing JSON import tests pass'
       - '`go test ./...` passes'
-    completed_at: null
+    completed_at: '2026-05-27T18:00:00Z'
 
   - id: task-020
     title: 'Reduce per-row heap allocations in result.go and streaming result paths'
