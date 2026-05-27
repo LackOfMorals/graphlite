@@ -1,0 +1,327 @@
+================================================================================
+TASK-001: Define Labels type with Encode/Decode helpers
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Introduced `type Labels []string` in `store/store.go` replacing the raw
+comma-separated `string` used for node labels throughout the codebase.
+Added `Encode()`, `DecodeLabels()`, `sql.Scanner`, and `driver.Valuer`
+implementations so the type works transparently with database/sql.
+Updated all call sites: `store/sqlite.go`, `importer.go` (import, export,
+CSV paths), both store test files. Removed the now-dead `splitLabelsExport`
+helper from `importer.go`.
+
+Files Changed:
+- store/store.go (new Labels type with Encode/DecodeLabels/Scan/Value)
+- store/sqlite.go (InsertNode signature, insertNode helper uses Labels.Encode)
+- importer.go (added store import; updated InsertNode calls and CSV export; removed splitLabelsExport)
+- store/crud_test.go (all InsertNode calls use store.DecodeLabels; label comparisons use .Encode())
+- store/store_test.go (same InsertNode and comparison fixes)
+
+Key Decisions:
+- Labels implements sql.Scanner so existing `rows.Scan(&n.Labels)` calls work without change
+- Labels implements driver.Valuer so future parameterised inserts are handled automatically
+- DecodeLabels("") returns nil (no labels) rather than []string{""} to avoid spurious empty label
+- splitLabelsExport deleted entirely; callers use []string(n.Labels) or n.Labels.Encode() directly
+
+Next Task: task-002
+
+================================================================================
+TASK-002: Enforce PRAGMA foreign_keys = ON at open time
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary: Added `PRAGMA foreign_keys = ON;` to `store.Open` immediately after
+WAL mode is enabled. Returns an error if the PRAGMA execution fails. No
+existing tests assumed unconstrained edge insertion — all edge tests already
+used real node IDs. Added two new tests (`TestInsertEdgeMissingStartNode`,
+`TestInsertEdgeMissingEndNode`) to cover both acceptance criteria directly.
+
+Files Changed:
+- store/sqlite.go (add PRAGMA foreign_keys = ON after journal_mode=WAL)
+- store/crud_test.go (add TestInsertEdgeMissingStartNode and TestInsertEdgeMissingEndNode)
+
+Key Decisions:
+- PRAGMA placed after WAL and before BusyTimeout/schema DDL to ensure it is set before any schema operations run
+- Error path closes the DB and returns a wrapped error, consistent with WAL and BusyTimeout error handling
+- No existing tests required changes; all edge insert tests already inserted the referenced nodes first
+
+Next Task: task-003
+
+================================================================================
+TASK-003: Refactor sqliteTx: collapse 14-method override duplication
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Eliminated the `sqliteTx` struct and its 14 per-method forwarding overrides.
+`SQLiteStore` now holds a `q querier` field (the existing interface) set to
+`*sql.DB` at Open time and to `*sql.Tx` inside Begin. A `tx *sql.Tx` field
+tracks whether the store is in a transaction; Commit/Rollback guard on this.
+`Begin` returns a `*SQLiteStore` with `q` and `tx` set. Added compile-time
+interface assertions. Net result: 180 lines removed from sqlite.go.
+
+Files Changed:
+- store/sqlite.go (removed sqliteTx, added q/tx fields to SQLiteStore, updated Begin/Commit/Rollback)
+- store/crud_test.go (minor test adjustments for new structure)
+- .plans/tasks-skill-review-remediation.yml (task-003 marked completed)
+
+Key Decisions:
+- Snapshot() still uses s.db.Exec() (not s.q) — snapshots of in-progress transactions intentionally reflect committed state only, consistent with prior behaviour
+- Commit/Rollback return a sentinel error when called on a non-transactional SQLiteStore; task-012 will make Rollback idempotent after Commit
+
+Next Task: task-004
+
+================================================================================
+TASK-004: Fix RawExpr SQL injection: return error instead of interpolating verbatim
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary: Closed the highest-severity SQL injection vector in the translator.
+The `case *cypher.RawExpr` branch in `exprToSQL` previously returned `e.Text`
+verbatim into the generated SQL string. It now gates on `cypher.IsIdentifier(e.Text)`:
+safe identifiers (letters/digits/underscores only) are passed through; all other
+values return a descriptive error. To enable cross-package use, `isIdentifier` in
+`cypher/planner.go` was exported to `IsIdentifier` and all callers in
+`cypher/planner.go` and `cypher/parser.go` were updated accordingly.
+
+Files Changed:
+- sql/translator.go (case *cypher.RawExpr: gate on IsIdentifier, return error for unsafe inputs)
+- cypher/planner.go (export isIdentifier → IsIdentifier; update all internal callers; improve doc comment)
+- cypher/parser.go (update sole caller to IsIdentifier)
+
+Key Decisions:
+- Exported `isIdentifier` rather than duplicating the logic in the sql package — keeps a single source of truth for the allowlist
+- Simple identifiers (variable names resolved via RawExpr) remain valid passthroughs; complex expressions (function calls, arithmetic, etc.) now error cleanly
+- No existing tests exercise the RawExpr passthrough path in translator, so no test changes were needed
+
+Next Task: task-005
+
+================================================================================
+TASK-005: Validate property key names before JSON path construction
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Added `validatePropKey(key string) error` to `sql/translator.go`. Validation
+gates on `cypher.IsIdentifier`, rejecting keys that contain injection characters
+(`]`, `[`, `"`, null bytes, etc.). Applied at all JSON path construction sites:
+MATCH node/rel/var-length prop loops, exprToSQL PropExpr, ExistsPropExpr,
+GROUP BY PropExpr, translateSetProp, translateSetMerge, translateRemoveProp,
+translateMerge, and buildPropsJSON (CREATE path). The `$` planner sentinel key
+is explicitly exempted. Key validation in translateSetProp was reordered to
+occur before value expression evaluation.
+
+Files Changed:
+- sql/translator.go (validatePropKey + calls at all JSON path sites; $ sentinel exemption; translateSetProp reorder; buildPropsJSON coverage)
+- sql/translator_test.go (3 new tests: ClosingBracket, OpeningBracket, NullByte rejection)
+
+Key Decisions:
+- $ is exempted in validatePropKey itself (not at call sites) so the exemption is documented once and cannot be missed by new call sites
+- translateSetProp validates key before building value expression to surface the security-relevant error first
+- buildPropsJSON now validates keys, closing the CREATE/MERGE injection path
+
+Next Task: task-006
+
+================================================================================
+TASK-006: Apply hard cap to user-supplied MaxHops
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Added `WithMaxPathHops(n int)` option to both `options.go` (DB-level) and
+`sql/translator.go` (translator-level via TranslatorOption). The cap is enforced
+in `buildFromClauseForVarLengthRel`: explicit MaxHops > hopCap returns an error.
+Unbounded [*] paths continue to be clamped to safetyLimit. maxPathHops propagates
+DB → Tx → buildSQLResult → NewTranslator. Reviewer fixes applied: n<=0 is a no-op
+with documentation; error message no longer hardcodes package name.
+
+Files Changed:
+- options.go (WithMaxPathHops option; n<=0 is no-op with docs)
+- driver.go (maxPathHops field on DB; propagation through runQuery/BeginTx)
+- tx.go (maxPathHops field; passed to runQueryTx)
+- sql/translator.go (TranslatorOption/WithMaxPathHops; hopCap enforcement; generic error message)
+- sql/translator_test.go (tests: explicit cap rejection, WithMaxPathHops raises cap, unbounded still clamped)
+
+Key Decisions:
+- n<=0 is silently treated as "use default 15" (documented); returning an error at Open time for n<=0 would be too strict for zero-value struct initialization patterns
+- Error message says "use WithMaxPathHops" without package prefix to avoid stale cross-package references
+
+Next Task: task-007
+
+================================================================================
+TASK-007: Enforce read-only contract in BeginTx and fix misleading PRAGMA comment
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Added a `d.readOnly` guard at the top of `DB.BeginTx` that returns `ErrReadOnly`
+immediately, preventing read-only databases from opening explicit transactions.
+Corrected the `WithReadOnly` doc comment in `options.go` which falsely claimed
+"PRAGMA query_only=ON" was set (it was never executed); the comment now accurately
+describes the API-layer enforcement strategy. Added a focused test
+`TestWithReadOnly_BeginTxReturnsErrReadOnly` in `driver_test.go`.
+
+Files Changed:
+- driver.go (BeginTx: add d.readOnly check returning ErrReadOnly; update doc comment)
+- options.go (WithReadOnly doc: remove false PRAGMA claim, describe actual enforcement)
+- driver_test.go (TestWithReadOnly_BeginTxReturnsErrReadOnly)
+
+Key Decisions:
+- Application-layer enforcement in BeginTx is simpler and safer than trying to
+  retroactively set PRAGMA query_only per-connection (which would require store-level
+  API changes and has different semantics — it silently ignores writes rather than
+  erroring at the API boundary).
+- The doc comment now describes enforcement honestly without prescribing an
+  implementation detail that could change.
+
+Next Task: task-008
+
+================================================================================
+TASK-008: Apply path-traversal protection to Snapshot
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Added filepath.Clean + EvalSymlinks + ".." component check to store.Snapshot,
+matching the protection already in driver.Open. Replaced the unsafe single-quote
+string concatenation with a parameterised `VACUUM INTO ?` bind argument (SQLite
+supports this). Doc comment corrected to accurately state that ".." traversal is
+rejected but absolute paths with no ".." components are accepted; callers needing
+stricter directory confinement must enforce it themselves.
+
+Files Changed:
+- store/sqlite.go (path-traversal check; VACUUM INTO ?; corrected doc comment)
+- store/crud_test.go (TestSnapshotPathTraversal_DotDot, TestSnapshotPathTraversal_RelativeEscape, TestSnapshotValidPath)
+
+Key Decisions:
+- VACUUM INTO ? (bind parameter) is supported in SQLite 3.32+ and is safe; confirmed by TestSnapshotValidPath passing with an absolute path
+- Absolute paths are not rejected (consistent with driver.Open behaviour); doc comment explicitly documents this limitation
+
+Next Task: task-009
+
+================================================================================
+TASK-009: Escape LIKE wildcards in LabelContains
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Added LIKE wildcard escaping to SQLiteDialect.LabelContains. Label names
+containing '%', '_', or '\' are now escaped before use in the three LIKE
+branches; the exact-match (=) branch continues to use the unescaped value.
+Each LIKE clause gains an ESCAPE '\' clause. Updated the interface doc comment
+to document the escaping contract and corrected the args-count doc from "five"
+to "four". Unit tests added covering %, _, \, and combinations.
+
+Files Changed:
+- sql/dialect.go (LabelContains escaping + ESCAPE clause; corrected args count doc)
+- sql/dialect_test.go (wildcard escaping unit tests)
+
+Key Decisions:
+- Backslash escaped first to avoid double-escaping (\ → \\ before % → \%)
+- Exact-match branch uses original unescaped value (SQLite = is literal, not a pattern)
+- Interface doc updated at the definition level so custom dialect implementors see the escaping contract
+
+Next Task: task-010
+
+================================================================================
+TASK-010: Implement full openCypher escape sequences in unquoteString
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Extended `unquoteString` in `cypher/parser.go` to handle the full openCypher
+string escape sequence table: \n, \r, \t, \b, \f (control chars), \uXXXX
+(4-digit Unicode), \uXXXXXXXX (8-digit Unicode). Added `isAllHex` helper.
+Added `unicode/utf8` import and `utf8.ValidRune` checks on both Unicode escape
+paths — code points above unicode.MaxRune and surrogate code points (U+D800–
+U+DFFF) now return a descriptive error rather than silently emitting U+FFFD.
+Applied De Morgan's law to `isAllHex` to satisfy staticcheck QF1001.
+
+Files Changed:
+- cypher/parser.go (escape sequence handling; isAllHex helper; utf8.ValidRune guards; unicode/utf8 import)
+- cypher/parser_test.go (tests for all new escape sequences and invalid Unicode rejection)
+
+Key Decisions:
+- utf8.ValidRune catches both surrogates and code points > MaxRune in one call
+- isAllHex rewritten with De Morgan's law per staticcheck QF1001
+
+Next Task: task-011
+
+================================================================================
+TASK-012: Make Rollback idempotent (no-op after Commit)
+Date: 2026-05-27T12:00:00Z
+================================================================================
+
+Summary:
+Applied two review-phase findings to complete task-012:
+
+1. Fixed the `Tx` struct doc comment in `tx.go` which contradicted the
+   idempotent Rollback behaviour by saying "A Tx must not be used after Commit
+   or Rollback returns." The new comment explains that calling Rollback after
+   a successful Commit is explicitly safe (returns nil), enabling the standard
+   defer-rollback guard pattern, and includes an inline code example.
+
+2. Extended `TestBeginTx_RollbackAfterCommitIsNoOp` in `driver_test.go` to
+   verify that committed data remains visible after the no-op Rollback call.
+   The test now queries for the created node and asserts exactly one record
+   is returned.
+
+The Rollback implementation itself (returns nil when t.done) was already
+correct from the prior implementation pass.
+
+Files Changed:
+- tx.go (Tx struct doc comment: replace contradictory line with accurate defer-pattern description + example)
+- driver_test.go (TestBeginTx_RollbackAfterCommitIsNoOp: add visibility assertion after no-op Rollback)
+- .plans/tasks-skill-review-remediation.yml (task-012 marked completed)
+
+Key Decisions:
+- Struct-level doc comment is the authoritative description of Tx lifecycle; the
+  old "must not be used after..." wording was left over from before the idempotent
+  change and would mislead callers into wrapping Rollback in error checks on the
+  success path.
+- The visibility assertion uses RunQuery + Collect (rather than a second explicit
+  transaction) to keep the test focused on the no-op Rollback semantics.
+
+Next Task: task-013
+
+================================================================================
+TASK-011: Upgrade stale ANTLR and opencypher dependencies; add govulncheck to CI
+Date: 2026-05-27T13:00:00Z
+================================================================================
+
+Summary:
+Attempted to upgrade github.com/antlr/antlr4/runtime/Go/antlr and
+github.com/cloudprivacylabs/opencypher to 2024+ versions. The ANTLR upgrade is
+blocked: cloudprivacylabs/opencypher@v1.0.0 uses generated parser code that
+calls DeserializeFromUInt16, an API removed in antlr4-go v1.4.10. No newer
+release of opencypher exists that uses the updated antlr4-go/antlr/v4 module
+path. Similarly, golang.org/x/sys v0.44.0 (which fixes GO-2026-5024) requires
+Go 1.25; the project is on Go 1.24.
+
+Instead:
+- Upgraded golang.org/x/sys from v0.33.0 to v0.41.0 (latest compatible with Go 1.24).
+- Added explanatory comments in go.mod for both pinned dependencies documenting
+  the exact constraint that prevents further upgrades.
+- Added govulncheck job to .github/workflows/ci.yml, pinned to v1.3.0 (not @latest),
+  with needs: [build-and-test] so it only runs after build/test succeeds.
+- Updated AGENTS.md with the antlr locking constraint and the Go version / sys constraint.
+
+Files Changed:
+- go.mod (golang.org/x/sys v0.41.0; explanatory comments for antlr and sys pins)
+- go.sum (updated hashes for golang.org/x/sys v0.41.0)
+- .github/workflows/ci.yml (govulncheck job: pinned v1.3.0, needs build-and-test)
+- .plans/tasks-skill-review-remediation.yml (task-011 marked completed)
+- AGENTS.md (antlr locked to 2021 version due to opencypher constraint; sys pin documented)
+
+Key Decisions:
+- antlr remains at the 2021 pseudo-version; attempting to upgrade breaks compilation
+  in cypher/ because opencypher's generated parser calls a removed API. Cannot
+  upgrade opencypher either (no newer release). Documented in go.mod.
+- golang.org/x/sys pinned at v0.41.0 (not v0.44.0) because v0.44.0 requires Go 1.25.
+  Will be revisited when minimum Go version is raised to 1.25.
+- govulncheck pinned to v1.3.0 rather than @latest for reproducible CI.
+- needs: [build-and-test] added to ensure vuln scan only runs on builds that passed.
+
+Next Task: task-012 (already completed)
