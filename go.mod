@@ -1,6 +1,6 @@
 module github.com/LackOfMorals/graphlite
 
-go 1.24.0
+go 1.24.12
 
 require (
 	// antlr cannot be upgraded: cloudprivacylabs/opencypher@v1.0.0 generated parser
