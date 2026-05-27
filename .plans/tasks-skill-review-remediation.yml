@@ -119,14 +119,14 @@ tasks:
       after `Open` when `WithReadOnly` is set to enforce read-only at the SQLite engine level.
       Remove or correct the misleading PRAGMA mention in the `WithReadOnly` doc comment that
       references a PRAGMA that was never executed.
-    status: pending
+    status: completed
     dependencies: []
     acceptance_criteria:
       - 'Opening a DB with `WithReadOnly()` then calling `db.BeginTx(ctx)` followed by a write returns an error'
       - 'The error is consistent with the `ErrReadOnly` contract documented on the type'
       - 'The `WithReadOnly` doc comment no longer references an unenforced PRAGMA'
       - '`go test ./...` passes'
-    completed_at: null
+    completed_at: '2026-05-27T00:00:00Z'
 
   - id: task-008
     title: 'Apply path-traversal protection to Snapshot'

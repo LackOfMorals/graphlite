@@ -128,6 +128,25 @@ func TestWithReadOnly(t *testing.T) {
 	}
 }
 
+// TestWithReadOnly_BeginTxReturnsErrReadOnly verifies that BeginTx returns
+// ErrReadOnly immediately when the database was opened with WithReadOnly.
+func TestWithReadOnly_BeginTxReturnsErrReadOnly(t *testing.T) {
+	ctx := context.Background()
+	ro, err := graphlite.Open(":memory:", graphlite.WithReadOnly())
+	if err != nil {
+		t.Fatalf("Open ro: %v", err)
+	}
+	defer func() { _ = ro.Close(ctx) }()
+
+	_, err = ro.BeginTx(ctx)
+	if err == nil {
+		t.Fatal("expected ErrReadOnly from BeginTx on read-only DB, got nil")
+	}
+	if err != graphlite.ErrReadOnly {
+		t.Fatalf("expected ErrReadOnly, got: %v", err)
+	}
+}
+
 // TestNewTestDB verifies that NewTestDB returns a usable *DB and that cleanup
 // is registered (the test would leak if Close were not called).
 func TestNewTestDB(t *testing.T) {

@@ -150,9 +150,12 @@ func (d *DB) RunQuery(ctx context.Context, cypherStr string, params map[string]a
 
 // BeginTx starts an explicit transaction and returns a *Tx.
 //
-// Use WithReadOnly() on Open to enforce read-only access across the entire
-// database connection.
+// Returns [ErrReadOnly] if the database was opened with [WithReadOnly]; use
+// [DB.RunQuery] for read-only access.
 func (d *DB) BeginTx(ctx context.Context) (*Tx, error) {
+	if d.readOnly {
+		return nil, ErrReadOnly
+	}
 	txEx, err := d.st.BeginExecTx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("graphlite: begin transaction: %w", err)

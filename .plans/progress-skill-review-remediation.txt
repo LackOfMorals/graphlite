@@ -149,3 +149,31 @@ Key Decisions:
 - Error message says "use WithMaxPathHops" without package prefix to avoid stale cross-package references
 
 Next Task: task-007
+
+================================================================================
+TASK-007: Enforce read-only contract in BeginTx and fix misleading PRAGMA comment
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Added a `d.readOnly` guard at the top of `DB.BeginTx` that returns `ErrReadOnly`
+immediately, preventing read-only databases from opening explicit transactions.
+Corrected the `WithReadOnly` doc comment in `options.go` which falsely claimed
+"PRAGMA query_only=ON" was set (it was never executed); the comment now accurately
+describes the API-layer enforcement strategy. Added a focused test
+`TestWithReadOnly_BeginTxReturnsErrReadOnly` in `driver_test.go`.
+
+Files Changed:
+- driver.go (BeginTx: add d.readOnly check returning ErrReadOnly; update doc comment)
+- options.go (WithReadOnly doc: remove false PRAGMA claim, describe actual enforcement)
+- driver_test.go (TestWithReadOnly_BeginTxReturnsErrReadOnly)
+
+Key Decisions:
+- Application-layer enforcement in BeginTx is simpler and safer than trying to
+  retroactively set PRAGMA query_only per-connection (which would require store-level
+  API changes and has different semantics — it silently ignores writes rather than
+  erroring at the API boundary).
+- The doc comment now describes enforcement honestly without prescribing an
+  implementation detail that could change.
+
+Next Task: task-008

@@ -25,12 +25,14 @@ func WithBusyTimeout(d time.Duration) Option {
 	return func(c *dbConfig) { c.busyTimeout = d }
 }
 
-// WithReadOnly opens the database in read-only mode by setting
-// PRAGMA query_only=ON. All INSERT, UPDATE, and DELETE statements are rejected
-// by SQLite with a permission error. The database file must already exist and
+// WithReadOnly opens the database in read-only mode. Write queries issued via
+// [DB.RunQuery] return [ErrReadOnly], and [DB.BeginTx] returns [ErrReadOnly]
+// before any transaction is opened. The database file must already exist and
 // contain the graphlite schema.
 //
-// Read-only mode is enforced at the SQLite level, not in application code.
+// Read-only enforcement is applied in the graphlite API layer: any Cypher
+// statement that would mutate the graph (CREATE, SET, DELETE, MERGE) is
+// rejected before reaching SQLite.
 func WithReadOnly() Option {
 	return func(c *dbConfig) { c.readOnly = true }
 }
