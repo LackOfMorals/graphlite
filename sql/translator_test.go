@@ -70,18 +70,16 @@ func TestTranslate_MatchByLabel_ReturnProp(t *testing.T) {
 		"SELECT",
 		"FROM nodes",
 		"WHERE",
-		"labels",   // label check
+		"node_labels", // junction table label check
 		"json_extract", // property access
 		"$.name",
 	)
-	// Args should contain four copies of "Person" for the label check.
-	if len(result.Args) != 4 {
-		t.Errorf("expected 4 args (label check), got %d: %v", len(result.Args), result.Args)
+	// Args should contain exactly one copy of "Person" for the label check.
+	if len(result.Args) != 1 {
+		t.Errorf("expected 1 arg (label check), got %d: %v", len(result.Args), result.Args)
 	}
-	for i, a := range result.Args {
-		if a != "Person" {
-			t.Errorf("arg[%d] = %v; want %q", i, a, "Person")
-		}
+	if len(result.Args) > 0 && result.Args[0] != "Person" {
+		t.Errorf("arg[0] = %v; want %q", result.Args[0], "Person")
 	}
 }
 
@@ -116,9 +114,9 @@ func TestTranslate_WhereParam(t *testing.T) {
 		"=",
 		"?",
 	)
-	// We expect at least one sentinel for $name plus four args for the label check.
-	if len(result.Args) < 5 {
-		t.Errorf("expected at least 5 args (4 label + 1 param), got %d", len(result.Args))
+	// We expect at least one sentinel for $name plus one arg for the label check.
+	if len(result.Args) < 2 {
+		t.Errorf("expected at least 2 args (1 label + 1 param), got %d", len(result.Args))
 	}
 }
 
@@ -268,9 +266,9 @@ func TestTranslate_InlineNodePropConstraint(t *testing.T) {
 		"$.name",
 		"?",  // string literal becomes a bind arg
 	)
-	// Args: 4 label args + 1 string literal for 'Alice'.
-	if len(result.Args) < 5 {
-		t.Errorf("expected at least 5 args, got %d: %v", len(result.Args), result.Args)
+	// Args: 1 label arg + 1 string literal for 'Alice'.
+	if len(result.Args) < 2 {
+		t.Errorf("expected at least 2 args, got %d: %v", len(result.Args), result.Args)
 	}
 }
 
@@ -282,10 +280,10 @@ func TestTranslate_MultiLabel(t *testing.T) {
 	result := translateCypher(t, `MATCH (n:Person:Employee) RETURN n.name`)
 	// Both label predicates must produce AND semantics in the WHERE clause.
 	// Label values are passed as bind args (not inlined in SQL).
-	containsAll(t, result, "AND", "WHERE", "labels")
-	// There should be 8 args: 4 for "Person" + 4 for "Employee".
-	if len(result.Args) != 8 {
-		t.Errorf("expected 8 args (4 per label), got %d: %v", len(result.Args), result.Args)
+	containsAll(t, result, "AND", "WHERE", "node_labels")
+	// There should be 2 args: 1 for "Person" + 1 for "Employee".
+	if len(result.Args) != 2 {
+		t.Errorf("expected 2 args (1 per label), got %d: %v", len(result.Args), result.Args)
 	}
 	// Check both label values appear in args.
 	foundPerson, foundEmployee := false, false
@@ -312,15 +310,15 @@ func TestTranslate_MultiLabel(t *testing.T) {
 func TestTranslate_ParamPositionCorrect(t *testing.T) {
 	result := translateCypher(t,
 		`MATCH (n:Person) WHERE n.age > $minAge RETURN n.name`)
-	// We expect: 4 label args + 1 param sentinel for $minAge.
-	if len(result.Args) != 5 {
-		t.Errorf("expected 5 args, got %d: %v", len(result.Args), result.Args)
+	// We expect: 1 label arg + 1 param sentinel for $minAge.
+	if len(result.Args) != 2 {
+		t.Errorf("expected 2 args, got %d: %v", len(result.Args), result.Args)
 	}
 	// The last arg should be a paramSentinel for "minAge".
 	// We can't access unexported paramSentinel, but we can verify it's not a string.
-	last := result.Args[4]
+	last := result.Args[1]
 	if _, isString := last.(string); isString {
-		t.Errorf("expected param sentinel at args[4], got string %q", last)
+		t.Errorf("expected param sentinel at args[1], got string %q", last)
 	}
 }
 
@@ -360,7 +358,7 @@ func TestTranslate_GoldenFixture_LabelPropMatch(t *testing.T) {
 	// The SQL must:
 	// 1. SELECT json_extract with AS name
 	// 2. FROM nodes <alias>
-	// 3. WHERE label check AND property check
+	// 3. WHERE label check (via node_labels) AND property check
 	containsAll(t, result,
 		"SELECT",
 		"json_extract",
@@ -368,13 +366,13 @@ func TestTranslate_GoldenFixture_LabelPropMatch(t *testing.T) {
 		" AS name",
 		"FROM nodes",
 		"WHERE",
-		"labels",
+		"node_labels",
 		"AND",
 	)
 
-	// Param count: 4 label args + 1 param sentinel.
-	if len(result.Args) != 5 {
-		t.Errorf("expected 5 args, got %d", len(result.Args))
+	// Param count: 1 label arg + 1 param sentinel.
+	if len(result.Args) != 2 {
+		t.Errorf("expected 2 args, got %d", len(result.Args))
 	}
 }
 

@@ -72,9 +72,16 @@ CREATE TABLE edges (
     end_id   INTEGER NOT NULL REFERENCES nodes(id),
     props    JSON    NOT NULL DEFAULT '{}'
 );
+CREATE TABLE node_labels (
+    node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    label   TEXT    NOT NULL,
+    UNIQUE (node_id, label)
+);
+-- idx_node_labels_label ON node_labels(label, node_id) — O(log n) label lookups
 ```
 
 WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
+`node_labels` is kept in sync automatically by SQLite triggers on nodes INSERT/UPDATE; label lookups use EXISTS subquery or JOIN against node_labels rather than LIKE on nodes.labels.
 
 ## Gotchas and Learnings
 
@@ -115,3 +122,8 @@ WAL mode is enabled via `PRAGMA journal_mode=WAL` on every open.
 - `github.com/antlr/antlr4/runtime/Go/antlr` is locked to the 2021 pseudo-version and CANNOT be upgraded: `cloudprivacylabs/opencypher@v1.0.0`'s generated parser calls `DeserializeFromUInt16`, which was removed in antlr4-go v1.4.10. No newer opencypher release exists that uses the updated `github.com/antlr4-go/antlr/v4` module path.
 - `golang.org/x/sys` is pinned at v0.41.0 (not v0.44.0): v0.44.0 fixes GO-2026-5024 but requires Go 1.25. Revisit when minimum Go version is raised to 1.25.
 - Plan cache (`plan_cache.go`) is per-`DB` and keyed on Cypher string only. `maxPathHops` is implicitly scoped by the owning DB. `glsql.BindParams` always allocates new slices, so the cached pre-BindParams `glsql.Result` is safely shared read-only across goroutines. Avoid shadowing the builtin `cap` — use `size` or similar parameter names.
+- `node_labels(node_id, label)` junction table is maintained by SQLite triggers (AFTER INSERT / AFTER UPDATE OF labels on nodes). All write paths — including raw SQL from the translator and importer — stay in sync automatically without Go-level changes.
+- SQLite triggers use a recursive CTE to split the comma-separated `labels` column because SQLite has no native STRING_SPLIT function.
+- `node_labels` has `UNIQUE(node_id, label)` so that `INSERT OR IGNORE` in `backfillMigrationSQL` truly prevents duplicate rows. Without a unique constraint, `INSERT OR IGNORE` is a no-op and does NOT deduplicate.
+- `LabelContains` in `sql/dialect.go` now takes `nodeIDExpr` (e.g. `"n0.id"`) not the labels column expression. All translator call sites pass `alias + ".id"` after task-017.
+- The backfill migration uses `WHERE NOT EXISTS (... WHERE node_id = n.id)` to skip nodes already populated by triggers (i.e., inserted after the schema upgrade). `INSERT OR IGNORE` handles the edge case where a node partially appears in node_labels.

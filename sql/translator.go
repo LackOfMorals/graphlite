@@ -678,7 +678,7 @@ func (t *Translator) buildFromClauseForMatchNode(mnp *cypher.MatchNodePlan, scop
 	// Label constraints go to WHERE; args collected into fc.whereArgs so the
 	// caller can assemble t.args in SQL order (JOIN ON args before WHERE args).
 	for _, label := range mnp.Labels {
-		pred, args := t.dialect.LabelContains(alias+".labels", label)
+		pred, args := t.dialect.LabelContains(alias+".id", label)
 		fc.whereFragments = append(fc.whereFragments, pred)
 		fc.whereArgs = append(fc.whereArgs, args...)
 	}
@@ -779,7 +779,7 @@ func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope 
 		// 2. Build end-node LEFT JOIN ON clause.
 		nodeOnParts := []string{t.endNodeCond(mrp, relAlias, startAlias, endAlias)}
 		for _, label := range mrp.EndNode.Labels {
-			pred, args := t.dialect.LabelContains(endAlias+".labels", label)
+			pred, args := t.dialect.LabelContains(endAlias+".id", label)
 			nodeOnParts = append(nodeOnParts, pred)
 			fc.joinArgs = append(fc.joinArgs, args...)
 		}
@@ -801,7 +801,7 @@ func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope 
 		// 3. Start-node constraints go to WHERE. Args stored in fc.whereArgs so
 		//    the caller can append them after fc.joinArgs when assembling t.args.
 		for _, label := range mrp.StartNode.Labels {
-			pred, args := t.dialect.LabelContains(startAlias+".labels", label)
+			pred, args := t.dialect.LabelContains(startAlias+".id", label)
 			whereParts = append(whereParts, pred)
 			fc.whereArgs = append(fc.whereArgs, args...)
 		}
@@ -825,7 +825,7 @@ func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope 
 
 		// Start node constraints.
 		for _, label := range mrp.StartNode.Labels {
-			pred, args := t.dialect.LabelContains(startAlias+".labels", label)
+			pred, args := t.dialect.LabelContains(startAlias+".id", label)
 			whereParts = append(whereParts, pred)
 			fc.whereArgs = append(fc.whereArgs, args...)
 		}
@@ -877,7 +877,7 @@ func (t *Translator) buildFromClauseForMatchRel(mrp *cypher.MatchRelPlan, scope 
 
 		// End node constraints to WHERE.
 		for _, label := range mrp.EndNode.Labels {
-			pred, args := t.dialect.LabelContains(endAlias+".labels", label)
+			pred, args := t.dialect.LabelContains(endAlias+".id", label)
 			whereParts = append(whereParts, pred)
 			fc.whereArgs = append(fc.whereArgs, args...)
 		}
@@ -1044,7 +1044,7 @@ func (t *Translator) buildFromClauseForVarLengthRel(vlp *cypher.VariableLengthRe
 	var whereParts []string
 	var whereArgs []any
 	for _, label := range vlp.StartNode.Labels {
-		pred, args := t.dialect.LabelContains(startAlias+".labels", label)
+		pred, args := t.dialect.LabelContains(startAlias+".id", label)
 		whereParts = append(whereParts, pred)
 		whereArgs = append(whereArgs, args...)
 	}
@@ -1063,7 +1063,7 @@ func (t *Translator) buildFromClauseForVarLengthRel(vlp *cypher.VariableLengthRe
 
 	// ── End-node constraints (additional WHERE fragments) ─────────────────────
 	for _, label := range vlp.EndNode.Labels {
-		pred, args := t.dialect.LabelContains(endAlias+".labels", label)
+		pred, args := t.dialect.LabelContains(endAlias+".id", label)
 		whereParts = append(whereParts, pred)
 		whereArgs = append(whereArgs, args...)
 	}
@@ -1459,10 +1459,10 @@ func (t *Translator) exprToSQL(expr cypher.Expr, scope *cypher.BindingScope) (st
 		if !ok {
 			return "", fmt.Errorf("sql: variable %q not in scope for label check", e.Variable)
 		}
-		labelsCol := binding.Alias + ".labels"
+		nodeIDExpr := binding.Alias + ".id"
 		parts := make([]string, 0, len(e.Labels))
 		for _, label := range e.Labels {
-			pred, args := t.dialect.LabelContains(labelsCol, label)
+			pred, args := t.dialect.LabelContains(nodeIDExpr, label)
 			t.args = append(t.args, args...)
 			parts = append(parts, pred)
 		}
@@ -2428,7 +2428,7 @@ func (t *Translator) translateMerge(p *cypher.MergePlan, scope *cypher.BindingSc
 	}
 
 	for _, label := range p.Labels {
-		pred, args := t.dialect.LabelContains(alias+".labels", label)
+		pred, args := t.dialect.LabelContains(alias+".id", label)
 		whereParts = append(whereParts, pred)
 		whereArgs = append(whereArgs, args...)
 	}

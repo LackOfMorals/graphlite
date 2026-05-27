@@ -98,7 +98,7 @@ func TestWALModeFile(t *testing.T) {
 	}
 }
 
-// TestSchemaTablesAndIndexes verifies that all four required tables and indexes exist.
+// TestSchemaTablesAndIndexes verifies that all required tables and indexes exist.
 func TestSchemaTablesAndIndexes(t *testing.T) {
 	s, err := store.Open(":memory:", store.Config{})
 	if err != nil {
@@ -108,8 +108,8 @@ func TestSchemaTablesAndIndexes(t *testing.T) {
 
 	db := s.DB()
 
-	// Check tables exist.
-	for _, table := range []string{"nodes", "edges"} {
+	// Check tables exist — including the node_labels junction table.
+	for _, table := range []string{"nodes", "edges", "node_labels"} {
 		var name string
 		err := db.QueryRow(
 			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table,
@@ -119,12 +119,13 @@ func TestSchemaTablesAndIndexes(t *testing.T) {
 		}
 	}
 
-	// Check all four required indexes exist.
+	// Check all required indexes exist.
 	for _, idx := range []string{
 		"idx_nodes_labels",
 		"idx_edges_start",
 		"idx_edges_end",
 		"idx_edges_type",
+		"idx_node_labels_label",
 	} {
 		var name string
 		err := db.QueryRow(

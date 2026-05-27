@@ -86,6 +86,13 @@ func Open(uri string, cfg Config) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("store: apply schema: %w", err)
 	}
 
+	// Backfill node_labels for any pre-existing nodes that were created before
+	// the junction table was added. This is a no-op on fresh databases.
+	if _, err := db.Exec(backfillMigrationSQL); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("store: backfill node_labels: %w", err)
+	}
+
 	return &SQLiteStore{db: db, q: db}, nil
 }
 
@@ -311,17 +318,15 @@ func listNodes(ctx context.Context, q querier) ([]*NodeRow, error) {
 }
 
 func listNodesByLabel(ctx context.Context, q querier, labelName string) ([]*NodeRow, error) {
-	// Use the idx_nodes_labels index with an exact-match or instr-based check.
-	// The label is stored in a comma-separated list, so we need to find it as
-	// a whole word. We use instr to check for the label with comma delimiters,
-	// covering the cases: label at start, middle, or end of the list.
+	// Use the idx_node_labels_label index via a JOIN against the node_labels
+	// junction table. This replaces the previous LIKE-based scan and avoids
+	// full table scans on the nodes table.
 	rows, err := q.QueryContext(ctx,
-		`SELECT id, labels, props FROM nodes
-		 WHERE labels = ?
-		    OR labels LIKE ? || ',%'
-		    OR labels LIKE '%,' || ?
-		    OR labels LIKE '%,' || ? || ',%'`,
-		labelName, labelName, labelName, labelName,
+		`SELECT n.id, n.labels, n.props
+		 FROM nodes n
+		 JOIN node_labels nl ON nl.node_id = n.id
+		 WHERE nl.label = ?`,
+		labelName,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: list nodes by label %q: %w", labelName, err)

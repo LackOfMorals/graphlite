@@ -226,8 +226,9 @@ func TestListNodesByLabel(t *testing.T) {
 	}
 }
 
-// TestListNodesByLabelIndexHint verifies that idx_nodes_labels is used for
-// label lookup via EXPLAIN QUERY PLAN.
+// TestListNodesByLabelIndexHint verifies that idx_node_labels_label is used
+// for label lookup via EXPLAIN QUERY PLAN. The junction-table JOIN should be
+// resolved via the (label, node_id) index rather than a full table scan.
 func TestListNodesByLabelIndexHint(t *testing.T) {
 	s := openMemory(t)
 	ctx := context.Background()
@@ -239,9 +240,13 @@ func TestListNodesByLabelIndexHint(t *testing.T) {
 		}
 	}
 
-	// EXPLAIN QUERY PLAN for the first OR branch (exact match), which uses the index.
+	// EXPLAIN QUERY PLAN for the junction-table label lookup.
 	rows, err := s.DB().QueryContext(ctx,
-		`EXPLAIN QUERY PLAN SELECT id, labels, props FROM nodes WHERE labels = ?`,
+		`EXPLAIN QUERY PLAN
+		 SELECT n.id, n.labels, n.props
+		 FROM nodes n
+		 JOIN node_labels nl ON nl.node_id = n.id
+		 WHERE nl.label = ?`,
 		"Person",
 	)
 	if err != nil {
@@ -256,7 +261,7 @@ func TestListNodesByLabelIndexHint(t *testing.T) {
 		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
 			t.Fatalf("EXPLAIN scan: %v", err)
 		}
-		if strings.Contains(detail, "idx_nodes_labels") {
+		if strings.Contains(detail, "idx_node_labels_label") {
 			found = true
 		}
 	}
@@ -264,7 +269,7 @@ func TestListNodesByLabelIndexHint(t *testing.T) {
 		t.Fatalf("EXPLAIN rows: %v", err)
 	}
 	if !found {
-		t.Error("expected EXPLAIN QUERY PLAN to use idx_nodes_labels, but it did not")
+		t.Error("expected EXPLAIN QUERY PLAN to use idx_node_labels_label, but it did not")
 	}
 }
 
@@ -1098,6 +1103,173 @@ func TestTxUpdateEdgeProps(t *testing.T) {
 	}
 	if !strings.Contains(e.Props, "after") {
 		t.Errorf("tx.UpdateEdgeProps: expected updated props to contain 'after', got %q", e.Props)
+	}
+}
+
+// ============================================================
+// Junction table (node_labels) correctness tests
+// ============================================================
+
+// TestNodeLabelsJunctionPopulatedOnInsert verifies that node_labels rows are
+// created when a node is inserted (via the INSERT trigger).
+func TestNodeLabelsJunctionPopulatedOnInsert(t *testing.T) {
+	s := openMemory(t)
+	ctx := context.Background()
+
+	id, err := s.InsertNode(ctx, store.DecodeLabels("Person,Employee"), `{}`)
+	if err != nil {
+		t.Fatalf("InsertNode: %v", err)
+	}
+
+	rows, err := s.DB().QueryContext(ctx,
+		`SELECT label FROM node_labels WHERE node_id = ? ORDER BY label`, id)
+	if err != nil {
+		t.Fatalf("query node_labels: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var labels []string
+	for rows.Next() {
+		var lbl string
+		if err := rows.Scan(&lbl); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		labels = append(labels, lbl)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows err: %v", err)
+	}
+
+	want := []string{"Employee", "Person"} // sorted
+	if len(labels) != len(want) {
+		t.Fatalf("expected %d node_labels rows, got %d: %v", len(want), len(labels), labels)
+	}
+	for i, lbl := range labels {
+		if lbl != want[i] {
+			t.Errorf("node_labels[%d] = %q; want %q", i, lbl, want[i])
+		}
+	}
+}
+
+// TestNodeLabelsJunctionCascadesOnDelete verifies that node_labels rows are
+// deleted automatically (via ON DELETE CASCADE) when the node is deleted.
+func TestNodeLabelsJunctionCascadesOnDelete(t *testing.T) {
+	s := openMemory(t)
+	ctx := context.Background()
+
+	id, err := s.InsertNode(ctx, store.DecodeLabels("Person"), `{}`)
+	if err != nil {
+		t.Fatalf("InsertNode: %v", err)
+	}
+
+	if err := s.DeleteNode(ctx, id); err != nil {
+		t.Fatalf("DeleteNode: %v", err)
+	}
+
+	var count int
+	if err := s.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM node_labels WHERE node_id = ?`, id).Scan(&count); err != nil {
+		t.Fatalf("count node_labels: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 node_labels rows after delete, got %d", count)
+	}
+}
+
+// TestNodeLabelsJunctionUpdatedOnLabelChange verifies that the node_labels
+// junction table is synchronised when nodes.labels is updated (via the UPDATE
+// trigger). This is exercised by Cypher REMOVE label operations.
+func TestNodeLabelsJunctionUpdatedOnLabelChange(t *testing.T) {
+	s := openMemory(t)
+	ctx := context.Background()
+
+	id, err := s.InsertNode(ctx, store.DecodeLabels("Person,Employee"), `{}`)
+	if err != nil {
+		t.Fatalf("InsertNode: %v", err)
+	}
+
+	// Simulate a REMOVE :Employee operation by directly updating nodes.labels.
+	if _, err := s.DB().ExecContext(ctx,
+		`UPDATE nodes SET labels = ? WHERE id = ?`, "Person", id); err != nil {
+		t.Fatalf("UPDATE labels: %v", err)
+	}
+
+	rows, err := s.DB().QueryContext(ctx,
+		`SELECT label FROM node_labels WHERE node_id = ?`, id)
+	if err != nil {
+		t.Fatalf("query node_labels: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var labels []string
+	for rows.Next() {
+		var lbl string
+		if err := rows.Scan(&lbl); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		labels = append(labels, lbl)
+	}
+	if len(labels) != 1 || labels[0] != "Person" {
+		t.Errorf("expected [Person] after label update, got %v", labels)
+	}
+}
+
+// TestNodeLabelsJunctionBackfill verifies that the Open-time backfill migration
+// correctly populates node_labels for pre-existing databases. This is simulated
+// by inserting rows into nodes directly (bypassing the trigger) and then
+// running the backfill SQL via reopening a fresh store with pre-seeded data.
+func TestNodeLabelsJunctionBackfill(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := dir + "/backfill_test.db"
+
+	// Open the database and seed raw node rows, bypassing the trigger by first
+	// dropping the trigger, inserting, then the backfill should recover.
+	s, err := store.Open(dbPath, store.Config{})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// Drop the INSERT trigger so we can test the backfill path.
+	if _, err := s.DB().ExecContext(ctx, `DROP TRIGGER IF EXISTS trg_nodes_insert_labels`); err != nil {
+		t.Fatalf("drop trigger: %v", err)
+	}
+	if _, err := s.DB().ExecContext(ctx,
+		`INSERT INTO nodes (labels, props) VALUES (?, '{}')`, "Backfill,Test"); err != nil {
+		t.Fatalf("raw insert: %v", err)
+	}
+	// Confirm node_labels is empty for this row (trigger was dropped).
+	var count int
+	if err := s.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM node_labels`).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 0 {
+		t.Skipf("trigger still fired despite drop (SQLite restriction); skipping backfill test")
+	}
+	_ = s.Close()
+
+	// Reopen: this runs schemaDDL (recreates trigger) + backfillMigrationSQL.
+	s2, err := store.Open(dbPath, store.Config{})
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+
+	// The backfill should have populated node_labels for the raw row.
+	backfillRows, err := s2.ListNodesByLabel(ctx, "Backfill")
+	if err != nil {
+		t.Fatalf("ListNodesByLabel(Backfill): %v", err)
+	}
+	if len(backfillRows) != 1 {
+		t.Errorf("expected 1 node with label Backfill, got %d", len(backfillRows))
+	}
+	testRows, err := s2.ListNodesByLabel(ctx, "Test")
+	if err != nil {
+		t.Fatalf("ListNodesByLabel(Test): %v", err)
+	}
+	if len(testRows) != 1 {
+		t.Errorf("expected 1 node with label Test, got %d", len(testRows))
 	}
 }
 

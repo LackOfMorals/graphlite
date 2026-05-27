@@ -17,7 +17,7 @@ import (
 // The interface covers four categories of variation:
 //   - Identifier quoting (QuoteIdentifier)
 //   - JSON property extraction (JSONExtract, JSONSet, JSONRemove)
-//   - Comma-separated label membership testing (LabelContains)
+//   - Label membership testing via the node_labels junction table (LabelContains)
 //   - Positional parameter placeholders (Placeholder)
 type Dialect interface {
 	// QuoteIdentifier returns the identifier quoted for safe use in SQL.
@@ -44,25 +44,18 @@ type Dialect interface {
 	//	SQLite: json_remove(<colExpr>, '<jsonPath>')
 	JSONRemove(colExpr, jsonPath string) string
 
-	// LabelContains returns a SQL predicate that is true when the comma-separated
-	// text column colExpr contains labelName as a whole label (not a substring of
-	// another label).
+	// LabelContains returns a SQL predicate that is true when the node identified
+	// by nodeIDExpr has labelName recorded in the node_labels junction table.
 	//
-	// The colExpr is a fully-qualified column reference such as "n0.labels".
-	// labelName is an unquoted label string; implementations must escape LIKE
-	// wildcard characters ('%', '_', '\') before using labelName in LIKE branches
-	// so that label names containing those characters match only themselves.
+	// nodeIDExpr is a SQL expression evaluating to the node's integer id,
+	// e.g. "n0.id". labelName is the unquoted label string.
 	//
-	//	SQLite emits four OR branches to cover all positions in the list:
-	//	  exact match:    colExpr = ?           (unescaped labelName)
-	//	  prefix:         colExpr LIKE ? || ',%' ESCAPE '\'
-	//	  suffix:         colExpr LIKE '%,' || ? ESCAPE '\'
-	//	  middle:         colExpr LIKE '%,' || ? || ',%' ESCAPE '\'
+	// SQLite emits an EXISTS subquery that uses the idx_node_labels_label index:
 	//
-	// args receives the label values in the order they must appear in the SQL
-	// argument slice: one unescaped value for the exact-match branch, followed
-	// by three escaped values for the LIKE branches.
-	LabelContains(colExpr, labelName string) (predicate string, args []any)
+	//	EXISTS (SELECT 1 FROM node_labels WHERE node_id = <nodeIDExpr> AND label = ?)
+	//
+	// args contains exactly one value (labelName) bound to the "?" placeholder.
+	LabelContains(nodeIDExpr, labelName string) (predicate string, args []any)
 
 	// Placeholder returns the SQL positional placeholder for the nth argument
 	// (0-indexed). SQLite always uses "?"; PostgreSQL would use "$1", "$2", etc.
@@ -132,42 +125,24 @@ func escapeJSONPath(p string) string {
 	return strings.ReplaceAll(p, "'", "''")
 }
 
-// LabelContains returns a predicate that tests whether the comma-separated
-// labels column contains labelName as a whole label entry. Four OR branches
-// cover all positions in the list:
+// LabelContains returns a predicate that tests whether the node identified by
+// nodeIDExpr has labelName in the node_labels junction table. It uses an EXISTS
+// subquery that is resolved via the idx_node_labels_label(label, node_id) index,
+// avoiding a full scan of the nodes table.
 //
-//  1. Exact match (the entire column is exactly labelName)
-//  2. Prefix     (labelName is the first entry, followed by a comma)
-//  3. Suffix     (labelName is the last entry, preceded by a comma)
-//  4. Middle     (labelName is surrounded by commas)
+// nodeIDExpr must be a SQL expression evaluating to the node's integer id,
+// e.g. "n0.id". No LIKE wildcard escaping is needed because the predicate
+// uses an equality check on the label column.
 //
-// labelName is escaped before use in the three LIKE branches: backslashes are
-// doubled, '%' is replaced with '\%', and '_' is replaced with '\_'. This
-// prevents label names that contain SQL LIKE wildcard characters from matching
-// unintended labels. Each LIKE branch carries an explicit ESCAPE '\' clause.
-// The exact-match (=) branch receives the original unescaped value.
-//
-// The returned args slice contains four values: the unescaped name for the
-// exact-match branch, then three copies of the escaped name for the LIKE
-// branches.
-//
-//	LabelContains("n0.labels", "Person") →
-//	  "( n0.labels = ? OR n0.labels LIKE ? || ',%' ESCAPE '\' OR n0.labels LIKE '%,' || ? ESCAPE '\' OR n0.labels LIKE '%,' || ? || ',%' ESCAPE '\' )"
-//	  ["Person", "Person", "Person", "Person"]
-func (SQLiteDialect) LabelContains(colExpr, labelName string) (string, []any) {
-	// Escape LIKE wildcard characters so label names containing '%', '_', or '\'
-	// are matched literally rather than as SQL LIKE patterns.
-	// Order matters: backslash must be escaped first to avoid double-escaping.
-	escaped := strings.ReplaceAll(labelName, `\`, `\\`)
-	escaped = strings.ReplaceAll(escaped, "%", `\%`)
-	escaped = strings.ReplaceAll(escaped, "_", `\_`)
-
+//	LabelContains("n0.id", "Person") →
+//	  "EXISTS (SELECT 1 FROM node_labels WHERE node_id = n0.id AND label = ?)"
+//	  ["Person"]
+func (SQLiteDialect) LabelContains(nodeIDExpr, labelName string) (string, []any) {
 	predicate := fmt.Sprintf(
-		`( %[1]s = ? OR %[1]s LIKE ? || ',%%' ESCAPE '\' OR %[1]s LIKE '%%,' || ? ESCAPE '\' OR %[1]s LIKE '%%,' || ? || ',%%' ESCAPE '\' )`,
-		colExpr,
+		"EXISTS (SELECT 1 FROM node_labels WHERE node_id = %s AND label = ?)",
+		nodeIDExpr,
 	)
-	args := []any{labelName, escaped, escaped, escaped}
-	return predicate, args
+	return predicate, []any{labelName}
 }
 
 // Placeholder always returns "?" for SQLite positional parameter style.
