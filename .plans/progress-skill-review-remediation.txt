@@ -1,0 +1,28 @@
+================================================================================
+TASK-001: Define Labels type with Encode/Decode helpers
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Introduced `type Labels []string` in `store/store.go` replacing the raw
+comma-separated `string` used for node labels throughout the codebase.
+Added `Encode()`, `DecodeLabels()`, `sql.Scanner`, and `driver.Valuer`
+implementations so the type works transparently with database/sql.
+Updated all call sites: `store/sqlite.go`, `importer.go` (import, export,
+CSV paths), both store test files. Removed the now-dead `splitLabelsExport`
+helper from `importer.go`.
+
+Files Changed:
+- store/store.go (new Labels type with Encode/DecodeLabels/Scan/Value)
+- store/sqlite.go (InsertNode signature, insertNode helper uses Labels.Encode)
+- importer.go (added store import; updated InsertNode calls and CSV export; removed splitLabelsExport)
+- store/crud_test.go (all InsertNode calls use store.DecodeLabels; label comparisons use .Encode())
+- store/store_test.go (same InsertNode and comparison fixes)
+
+Key Decisions:
+- Labels implements sql.Scanner so existing `rows.Scan(&n.Labels)` calls work without change
+- Labels implements driver.Valuer so future parameterised inserts are handled automatically
+- DecodeLabels("") returns nil (no labels) rather than []string{""} to avoid spurious empty label
+- splitLabelsExport deleted entirely; callers use []string(n.Labels) or n.Labels.Encode() directly
+
+Next Task: task-002

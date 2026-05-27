@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/LackOfMorals/graphlite/store"
 )
 
 // Format identifies the file format accepted by Import.
@@ -166,13 +168,12 @@ func (d *DB) importJSON(ctx context.Context, r io.Reader) error {
 
 	// Insert nodes.
 	for i, n := range doc.Nodes {
-		labelsStr := strings.Join(n.Labels, ",")
 		propsJSON, err := marshalProps(n.Props)
 		if err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: import: node %d (%q) props: %w", i, n.ID, err)
 		}
-		dbID, err := tx.InsertNode(ctx, labelsStr, propsJSON)
+		dbID, err := tx.InsertNode(ctx, store.Labels(n.Labels), propsJSON)
 		if err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: import: insert node %d (%q): %w", i, n.ID, err)
@@ -391,7 +392,7 @@ func (d *DB) importCSVNodes(ctx context.Context, r io.Reader) error {
 			return fmt.Errorf("graphlite: csv node import: row %d props: %w", rowIdx+2, err)
 		}
 
-		if _, err := tx.InsertNode(ctx, labelStr, propsJSON); err != nil {
+		if _, err := tx.InsertNode(ctx, store.DecodeLabels(labelStr), propsJSON); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("graphlite: csv node import: row %d insert: %w", rowIdx+2, err)
 		}
@@ -586,7 +587,7 @@ func (d *DB) exportJSON(ctx context.Context, w io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("graphlite: export json: node %d props: %w", n.ID, err)
 		}
-		labels := splitLabelsExport(n.Labels)
+		labels := []string(n.Labels)
 		doc.Nodes = append(doc.Nodes, exportJSONNode{
 			ID:     strconv.FormatInt(n.ID, 10),
 			Labels: labels,
@@ -660,7 +661,7 @@ func (d *DB) exportCSVNodes(ctx context.Context, w io.Writer) error {
 	// Write rows.
 	for i, n := range nodes {
 		row := make([]string, 0, 2+len(propKeys))
-		row = append(row, strconv.FormatInt(n.ID, 10), n.Labels)
+		row = append(row, strconv.FormatInt(n.ID, 10), n.Labels.Encode())
 		props := nodeProps[i]
 		for _, k := range propKeys {
 			v, ok := props[k]
@@ -775,22 +776,6 @@ func unmarshalProps(propsJSON string) (map[string]any, error) {
 	return m, nil
 }
 
-// splitLabelsExport splits a comma-separated labels string into a slice.
-// An empty string returns an empty (non-nil) slice.
-func splitLabelsExport(labels string) []string {
-	if labels == "" {
-		return []string{}
-	}
-	parts := strings.Split(labels, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
 
 // anyToString converts a property value to its string representation for CSV output.
 func anyToString(v any) string {

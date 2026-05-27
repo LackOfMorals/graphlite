@@ -31,7 +31,7 @@ func TestInsertNode(t *testing.T) {
 	s := openMemory(t)
 	ctx := context.Background()
 
-	id1, err := s.InsertNode(ctx, "Person", `{"name":"Alice","age":30}`)
+	id1, err := s.InsertNode(ctx, store.DecodeLabels("Person"), `{"name":"Alice","age":30}`)
 	if err != nil {
 		t.Fatalf("InsertNode: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestInsertNode(t *testing.T) {
 		t.Fatalf("expected positive ID, got %d", id1)
 	}
 
-	id2, err := s.InsertNode(ctx, "Person", `{"name":"Bob","age":25}`)
+	id2, err := s.InsertNode(ctx, store.DecodeLabels("Person"), `{"name":"Bob","age":25}`)
 	if err != nil {
 		t.Fatalf("InsertNode second: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestInsertNodeStableID(t *testing.T) {
 	s := openMemory(t)
 	ctx := context.Background()
 
-	insertedID, err := s.InsertNode(ctx, "City", `{"name":"London"}`)
+	insertedID, err := s.InsertNode(ctx, store.DecodeLabels("City"), `{"name":"London"}`)
 	if err != nil {
 		t.Fatalf("InsertNode: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestGetNode(t *testing.T) {
 	s := openMemory(t)
 	ctx := context.Background()
 
-	id, err := s.InsertNode(ctx, "Animal,Pet", `{"name":"Fido","legs":4}`)
+	id, err := s.InsertNode(ctx, store.DecodeLabels("Animal,Pet"), `{"name":"Fido","legs":4}`)
 	if err != nil {
 		t.Fatalf("InsertNode: %v", err)
 	}
@@ -85,8 +85,8 @@ func TestGetNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetNode: %v", err)
 	}
-	if n.Labels != "Animal,Pet" {
-		t.Errorf("Labels: want %q, got %q", "Animal,Pet", n.Labels)
+	if n.Labels.Encode() != "Animal,Pet" {
+		t.Errorf("Labels: want %q, got %q", "Animal,Pet", n.Labels.Encode())
 	}
 	if !strings.Contains(n.Props, "Fido") {
 		t.Errorf("Props should contain 'Fido', got %q", n.Props)
@@ -113,7 +113,7 @@ func TestDeleteNode(t *testing.T) {
 	s := openMemory(t)
 	ctx := context.Background()
 
-	id, err := s.InsertNode(ctx, "Temp", `{}`)
+	id, err := s.InsertNode(ctx, store.DecodeLabels("Temp"), `{}`)
 	if err != nil {
 		t.Fatalf("InsertNode: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestListNodes(t *testing.T) {
 	labels := []string{"A", "B", "C"}
 	insertedIDs := make(map[int64]bool)
 	for _, lbl := range labels {
-		id, err := s.InsertNode(ctx, lbl, `{}`)
+		id, err := s.InsertNode(ctx, store.DecodeLabels(lbl), `{}`)
 		if err != nil {
 			t.Fatalf("InsertNode(%q): %v", lbl, err)
 		}
@@ -190,7 +190,7 @@ func TestListNodesByLabel(t *testing.T) {
 		"Employee":        `{"name":"Dave"}`,
 		"Admin,Person,Manager": `{"name":"Eve"}`,
 	} {
-		id, err := s.InsertNode(ctx, lbl, props)
+		id, err := s.InsertNode(ctx, store.DecodeLabels(lbl), props)
 		if err != nil {
 			t.Fatalf("InsertNode(%q): %v", lbl, err)
 		}
@@ -234,7 +234,7 @@ func TestListNodesByLabelIndexHint(t *testing.T) {
 
 	// Insert a few nodes so the index is non-trivially used.
 	for range 5 {
-		if _, err := s.InsertNode(ctx, "Person", `{}`); err != nil {
+		if _, err := s.InsertNode(ctx, store.DecodeLabels("Person"), `{}`); err != nil {
 			t.Fatalf("InsertNode: %v", err)
 		}
 	}
@@ -273,7 +273,7 @@ func TestUpdateNodeProps(t *testing.T) {
 	s := openMemory(t)
 	ctx := context.Background()
 
-	id, err := s.InsertNode(ctx, "Widget", `{"color":"red"}`)
+	id, err := s.InsertNode(ctx, store.DecodeLabels("Widget"), `{"color":"red"}`)
 	if err != nil {
 		t.Fatalf("InsertNode: %v", err)
 	}
@@ -302,11 +302,11 @@ func TestUpdateNodeProps(t *testing.T) {
 func insertTestNodes(t *testing.T, s *store.SQLiteStore) (int64, int64) {
 	t.Helper()
 	ctx := context.Background()
-	id1, err := s.InsertNode(ctx, "Node", `{"n":1}`)
+	id1, err := s.InsertNode(ctx, store.DecodeLabels("Node"), `{"n":1}`)
 	if err != nil {
 		t.Fatalf("InsertNode 1: %v", err)
 	}
-	id2, err := s.InsertNode(ctx, "Node", `{"n":2}`)
+	id2, err := s.InsertNode(ctx, store.DecodeLabels("Node"), `{"n":2}`)
 	if err != nil {
 		t.Fatalf("InsertNode 2: %v", err)
 	}
@@ -507,7 +507,7 @@ func TestListEdgesByStartNode(t *testing.T) {
 	s := openMemory(t)
 	ctx := context.Background()
 	n1, n2 := insertTestNodes(t, s)
-	n3, err := s.InsertNode(ctx, "Node", `{"n":3}`)
+	n3, err := s.InsertNode(ctx, store.DecodeLabels("Node"), `{"n":3}`)
 	if err != nil {
 		t.Fatalf("InsertNode 3: %v", err)
 	}
@@ -545,7 +545,7 @@ func TestListEdgesByEndNode(t *testing.T) {
 	s := openMemory(t)
 	ctx := context.Background()
 	n1, n2 := insertTestNodes(t, s)
-	n3, err := s.InsertNode(ctx, "Node", `{"n":3}`)
+	n3, err := s.InsertNode(ctx, store.DecodeLabels("Node"), `{"n":3}`)
 	if err != nil {
 		t.Fatalf("InsertNode 3: %v", err)
 	}
@@ -644,7 +644,7 @@ func TestTxNodeRollback(t *testing.T) {
 		t.Fatalf("Begin: %v", err)
 	}
 
-	id, err := tx.InsertNode(ctx, "RollMe", `{}`)
+	id, err := tx.InsertNode(ctx, store.DecodeLabels("RollMe"), `{}`)
 	if err != nil {
 		t.Fatalf("tx.InsertNode: %v", err)
 	}
@@ -701,11 +701,11 @@ func TestTxAtomicCommit(t *testing.T) {
 		t.Fatalf("Begin: %v", err)
 	}
 
-	n1, err := tx.InsertNode(ctx, "TxA", `{}`)
+	n1, err := tx.InsertNode(ctx, store.DecodeLabels("TxA"), `{}`)
 	if err != nil {
 		t.Fatalf("tx.InsertNode A: %v", err)
 	}
-	n2, err := tx.InsertNode(ctx, "TxB", `{}`)
+	n2, err := tx.InsertNode(ctx, store.DecodeLabels("TxB"), `{}`)
 	if err != nil {
 		t.Fatalf("tx.InsertNode B: %v", err)
 	}
@@ -737,7 +737,7 @@ func TestTxMultipleMutationsRollback(t *testing.T) {
 	ctx := context.Background()
 
 	// Insert a node that will be deleted inside the rolled-back tx.
-	persistedID, err := s.InsertNode(ctx, "Persist", `{}`)
+	persistedID, err := s.InsertNode(ctx, store.DecodeLabels("Persist"), `{}`)
 	if err != nil {
 		t.Fatalf("InsertNode: %v", err)
 	}
@@ -750,7 +750,7 @@ func TestTxMultipleMutationsRollback(t *testing.T) {
 	// Insert several new nodes inside the tx.
 	var newIDs []int64
 	for range 3 {
-		id, err := tx.InsertNode(ctx, "Tx", `{}`)
+		id, err := tx.InsertNode(ctx, store.DecodeLabels("Tx"), `{}`)
 		if err != nil {
 			t.Fatalf("tx.InsertNode: %v", err)
 		}
@@ -823,7 +823,7 @@ func TestTxGetNode(t *testing.T) {
 	_, tx := openTx(t)
 	ctx := context.Background()
 
-	id, err := tx.InsertNode(ctx, "TxGet", `{"x":1}`)
+	id, err := tx.InsertNode(ctx, store.DecodeLabels("TxGet"), `{"x":1}`)
 	if err != nil {
 		t.Fatalf("tx.InsertNode: %v", err)
 	}
@@ -834,8 +834,8 @@ func TestTxGetNode(t *testing.T) {
 	if n.ID != id {
 		t.Errorf("tx.GetNode: expected ID %d, got %d", id, n.ID)
 	}
-	if n.Labels != "TxGet" {
-		t.Errorf("tx.GetNode: expected labels %q, got %q", "TxGet", n.Labels)
+	if n.Labels.Encode() != "TxGet" {
+		t.Errorf("tx.GetNode: expected labels %q, got %q", "TxGet", n.Labels.Encode())
 	}
 }
 
@@ -845,7 +845,7 @@ func TestTxListNodes(t *testing.T) {
 	ctx := context.Background()
 
 	for range 3 {
-		if _, err := tx.InsertNode(ctx, "TxList", `{}`); err != nil {
+		if _, err := tx.InsertNode(ctx, store.DecodeLabels("TxList"), `{}`); err != nil {
 			t.Fatalf("tx.InsertNode: %v", err)
 		}
 	}
@@ -863,10 +863,10 @@ func TestTxListNodesByLabel(t *testing.T) {
 	_, tx := openTx(t)
 	ctx := context.Background()
 
-	if _, err := tx.InsertNode(ctx, "Alpha", `{}`); err != nil {
+	if _, err := tx.InsertNode(ctx, store.DecodeLabels("Alpha"), `{}`); err != nil {
 		t.Fatalf("tx.InsertNode Alpha: %v", err)
 	}
-	if _, err := tx.InsertNode(ctx, "Beta", `{}`); err != nil {
+	if _, err := tx.InsertNode(ctx, store.DecodeLabels("Beta"), `{}`); err != nil {
 		t.Fatalf("tx.InsertNode Beta: %v", err)
 	}
 
@@ -884,7 +884,7 @@ func TestTxUpdateNodeProps(t *testing.T) {
 	_, tx := openTx(t)
 	ctx := context.Background()
 
-	id, err := tx.InsertNode(ctx, "Upd", `{"v":1}`)
+	id, err := tx.InsertNode(ctx, store.DecodeLabels("Upd"), `{"v":1}`)
 	if err != nil {
 		t.Fatalf("tx.InsertNode: %v", err)
 	}
@@ -908,11 +908,11 @@ func insertTxNodes(t *testing.T, tx store.Tx) (n1, n2 int64) {
 	t.Helper()
 	ctx := context.Background()
 	var err error
-	n1, err = tx.InsertNode(ctx, "TxNodeA", `{}`)
+	n1, err = tx.InsertNode(ctx, store.DecodeLabels("TxNodeA"), `{}`)
 	if err != nil {
 		t.Fatalf("insertTxNodes: InsertNode A: %v", err)
 	}
-	n2, err = tx.InsertNode(ctx, "TxNodeB", `{}`)
+	n2, err = tx.InsertNode(ctx, store.DecodeLabels("TxNodeB"), `{}`)
 	if err != nil {
 		t.Fatalf("insertTxNodes: InsertNode B: %v", err)
 	}

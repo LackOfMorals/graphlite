@@ -14,14 +14,14 @@ tasks:
       callers (`insertNode`, `getNode`, `listNodesByLabel`, `importer.go`, `result.go`) to use
       `Labels.Encode()` / `DecodeLabels()` rather than raw comma manipulation. The underlying
       SQLite storage format (comma-separated text) does not change in this task.
-    status: pending
+    status: completed
     dependencies: []
     acceptance_criteria:
       - 'No call site in non-store code directly constructs or parses a comma-separated label string'
       - 'The public `Node.Labels` field is of type `Labels` (or consistent `[]string`)'
       - 'JSON export uses `"labels": ["Person","Employee"]` rather than `"labels": "Person,Employee"`'
       - '`go test ./...` passes with no regressions after the change'
-    completed_at: null
+    completed_at: '2026-05-27T00:00:00Z'
 
   - id: task-002
     title: 'Enforce PRAGMA foreign_keys = ON at open time'

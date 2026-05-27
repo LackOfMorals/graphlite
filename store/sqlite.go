@@ -107,7 +107,7 @@ func (s *SQLiteStore) Begin(ctx context.Context) (Tx, error) {
 // --- Node operations ---
 
 // InsertNode inserts a new node and returns its integer ID.
-func (s *SQLiteStore) InsertNode(ctx context.Context, labels string, propsJSON string) (int64, error) {
+func (s *SQLiteStore) InsertNode(ctx context.Context, labels Labels, propsJSON string) (int64, error) {
 	return insertNode(ctx, s.db, labels, propsJSON)
 }
 
@@ -219,7 +219,7 @@ func (t *sqliteTx) BeginExecTx(_ context.Context) (TxExecer, error) {
 
 // Override all operations to use the transaction's executor.
 
-func (t *sqliteTx) InsertNode(ctx context.Context, labels string, propsJSON string) (int64, error) {
+func (t *sqliteTx) InsertNode(ctx context.Context, labels Labels, propsJSON string) (int64, error) {
 	return insertNode(ctx, t.tx, labels, propsJSON)
 }
 
@@ -295,10 +295,10 @@ type querier interface {
 // Helper functions (shared between SQLiteStore and sqliteTx)
 // ============================================================================
 
-func insertNode(ctx context.Context, q querier, labels string, propsJSON string) (int64, error) {
+func insertNode(ctx context.Context, q querier, labels Labels, propsJSON string) (int64, error) {
 	res, err := q.ExecContext(ctx,
 		`INSERT INTO nodes (labels, props) VALUES (?, json(?))`,
-		labels, propsJSON,
+		labels.Encode(), propsJSON,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("store: insert node: %w", err)

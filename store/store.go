@@ -6,7 +6,51 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"fmt"
+	"strings"
 )
+
+// Labels is the ordered list of label names assigned to a node. It is stored
+// in SQLite as a comma-separated string (e.g. "Person,Employee") but exposed
+// as a typed slice throughout the Go API to prevent ad-hoc string manipulation.
+type Labels []string
+
+// Encode returns the comma-separated representation used for SQLite storage.
+// An empty or nil Labels encodes as an empty string "".
+func (l Labels) Encode() string {
+	return strings.Join(l, ",")
+}
+
+// DecodeLabels parses a comma-separated label string into a Labels value.
+// An empty input returns a nil Labels (no labels assigned).
+func DecodeLabels(s string) Labels {
+	if s == "" {
+		return nil
+	}
+	return Labels(strings.Split(s, ","))
+}
+
+// Scan implements sql.Scanner so *Labels can be used as a scan destination.
+// The database value must be a string or []byte holding a comma-separated list.
+func (l *Labels) Scan(src any) error {
+	switch v := src.(type) {
+	case string:
+		*l = DecodeLabels(v)
+	case []byte:
+		*l = DecodeLabels(string(v))
+	case nil:
+		*l = nil
+	default:
+		return fmt.Errorf("store: cannot scan %T into Labels", src)
+	}
+	return nil
+}
+
+// Value implements driver.Valuer so Labels can be stored as a comma-separated string.
+func (l Labels) Value() (driver.Value, error) {
+	return l.Encode(), nil
+}
 
 // Execer is the SQL execution surface required by the query translation layer.
 // It is satisfied by *database/sql.DB, *database/sql.Tx, and by any adapter
@@ -27,10 +71,11 @@ type TxExecer interface {
 
 // NodeRow is the raw node record as stored in SQLite.
 // Props is a JSON object encoded as a string.
-// Labels is a comma-separated list of label names (e.g. "Person,Employee").
+// Labels is the parsed list of label names; use Labels.Encode() to convert
+// back to the comma-separated storage format.
 type NodeRow struct {
 	ID     int64
-	Labels string // comma-separated label names
+	Labels Labels // parsed label names; stored as comma-separated text in SQLite
 	Props  string // JSON object
 }
 
@@ -53,9 +98,9 @@ type EdgeRow struct {
 type Store interface {
 	// --- Node operations ---
 
-	// InsertNode inserts a new node with the given comma-separated labels and
-	// JSON-encoded properties. It returns the new node's integer ID.
-	InsertNode(ctx context.Context, labels string, propsJSON string) (int64, error)
+	// InsertNode inserts a new node with the given labels and JSON-encoded
+	// properties. It returns the new node's integer ID.
+	InsertNode(ctx context.Context, labels Labels, propsJSON string) (int64, error)
 
 	// GetNode returns the node with the given ID, or sql.ErrNoRows if not found.
 	GetNode(ctx context.Context, id int64) (*NodeRow, error)

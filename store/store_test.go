@@ -19,7 +19,7 @@ func TestOpenMemory(t *testing.T) {
 
 	// Verify the store is functional by inserting a node.
 	ctx := context.Background()
-	id, err := s.InsertNode(ctx, "Test", `{"x":1}`)
+	id, err := s.InsertNode(ctx, store.DecodeLabels("Test"), `{"x":1}`)
 	if err != nil {
 		t.Fatalf("InsertNode: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestOpenFilePath(t *testing.T) {
 
 	// Verify the store is functional.
 	ctx := context.Background()
-	id, err := s.InsertNode(ctx, "FileTest", `{}`)
+	id, err := s.InsertNode(ctx, store.DecodeLabels("FileTest"), `{}`)
 	if err != nil {
 		t.Fatalf("InsertNode: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestTransactionBeginCommit(t *testing.T) {
 		t.Fatalf("Begin: %v", err)
 	}
 
-	id, err := tx.InsertNode(ctx, "TxNode", `{"key":"value"}`)
+	id, err := tx.InsertNode(ctx, store.DecodeLabels("TxNode"), `{"key":"value"}`)
 	if err != nil {
 		t.Fatalf("tx.InsertNode: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestTransactionRollback(t *testing.T) {
 		t.Fatalf("Begin: %v", err)
 	}
 
-	id, err := tx.InsertNode(ctx, "Ephemeral", `{}`)
+	id, err := tx.InsertNode(ctx, store.DecodeLabels("Ephemeral"), `{}`)
 	if err != nil {
 		t.Fatalf("tx.InsertNode: %v", err)
 	}
