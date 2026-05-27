@@ -117,128 +117,83 @@ func TestSQLiteDialect_JSONRemove(t *testing.T) {
 // LabelContains
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestSQLiteDialect_LabelContains_PredicateFormat(t *testing.T) {
-	d := sqldialect.SQLiteDialect{}
-
-	pred, args := d.LabelContains("n0.labels", "Person")
-
-	// The predicate must contain four OR branches (exact match + 3 LIKE).
-	// args has 4 values: 1 unescaped for =, 3 escaped for LIKE.
-	if len(args) != 4 {
-		t.Errorf("LabelContains args length = %d; want 4", len(args))
-	}
-	for i, a := range args {
-		if a != "Person" {
-			t.Errorf("args[%d] = %q; want %q", i, a, "Person")
-		}
-	}
-	if pred == "" {
-		t.Error("LabelContains returned empty predicate")
-	}
-	// Ensure the colExpr appears in the predicate.
-	if len(pred) == 0 {
-		t.Error("predicate is empty")
-	}
-}
-
+// TestSQLiteDialect_LabelContains_ExactSQL verifies the SQL and args emitted
+// by LabelContains for a simple label name.
 func TestSQLiteDialect_LabelContains_ExactSQL(t *testing.T) {
 	d := sqldialect.SQLiteDialect{}
 
-	want := `( n0.labels = ? OR n0.labels LIKE ? || ',%' ESCAPE '\' OR n0.labels LIKE '%,' || ? ESCAPE '\' OR n0.labels LIKE '%,' || ? || ',%' ESCAPE '\' )`
-	got, args := d.LabelContains("n0.labels", "Employee")
+	want := "EXISTS (SELECT 1 FROM node_labels WHERE node_id = n0.id AND label = ?)"
+	got, args := d.LabelContains("n0.id", "Employee")
 
 	if got != want {
 		t.Errorf("LabelContains SQL mismatch:\ngot:  %s\nwant: %s", got, want)
 	}
-	if len(args) != 4 {
-		t.Errorf("args length = %d; want 4", len(args))
+	if len(args) != 1 {
+		t.Errorf("args length = %d; want 1", len(args))
 	}
-	for i, a := range args {
-		if a != "Employee" {
-			t.Errorf("args[%d] = %v; want %q", i, a, "Employee")
-		}
+	if len(args) > 0 && args[0] != "Employee" {
+		t.Errorf("args[0] = %v; want %q", args[0], "Employee")
 	}
 }
 
-// TestSQLiteDialect_LabelContains_ColExpr verifies different column expressions
-// are correctly interpolated.
-func TestSQLiteDialect_LabelContains_ColExpr(t *testing.T) {
+// TestSQLiteDialect_LabelContains_PredicateFormat verifies the predicate is
+// non-empty and contains exactly one arg (the label name).
+func TestSQLiteDialect_LabelContains_PredicateFormat(t *testing.T) {
+	d := sqldialect.SQLiteDialect{}
+
+	pred, args := d.LabelContains("n0.id", "Person")
+
+	if pred == "" {
+		t.Error("LabelContains returned empty predicate")
+	}
+	if len(args) != 1 {
+		t.Errorf("LabelContains args length = %d; want 1", len(args))
+	}
+	if len(args) > 0 && args[0] != "Person" {
+		t.Errorf("args[0] = %q; want %q", args[0], "Person")
+	}
+}
+
+// TestSQLiteDialect_LabelContains_NodeIDExpr verifies that different node ID
+// expressions are correctly interpolated into the EXISTS subquery.
+func TestSQLiteDialect_LabelContains_NodeIDExpr(t *testing.T) {
 	d := sqldialect.SQLiteDialect{}
 
 	cases := []struct {
-		colExpr   string
-		labelName string
+		nodeIDExpr string
+		labelName  string
 	}{
-		{"n0.labels", "Person"},
-		{"n1.labels", "Company"},
-		{"nodes.labels", "Employee"},
+		{"n0.id", "Person"},
+		{"n1.id", "Company"},
+		{"startNode.id", "Employee"},
 	}
 	for _, tc := range cases {
-		pred, args := d.LabelContains(tc.colExpr, tc.labelName)
+		pred, args := d.LabelContains(tc.nodeIDExpr, tc.labelName)
 		if pred == "" {
-			t.Errorf("LabelContains(%q, %q): empty predicate", tc.colExpr, tc.labelName)
+			t.Errorf("LabelContains(%q, %q): empty predicate", tc.nodeIDExpr, tc.labelName)
 		}
-		if len(args) != 4 {
-			t.Errorf("LabelContains(%q, %q): args length = %d; want 4",
-				tc.colExpr, tc.labelName, len(args))
+		if len(args) != 1 {
+			t.Errorf("LabelContains(%q, %q): args length = %d; want 1",
+				tc.nodeIDExpr, tc.labelName, len(args))
 		}
 	}
 }
 
-// TestSQLiteDialect_LabelContains_WildcardEscaping verifies that label names
-// containing LIKE wildcard characters are escaped so they match literally.
-func TestSQLiteDialect_LabelContains_WildcardEscaping(t *testing.T) {
+// TestSQLiteDialect_LabelContains_LabelPassthrough verifies that label names
+// containing special characters (former LIKE wildcards) are passed through
+// unchanged since the predicate now uses an equality check, not LIKE.
+func TestSQLiteDialect_LabelContains_LabelPassthrough(t *testing.T) {
 	d := sqldialect.SQLiteDialect{}
 
-	cases := []struct {
-		labelName    string
-		wantExact    string // arg[0]: unescaped, used in the = branch
-		wantEscaped  string // args[1..3]: escaped, used in the LIKE branches
-	}{
-		{
-			labelName:   "50%_off",
-			wantExact:   "50%_off",
-			wantEscaped: `50\%\_off`,
-		},
-		{
-			labelName:   "100%",
-			wantExact:   "100%",
-			wantEscaped: `100\%`,
-		},
-		{
-			labelName:   "under_score",
-			wantExact:   "under_score",
-			wantEscaped: `under\_score`,
-		},
-		{
-			// Backslash must be escaped first to avoid double-escaping.
-			labelName:   `back\slash`,
-			wantExact:   `back\slash`,
-			wantEscaped: `back\\slash`,
-		},
-		{
-			// Label without wildcards: escaped value equals original.
-			labelName:   "Person",
-			wantExact:   "Person",
-			wantEscaped: "Person",
-		},
-	}
-
-	for _, tc := range cases {
-		_, args := d.LabelContains("n0.labels", tc.labelName)
-		if len(args) != 4 {
-			t.Errorf("label %q: args length = %d; want 4", tc.labelName, len(args))
+	labels := []string{"50%_off", "100%", "under_score", `back\slash`, "Person"}
+	for _, lbl := range labels {
+		_, args := d.LabelContains("n0.id", lbl)
+		if len(args) != 1 {
+			t.Errorf("label %q: args length = %d; want 1", lbl, len(args))
 			continue
 		}
-		// args[0]: unescaped value for the exact-match (=) branch.
-		if args[0] != tc.wantExact {
-			t.Errorf("label %q: args[0] (exact) = %q; want %q", tc.labelName, args[0], tc.wantExact)
-		}
-		// args[1..3]: escaped values for the LIKE branches.
-		for i := 1; i <= 3; i++ {
-			if args[i] != tc.wantEscaped {
-				t.Errorf("label %q: args[%d] (LIKE) = %q; want %q", tc.labelName, i, args[i], tc.wantEscaped)
-			}
+		if args[0] != lbl {
+			t.Errorf("label %q: args[0] = %q; want original value", lbl, args[0])
 		}
 	}
 }
@@ -282,7 +237,7 @@ func TestDialect_InterfaceConformance(t *testing.T) {
 			if got := di.JSONRemove("t.props", "$.key"); got == "" {
 				t.Error("JSONRemove returned empty string")
 			}
-			pred, args := di.LabelContains("t.labels", "Label")
+			pred, args := di.LabelContains("t.id", "Label")
 			if pred == "" {
 				t.Error("LabelContains returned empty predicate")
 			}
