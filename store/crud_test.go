@@ -797,11 +797,10 @@ func TestNestedTransactionError(t *testing.T) {
 }
 
 // ============================================================
-// Transaction delegate method coverage (task-021)
-// The sqliteTx type delegates each operation to the shared helpers via the
-// embedded *sql.Tx executor. These tests ensure the delegate methods are
-// exercised (they appear as 0% uncovered in the coverage report even though
-// the helpers themselves are tested above via the direct store path).
+// Transaction method coverage (task-021)
+// SQLiteStore uses a single querier field (set to *sql.Tx inside a transaction)
+// so all CRUD methods are shared. These tests exercise the transaction path to
+// ensure coverage of the *sql.Tx code path through each helper function.
 // ============================================================
 
 // openTx opens an in-memory store and begins a transaction.

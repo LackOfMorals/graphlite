@@ -48,3 +48,27 @@ Key Decisions:
 - No existing tests required changes; all edge insert tests already inserted the referenced nodes first
 
 Next Task: task-003
+
+================================================================================
+TASK-003: Refactor sqliteTx: collapse 14-method override duplication
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Eliminated the `sqliteTx` struct and its 14 per-method forwarding overrides.
+`SQLiteStore` now holds a `q querier` field (the existing interface) set to
+`*sql.DB` at Open time and to `*sql.Tx` inside Begin. A `tx *sql.Tx` field
+tracks whether the store is in a transaction; Commit/Rollback guard on this.
+`Begin` returns a `*SQLiteStore` with `q` and `tx` set. Added compile-time
+interface assertions. Net result: 180 lines removed from sqlite.go.
+
+Files Changed:
+- store/sqlite.go (removed sqliteTx, added q/tx fields to SQLiteStore, updated Begin/Commit/Rollback)
+- store/crud_test.go (minor test adjustments for new structure)
+- .plans/tasks-skill-review-remediation.yml (task-003 marked completed)
+
+Key Decisions:
+- Snapshot() still uses s.db.Exec() (not s.q) — snapshots of in-progress transactions intentionally reflect committed state only, consistent with prior behaviour
+- Commit/Rollback return a sentinel error when called on a non-transactional SQLiteStore; task-012 will make Rollback idempotent after Commit
+
+Next Task: task-004

@@ -49,14 +49,14 @@ tasks:
       `Begin` should return a `*SQLiteStore` with the `querier` set to the transaction. Review all
       `SQLiteStore.DB()` callers before removing the field. This is prerequisite infrastructure
       for the junction table work in task-008.
-    status: pending
+    status: completed
     dependencies: [task-002]
     acceptance_criteria:
       - '`store/sqlite.go` no longer contains a `sqliteTx` struct'
       - 'No per-method forwarding overrides remain for `sqliteTx`'
       - 'All existing `store/crud_test.go` and `store/store_test.go` tests pass'
       - '`go vet ./...` and `golangci-lint run` produce no new findings'
-    completed_at: null
+    completed_at: '2026-05-27T00:00:00Z'
 
   - id: task-004
     title: 'Fix RawExpr SQL injection: return error instead of interpolating verbatim'
