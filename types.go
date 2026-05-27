@@ -1,13 +1,9 @@
-// Package graphlite provides an embedded, file-based property graph database
-// queryable via a subset of openCypher. It is designed as a zero-infrastructure
-// local substitute for Neo4j Aura in testing and development workflows.
 package graphlite
 
 import "fmt"
 
 // Node represents a graph node with a unique element ID, a set of labels, and
-// a map of properties. All fields map directly to the Neo4j driver's Node type
-// so that DriverCompat results can be used interchangeably.
+// a map of properties.
 type Node struct {
 	// ElementId is the stable string identifier for this node, derived from the
 	// underlying SQLite integer primary key.
@@ -20,8 +16,7 @@ type Node struct {
 	Props map[string]any
 }
 
-// Relationship represents a directed graph edge between two nodes. All fields
-// map directly to the Neo4j driver's Relationship type.
+// Relationship represents a directed graph edge between two nodes.
 type Relationship struct {
 	// ElementId is the stable string identifier for this relationship.
 	ElementId string
@@ -47,11 +42,11 @@ type Record struct {
 	values []any
 }
 
-// NewRecord constructs a Record from parallel slices of keys and values.
-// The two slices must have the same length; if they do not, NewRecord panics.
-func NewRecord(keys []string, values []any) *Record {
+// newRecord constructs a Record from parallel slices of keys and values.
+// The two slices must have the same length; if they do not, newRecord panics.
+func newRecord(keys []string, values []any) *Record {
 	if len(keys) != len(values) {
-		panic(fmt.Sprintf("graphlite: NewRecord: keys length %d != values length %d", len(keys), len(values)))
+		panic(fmt.Sprintf("graphlite: newRecord: keys length %d != values length %d", len(keys), len(values)))
 	}
 	k := make([]string, len(keys))
 	v := make([]any, len(values))
@@ -162,3 +157,11 @@ func (e *ErrImportTooLarge) Error() string {
 // ErrReadOnly is returned when a write query is executed against a database
 // opened with WithReadOnly().
 var ErrReadOnly = fmt.Errorf("graphlite: database is read-only")
+
+// ErrNoRecords is returned by Result.Single when the result set contains no
+// records. It is a sentinel value and can be checked with errors.Is.
+var ErrNoRecords = fmt.Errorf("graphlite: result contains no records")
+
+// ErrMultipleRecords is returned by Result.Single when the result set contains
+// more than one record. It is a sentinel value and can be checked with errors.Is.
+var ErrMultipleRecords = fmt.Errorf("graphlite: result contains multiple records")

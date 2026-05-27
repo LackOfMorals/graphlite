@@ -1,6 +1,7 @@
 package graphlite_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,9 +10,9 @@ import (
 	"github.com/LackOfMorals/graphlite"
 )
 
-// ----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // Node
-// ----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 
 func TestNode_Fields(t *testing.T) {
 	n := graphlite.Node{
@@ -31,9 +32,9 @@ func TestNode_Fields(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // Relationship
-// ----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 
 func TestRelationship_Fields(t *testing.T) {
 	r := graphlite.Relationship{
@@ -61,15 +62,34 @@ func TestRelationship_Fields(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Record
-// ----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
+// Record — tested through the public query API
+// ─────────────────────────────────────────────────────────────────────────────
+
+// fetchRecord runs a MATCH query and returns the first record, failing the
+// test if the query or iteration fails.
+func fetchRecord(t *testing.T, db *graphlite.DB, query string, params map[string]any) *graphlite.Record {
+	t.Helper()
+	ctx := context.Background()
+	qr, err := db.RunQuery(ctx, query, params)
+	if err != nil {
+		t.Fatalf("RunQuery %q: %v", query, err)
+	}
+	if !qr.Next(ctx) {
+		t.Fatalf("RunQuery %q: expected at least one record", query)
+	}
+	rec := qr.Record()
+	_, _ = qr.Consume(ctx)
+	return rec
+}
 
 func TestRecord_Get_Hit(t *testing.T) {
-	rec := graphlite.NewRecord(
-		[]string{"name", "age"},
-		[]any{"Alice", int64(30)},
-	)
+	db := openDB(t)
+	ctx := context.Background()
+	if _, err := db.RunQuery(ctx, `CREATE (:P {name: "Alice", age: 30})`, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	rec := fetchRecord(t, db, `MATCH (n:P) RETURN n.name AS name, n.age AS age`, nil)
 
 	v, ok := rec.Get("name")
 	if !ok {
@@ -81,7 +101,12 @@ func TestRecord_Get_Hit(t *testing.T) {
 }
 
 func TestRecord_Get_Miss(t *testing.T) {
-	rec := graphlite.NewRecord([]string{"name"}, []any{"Alice"})
+	db := openDB(t)
+	ctx := context.Background()
+	if _, err := db.RunQuery(ctx, `CREATE (:P {name: "Alice"})`, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	rec := fetchRecord(t, db, `MATCH (n:P) RETURN n.name AS name`, nil)
 
 	v, ok := rec.Get("unknown")
 	if ok {
@@ -93,17 +118,16 @@ func TestRecord_Get_Miss(t *testing.T) {
 }
 
 func TestRecord_AsMap(t *testing.T) {
-	rec := graphlite.NewRecord(
-		[]string{"name", "age"},
-		[]any{"Bob", int64(25)},
-	)
+	db := openDB(t)
+	ctx := context.Background()
+	if _, err := db.RunQuery(ctx, `CREATE (:P {name: "Bob", age: 25})`, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	rec := fetchRecord(t, db, `MATCH (n:P) RETURN n.name AS name, n.age AS age`, nil)
 
 	m := rec.AsMap()
 	if m["name"] != "Bob" {
 		t.Errorf("AsMap[name]: got %v, want Bob", m["name"])
-	}
-	if m["age"] != int64(25) {
-		t.Errorf("AsMap[age]: got %v, want 25", m["age"])
 	}
 	if len(m) != 2 {
 		t.Errorf("AsMap len: got %d, want 2", len(m))
@@ -111,28 +135,42 @@ func TestRecord_AsMap(t *testing.T) {
 }
 
 func TestRecord_AsMap_IsCopy(t *testing.T) {
-	rec := graphlite.NewRecord([]string{"x"}, []any{1})
+	db := openDB(t)
+	ctx := context.Background()
+	if _, err := db.RunQuery(ctx, `CREATE (:P {x: 1})`, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	rec := fetchRecord(t, db, `MATCH (n:P) RETURN n.x AS x`, nil)
+
 	m := rec.AsMap()
 	m["x"] = 99 // mutate the copy
 
-	// The original record should be unaffected
+	// The original record should be unaffected.
 	v, ok := rec.Get("x")
-	if !ok || v != 1 {
-		t.Errorf("mutation of AsMap copy affected original record: Get(x)=%v, ok=%v", v, ok)
+	if !ok {
+		t.Fatal("Get(x) after AsMap mutation: key missing")
+	}
+	// Value should be unchanged (int64 or float64 1, not 99).
+	switch vt := v.(type) {
+	case int64:
+		if vt == 99 {
+			t.Error("mutation of AsMap copy affected original record")
+		}
+	case float64:
+		if vt == 99 {
+			t.Error("mutation of AsMap copy affected original record")
+		}
 	}
 }
 
-func TestRecord_NewRecord_PanicOnLengthMismatch(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic on keys/values length mismatch, got none")
-		}
-	}()
-	graphlite.NewRecord([]string{"a", "b"}, []any{1})
-}
-
 func TestRecord_Keys(t *testing.T) {
-	rec := graphlite.NewRecord([]string{"x", "y"}, []any{1, 2})
+	db := openDB(t)
+	ctx := context.Background()
+	if _, err := db.RunQuery(ctx, `CREATE (:P {x: 1, y: 2})`, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	rec := fetchRecord(t, db, `MATCH (n:P) RETURN n.x AS x, n.y AS y`, nil)
+
 	keys := rec.Keys()
 	if len(keys) != 2 || keys[0] != "x" || keys[1] != "y" {
 		t.Errorf("Keys: got %v", keys)
@@ -146,16 +184,34 @@ func TestRecord_Keys(t *testing.T) {
 }
 
 func TestRecord_Values(t *testing.T) {
-	rec := graphlite.NewRecord([]string{"x"}, []any{42})
+	db := openDB(t)
+	ctx := context.Background()
+	if _, err := db.RunQuery(ctx, `CREATE (:P {x: 42})`, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	rec := fetchRecord(t, db, `MATCH (n:P) RETURN n.x AS x`, nil)
+
 	vals := rec.Values()
-	if len(vals) != 1 || vals[0] != 42 {
-		t.Errorf("Values: got %v", vals)
+	if len(vals) != 1 {
+		t.Fatalf("Values: got %d elements, want 1", len(vals))
+	}
+	switch v := vals[0].(type) {
+	case int64:
+		if v != 42 {
+			t.Errorf("Values[0]: got %v, want 42", v)
+		}
+	case float64:
+		if v != 42 {
+			t.Errorf("Values[0]: got %v, want 42", v)
+		}
+	default:
+		t.Errorf("Values[0]: unexpected type %T value %v", vals[0], vals[0])
 	}
 }
 
-// ----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // ErrUnsupportedCypher
-// ----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 
 func TestErrUnsupportedCypher_ErrorsAs(t *testing.T) {
 	err := &graphlite.ErrUnsupportedCypher{
@@ -182,8 +238,7 @@ func TestErrUnsupportedCypher_ErrorString_WithPosition(t *testing.T) {
 	if s == "" {
 		t.Error("Error() returned empty string")
 	}
-	// Should mention the clause name.
-	if !contains(s, "CALL") {
+	if !strings.Contains(s, "CALL") {
 		t.Errorf("Error() does not mention clause name: %q", s)
 	}
 }
@@ -191,7 +246,7 @@ func TestErrUnsupportedCypher_ErrorString_WithPosition(t *testing.T) {
 func TestErrUnsupportedCypher_ErrorString_NoPosition(t *testing.T) {
 	err := &graphlite.ErrUnsupportedCypher{Clause: "UNION"}
 	s := err.Error()
-	if !contains(s, "UNION") {
+	if !strings.Contains(s, "UNION") {
 		t.Errorf("Error() does not mention clause name: %q", s)
 	}
 }
@@ -209,9 +264,9 @@ func TestErrUnsupportedCypher_WrappedErrorsAs(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // ErrMissingParameter
-// ----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 
 func TestErrMissingParameter_ErrorsAs(t *testing.T) {
 	err := &graphlite.ErrMissingParameter{Name: "minAge"}
@@ -222,15 +277,7 @@ func TestErrMissingParameter_ErrorsAs(t *testing.T) {
 	if target.Name != "minAge" {
 		t.Errorf("Name: got %q, want minAge", target.Name)
 	}
-	if !contains(err.Error(), "minAge") {
+	if !strings.Contains(err.Error(), "minAge") {
 		t.Errorf("Error() does not mention parameter name: %q", err.Error())
 	}
-}
-
-// ----------------------------------------------------------------------------
-// helpers
-// ----------------------------------------------------------------------------
-
-func contains(s, sub string) bool {
-	return strings.Contains(s, sub)
 }

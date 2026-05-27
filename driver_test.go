@@ -92,7 +92,7 @@ func TestWithBusyTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open with WithBusyTimeout: %v", err)
 	}
-	defer db.Close(context.Background())
+	defer func() { _ = db.Close(context.Background()) }()
 }
 
 // TestWithReadOnly verifies that read queries succeed and write queries return
@@ -111,7 +111,7 @@ func TestWithReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open ro: %v", err)
 	}
-	defer ro.Close(ctx)
+	defer func() { _ = ro.Close(ctx) }()
 
 	// Reads on an empty read-only db must succeed (empty result, no error).
 	if _, err := ro.RunQuery(ctx, `MATCH (n:Person) RETURN n.name AS name`, nil); err != nil {
@@ -306,15 +306,15 @@ func TestBeginTx_CommitPersists(t *testing.T) {
 	ctx := context.Background()
 	db := openMemDB(t)
 
-	tx, err := db.BeginTx(ctx, false)
+	tx, err := db.BeginTx(ctx)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
 	if _, err := tx.Run(ctx, `CREATE (n:TxNode {val: "committed"})`, nil); err != nil {
-		_ = tx.Rollback(ctx)
+		_ = tx.Rollback()
 		t.Fatalf("tx.Run: %v", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := tx.Commit(); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 
@@ -339,15 +339,15 @@ func TestBeginTx_RollbackReverts(t *testing.T) {
 	ctx := context.Background()
 	db := openMemDB(t)
 
-	tx, err := db.BeginTx(ctx, false)
+	tx, err := db.BeginTx(ctx)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
 	if _, err := tx.Run(ctx, `CREATE (n:RollbackNode {val: "ephemeral"})`, nil); err != nil {
-		_ = tx.Rollback(ctx)
+		_ = tx.Rollback()
 		t.Fatalf("tx.Run: %v", err)
 	}
-	if err := tx.Rollback(ctx); err != nil {
+	if err := tx.Rollback(); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 
@@ -367,11 +367,11 @@ func TestBeginTx_ClosedAfterCommit(t *testing.T) {
 	ctx := context.Background()
 	db := openMemDB(t)
 
-	tx, err := db.BeginTx(ctx, false)
+	tx, err := db.BeginTx(ctx)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := tx.Commit(); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	// A second Run should fail because the Tx is closed.
@@ -386,11 +386,11 @@ func TestBeginTx_ClosedAfterRollback(t *testing.T) {
 	ctx := context.Background()
 	db := openMemDB(t)
 
-	tx, err := db.BeginTx(ctx, false)
+	tx, err := db.BeginTx(ctx)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
-	if err := tx.Rollback(ctx); err != nil {
+	if err := tx.Rollback(); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	_, err = tx.Run(ctx, `MATCH (n) RETURN n`, nil)

@@ -9,14 +9,14 @@ import (
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
-// QueryResult — lazy streaming result cursor
+// Result — lazy streaming result cursor
 // ─────────────────────────────────────────────────────────────────────────────
 
-// QueryResult is a lazy streaming cursor over a set of query result records.
+// Result is a lazy streaming cursor over a set of query result records.
 // Call Next to advance the cursor, Record to read the current row, and
 // Err to check for iteration errors. Always call Consume or allow the
 // iteration to exhaust the result to release underlying resources.
-type QueryResult struct {
+type Result struct {
 	rows     *sql.Rows
 	keys     []string
 	record   *Record
@@ -30,31 +30,31 @@ type QueryResult struct {
 	inMemoryPos int
 }
 
-// NewQueryResultFromRows constructs a QueryResult, deriving column names from
+// newResultFromRows constructs a Result, deriving column names from
 // the *sql.Rows itself. Returns an error if column names cannot be read.
-func NewQueryResultFromRows(rows *sql.Rows) (*QueryResult, error) {
+func newResultFromRows(rows *sql.Rows) (*Result, error) {
 	cols, err := rows.Columns()
 	if err != nil {
 		return nil, fmt.Errorf("graphlite: read column names: %w", err)
 	}
-	return &QueryResult{rows: rows, keys: cols}, nil
+	return &Result{rows: rows, keys: cols}, nil
 }
 
-// newInMemoryQueryResult constructs a QueryResult backed by a pre-collected
+// newInMemoryResult constructs a Result backed by a pre-collected
 // slice of records. Used by the write-then-select execution path when multiple
 // result rows must be assembled from several SELECT calls.
-func newInMemoryQueryResult(keys []string, records []*Record) *QueryResult {
+func newInMemoryResult(keys []string, records []*Record) *Result {
 	if records == nil {
 		records = []*Record{}
 	}
-	return &QueryResult{
+	return &Result{
 		keys:     keys,
 		inMemory: records,
 	}
 }
 
 // Keys returns the projection key names for this result set.
-func (r *QueryResult) Keys() []string {
+func (r *Result) Keys() []string {
 	out := make([]string, len(r.keys))
 	copy(out, r.keys)
 	return out
@@ -62,7 +62,7 @@ func (r *QueryResult) Keys() []string {
 
 // Next advances the cursor to the next record. Returns true if a record is
 // available; false when the result set is exhausted or an error occurred.
-func (r *QueryResult) Next(_ context.Context) bool {
+func (r *Result) Next(_ context.Context) bool {
 	if r.consumed || r.err != nil {
 		return false
 	}
@@ -99,18 +99,18 @@ func (r *QueryResult) Next(_ context.Context) bool {
 	for i, v := range rawVals {
 		vals[i] = mapColumnValue(v)
 	}
-	r.record = NewRecord(r.keys, vals)
+	r.record = newRecord(r.keys, vals)
 	return true
 }
 
 // Record returns the current record. Returns nil if Next has not been called
 // or if the cursor is exhausted.
-func (r *QueryResult) Record() *Record {
+func (r *Result) Record() *Record {
 	return r.record
 }
 
 // Err returns the first error encountered during iteration.
-func (r *QueryResult) Err() error {
+func (r *Result) Err() error {
 	return r.err
 }
 
@@ -118,7 +118,7 @@ func (r *QueryResult) Err() error {
 // returns the ResultSummary. After Consume returns the cursor is closed.
 // Consume is safe to call on a write result (where rows is nil) and on
 // in-memory results.
-func (r *QueryResult) Consume(_ context.Context) (ResultSummary, error) {
+func (r *Result) Consume(_ context.Context) (ResultSummary, error) {
 	if r.inMemory != nil {
 		r.consumed = true
 		return &resultSummary{counters: r.counters}, r.err
@@ -143,7 +143,7 @@ func (r *QueryResult) Consume(_ context.Context) (ResultSummary, error) {
 // Collect drains all remaining records into a slice and closes the cursor.
 // Collect is safe to call on a write result (where rows is nil) and on
 // in-memory results.
-func (r *QueryResult) Collect(ctx context.Context) ([]*Record, error) {
+func (r *Result) Collect(ctx context.Context) ([]*Record, error) {
 	// Fast path for in-memory results: return remaining records directly.
 	if r.inMemory != nil {
 		recs := r.inMemory[r.inMemoryPos:]
@@ -159,77 +159,59 @@ func (r *QueryResult) Collect(ctx context.Context) ([]*Record, error) {
 		rec := r.Record()
 		recs = append(recs, rec)
 	}
+	if r.rows != nil {
+		if err := r.rows.Close(); err != nil && r.err == nil {
+			r.err = err
+		}
+		r.rows = nil
+	}
+	r.consumed = true
 	if r.err != nil {
 		return nil, r.err
 	}
-	if r.rows != nil {
-		if err := r.rows.Close(); err != nil {
-			return nil, err
-		}
-	}
-	r.consumed = true
 	return recs, nil
 }
 
-// QueryCounters is the exported form of write-operation statistics, used by
-// callers that need to set counter values on a QueryResult (e.g. the execution
-// layer in driver.go after running CREATE / SET / DELETE statements).
-type QueryCounters struct {
-	NodesCreated         int
-	NodesDeleted         int
-	RelationshipsCreated int
-	RelationshipsDeleted int
-	PropertiesSet        int
+// Single returns the one and only record from the result set. It is a
+// convenience method for queries expected to return exactly one row.
+//
+//   - If the result set is empty, Single returns (nil, ErrNoRecords).
+//   - If the result set has exactly one record, Single returns that record and nil.
+//   - If the result set has two or more records, Single drains the cursor and
+//     returns (nil, ErrMultipleRecords).
+//
+// Single always closes the cursor before returning.
+func (r *Result) Single(ctx context.Context) (*Record, error) {
+	if !r.Next(ctx) {
+		// Drain and close.
+		_, _ = r.Consume(ctx)
+		if r.err != nil {
+			return nil, r.err
+		}
+		return nil, ErrNoRecords
+	}
+	rec := r.Record()
+
+	// Check whether a second record exists.
+	if r.Next(ctx) {
+		// Drain remaining records before returning. Any drain/close error is
+		// secondary to ErrMultipleRecords, which is the primary signal here.
+		_, _ = r.Consume(ctx)
+		return nil, ErrMultipleRecords
+	}
+
+	// Exactly one record — close the cursor cleanly.
+	_, _ = r.Consume(ctx)
+	if r.err != nil {
+		return nil, r.err
+	}
+	return rec, nil
 }
 
-// SetCounters attaches write-operation counters to this result. It is called
+// setCounters attaches write-operation counters to this result. It is called
 // by the execution layer after executing write statements.
-func (r *QueryResult) SetCounters(c QueryCounters) {
-	r.counters = queryCounters{
-		nodesCreated:         c.NodesCreated,
-		nodesDeleted:         c.NodesDeleted,
-		relationshipsCreated: c.RelationshipsCreated,
-		relationshipsDeleted: c.RelationshipsDeleted,
-		propertiesSet:        c.PropertiesSet,
-	}
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// EagerResult — pre-collected result
-// ─────────────────────────────────────────────────────────────────────────────
-
-// EagerResult is a pre-collected result containing all records and a summary.
-// It is returned by operations that exhaust the result set immediately (e.g.
-// the DriverCompat ExecuteQuery tier using EagerResultTransformer).
-type EagerResult struct {
-	// Keys is the ordered list of projection key names.
-	Keys []string
-	// Records contains all records returned by the query.
-	Records []*Record
-	// Summary contains execution statistics.
-	Summary ResultSummary
-}
-
-// NewEagerResult drains a QueryResult and returns an EagerResult.
-func NewEagerResult(ctx context.Context, qr *QueryResult) (*EagerResult, error) {
-	return newEagerResult(ctx, qr)
-}
-
-// newEagerResult drains a QueryResult and returns an EagerResult.
-func newEagerResult(ctx context.Context, qr *QueryResult) (*EagerResult, error) {
-	recs, err := qr.Collect(ctx)
-	if err != nil {
-		return nil, err
-	}
-	sum, err := qr.Consume(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &EagerResult{
-		Keys:    qr.Keys(),
-		Records: recs,
-		Summary: sum,
-	}, nil
+func (r *Result) setCounters(c queryCounters) {
+	r.counters = c
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -296,13 +278,6 @@ func (c *counters) ContainsUpdates() bool {
 // ─────────────────────────────────────────────────────────────────────────────
 // Column value mapper
 // ─────────────────────────────────────────────────────────────────────────────
-
-// MapColumnValue is the exported form of mapColumnValue, exposed for testing.
-// Production callers should use mapColumnValue directly.
-func MapColumnValue(v any) any { return mapColumnValue(v) }
-
-// SplitLabels is the exported form of splitLabels, exposed for testing.
-func SplitLabels(s string) []string { return splitLabels(s) }
 
 // mapColumnValue converts a raw SQLite column value to a graph type.
 //

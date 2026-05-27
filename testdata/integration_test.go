@@ -35,8 +35,28 @@ func openDB(t *testing.T) *graphlite.DB {
 	if err != nil {
 		t.Fatalf("Open :memory: failed: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() { _ = db.Close(context.Background()) })
 	return db
+}
+
+// eagerResult holds the fully-collected output of a graphlite query so that
+// tests can index into Records and inspect Summary counters without managing
+// the streaming cursor themselves.
+type eagerResult struct {
+	Records []*graphlite.Record
+	Summary graphlite.ResultSummary
+}
+
+// collectResult drains qr into an eagerResult, failing the test on error.
+// It first collects all records, then calls Consume to obtain the summary
+// (Consume after Collect is idempotent and returns counters from the result).
+func collectResult(ctx context.Context, qr *graphlite.Result) (*eagerResult, error) {
+	recs, err := qr.Collect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sum, _ := qr.Consume(ctx) // idempotent after Collect; counters are already set
+	return &eagerResult{Records: recs, Summary: sum}, nil
 }
 
 // setup runs one or more setup Cypher statements against db, failing the test
@@ -55,17 +75,17 @@ func setup(t *testing.T, db *graphlite.DB, queries ...string) {
 	}
 }
 
-// query runs a Cypher query and returns an EagerResult, failing the test on
-// any error. The failure message includes the original query string so test
+// query runs a Cypher query, collects all records into an eagerResult, and
+// returns it. The failure message includes the original query string so test
 // output is self-explanatory.
-func query(t *testing.T, db *graphlite.DB, cypher string, params map[string]any) *graphlite.EagerResult {
+func query(t *testing.T, db *graphlite.DB, cypher string, params map[string]any) *eagerResult {
 	t.Helper()
 	ctx := context.Background()
 	qr, err := db.RunQuery(ctx, cypher, params)
 	if err != nil {
 		t.Fatalf("query %q failed: %v", cypher, err)
 	}
-	result, err := graphlite.NewEagerResult(ctx, qr)
+	result, err := collectResult(ctx, qr)
 	if err != nil {
 		t.Fatalf("collect result for %q failed: %v", cypher, err)
 	}
@@ -74,7 +94,7 @@ func query(t *testing.T, db *graphlite.DB, cypher string, params map[string]any)
 
 // assertCount fails if the result does not contain exactly n records,
 // reporting the query and expected/actual counts.
-func assertCount(t *testing.T, cypher string, result *graphlite.EagerResult, n int) {
+func assertCount(t *testing.T, cypher string, result *eagerResult, n int) {
 	t.Helper()
 	if len(result.Records) != n {
 		t.Errorf("query %q: expected %d record(s), got %d", cypher, n, len(result.Records))
@@ -82,7 +102,7 @@ func assertCount(t *testing.T, cypher string, result *graphlite.EagerResult, n i
 }
 
 // get returns the value for key from record[i], failing if absent.
-func get(t *testing.T, cypher string, result *graphlite.EagerResult, i int, key string) any {
+func get(t *testing.T, cypher string, result *eagerResult, i int, key string) any {
 	t.Helper()
 	if i >= len(result.Records) {
 		t.Fatalf("query %q: record index %d out of range (got %d records)", cypher, i, len(result.Records))
@@ -582,7 +602,7 @@ func TestIntegration_NamedParams_CreateProperty(t *testing.T) {
 	ctx := context.Background()
 
 	// Use a transaction to CREATE with params then query.
-	tx, err := db.BeginTx(ctx, false)
+	tx, err := db.BeginTx(ctx)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
@@ -772,7 +792,7 @@ func TestIntegration_SetProperty_Param(t *testing.T) {
 
 	setup(t, db, `CREATE (n:Config {key: "timeout", value: 30})`)
 
-	tx, err := db.BeginTx(ctx, false)
+	tx, err := db.BeginTx(ctx)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
@@ -946,7 +966,7 @@ func TestIntegration_Transaction_CommitPersists(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
-	tx, err := db.BeginTx(ctx, false)
+	tx, err := db.BeginTx(ctx)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
@@ -972,7 +992,7 @@ func TestIntegration_Transaction_RollbackReverts(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
-	tx, err := db.BeginTx(ctx, false)
+	tx, err := db.BeginTx(ctx)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
@@ -1205,9 +1225,9 @@ func TestIntegration_FailureReporting_HarnessCheck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunQuery failed: %v", err)
 	}
-	result, err := graphlite.NewEagerResult(ctx, qr)
+	result, err := collectResult(ctx, qr)
 	if err != nil {
-		t.Fatalf("NewEagerResult failed: %v", err)
+		t.Fatalf("collectResult failed: %v", err)
 	}
 
 	if len(result.Records) != 1 {
@@ -1999,7 +2019,7 @@ func TestIntegration_Merge_CreatesOnFirstRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MERGE create: %v", err)
 	}
-	eager, err := graphlite.NewEagerResult(context.Background(), qr)
+	eager, err := collectResult(context.Background(), qr)
 	if err != nil {
 		t.Fatalf("MERGE consume: %v", err)
 	}
@@ -2024,7 +2044,7 @@ func TestIntegration_Merge_MatchesOnSubsequentRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MERGE match: %v", err)
 	}
-	eager, err := graphlite.NewEagerResult(context.Background(), qr)
+	eager, err := collectResult(context.Background(), qr)
 	if err != nil {
 		t.Fatalf("MERGE consume: %v", err)
 	}
@@ -2270,7 +2290,7 @@ func setupChain(t *testing.T) *graphlite.DB {
 }
 
 // collectNames returns the set of b_name values from the result.
-func collectNames(result *graphlite.EagerResult) map[string]bool {
+func collectNames(result *eagerResult) map[string]bool {
 	names := make(map[string]bool)
 	for _, rec := range result.Records {
 		if v, ok := rec.Get("b_name"); ok {

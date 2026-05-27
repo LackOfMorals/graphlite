@@ -1,43 +1,32 @@
-// Package graphlite is an embedded property graph database for Go.
+// Package graphlite is a zero-infrastructure embedded property graph database
+// for Go.
 //
 // graphlite stores a labelled property graph in a local SQLite file and
-// accepts queries written in openCypher. It implements the neo4j-go-driver
-// v6 API so that application code written against [neo4j.Driver] can switch
-// between a real Neo4j instance and an in-process graphlite database with a
-// one-line change.
+// accepts queries written in openCypher. There is no external process to run,
+// no driver dependency, and no network — just open a file and query.
 //
 // # Quick start
 //
-// Native API — lowest dependency, suitable for tools and scripts:
-//
 //	db, err := graphlite.Open(":memory:")
 //	result, err := db.RunQuery(ctx, `MATCH (n:Person) RETURN n.name AS name`, nil)
+//	for result.Next(ctx) {
+//	    fmt.Println(result.Record().Values()[0])
+//	}
 //
-// Driver compat — drop-in for code already using the Neo4j Go driver:
+// For explicit transaction control:
 //
-//	driver, err := graphlite.NewDriver(":memory:", nil)
-//	result, err := neo4j.ExecuteQuery(ctx, driver, `MATCH (n:Person) RETURN n.name`, nil, neo4j.EagerResultTransformer)
+//	tx, err := db.BeginTx(ctx)
+//	result, err := tx.Run(ctx, `CREATE (n:Person {name: $name})`, map[string]any{"name": "Alice"})
+//	err = tx.Commit()
 //
 // In tests, use [NewTestDB] to open an in-memory database that is closed
 // automatically when the test ends:
 //
 //	db := graphlite.NewTestDB(t)
 //
-// # Switching between graphlite and Neo4j
-//
-// Both implement [neo4j.DriverWithContext]. A constructor that reads from the
-// environment is the recommended pattern:
-//
-//	func newDriver(ctx context.Context) (neo4j.DriverWithContext, error) {
-//	    if uri := os.Getenv("NEO4J_URI"); uri != "" {
-//	        return neo4j.NewDriverWithContext(uri, neo4j.BasicAuth(...))
-//	    }
-//	    return graphlite.NewDriver(":memory:", nil)
-//	}
-//
 // # Options
 //
-// Pass functional options to [Open] or [NewDriver] to tune behaviour:
+// Pass functional options to [Open] to tune behaviour:
 //
 //	db, err := graphlite.Open("graph.db",
 //	    graphlite.WithBusyTimeout(5*time.Second),
@@ -52,6 +41,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/LackOfMorals/graphlite/cypher"
@@ -93,10 +83,8 @@ func Open(path string, opts ...Option) (*DB, error) {
 		if dir, err := filepath.EvalSymlinks(filepath.Dir(cleaned)); err == nil {
 			cleaned = filepath.Join(dir, filepath.Base(cleaned))
 		}
-		for _, part := range strings.Split(cleaned, string(filepath.Separator)) {
-			if part == ".." {
-				return nil, fmt.Errorf("graphlite: Open: path traversal not allowed: %q", path)
-			}
+		if slices.Contains(strings.Split(cleaned, string(filepath.Separator)), "..") {
+			return nil, fmt.Errorf("graphlite: Open: path traversal not allowed: %q", path)
 		}
 	}
 
@@ -127,33 +115,6 @@ func (d *DB) Snapshot(path string) error {
 	return sn.Snapshot(path)
 }
 
-// NewDriver opens (or creates) a graphlite database at path and returns a *DB
-// that satisfies the [Driver] interface. It is a convenience alias for [Open]
-// for callers that prefer the neo4j-style constructor name.
-//
-// auth is accepted for API familiarity with the Neo4j Go driver but is silently
-// ignored — graphlite has no authentication layer.
-func NewDriver(path string, _ AuthToken, opts ...Option) (*DB, error) {
-	return Open(path, opts...)
-}
-
-// AuthToken is accepted by [NewDriver] for API compatibility with the Neo4j Go
-// driver. graphlite has no authentication layer; all tokens are ignored.
-type AuthToken struct{}
-
-// NoAuth returns an empty AuthToken. It mirrors neo4j.NoAuth() so that
-// call sites need only change the import when switching drivers.
-func NoAuth() AuthToken { return AuthToken{} }
-
-// NewSession creates a new [Session] backed by this database.
-func (d *DB) NewSession(_ context.Context) Session {
-	return &session{db: d}
-}
-
-// VerifyConnectivity always returns nil — graphlite is an in-process database
-// and is always reachable.
-func (d *DB) VerifyConnectivity(_ context.Context) error { return nil }
-
 // Close releases all resources held by the database. Subsequent calls on a
 // closed DB return errors.
 func (d *DB) Close(_ context.Context) error {
@@ -164,13 +125,13 @@ func (d *DB) Close(_ context.Context) error {
 }
 
 // RunQuery executes cypherStr in auto-commit mode and returns a lazy
-// QueryResult cursor. The caller must consume or exhaust the result to release
+// Result cursor. The caller must consume or exhaust the result to release
 // underlying resources.
 //
 // params may be nil if the query has no parameters.
 // Returns ErrReadOnly if the database was opened with WithReadOnly and the
 // query contains write statements.
-func (d *DB) RunQuery(ctx context.Context, cypherStr string, params map[string]any) (*QueryResult, error) {
+func (d *DB) RunQuery(ctx context.Context, cypherStr string, params map[string]any) (*Result, error) {
 	if d.readOnly {
 		sqlResult, err := buildSQLResult(cypherStr, params)
 		if err != nil {
@@ -188,10 +149,9 @@ func (d *DB) RunQuery(ctx context.Context, cypherStr string, params map[string]a
 
 // BeginTx starts an explicit transaction and returns a *Tx.
 //
-// The readOnly parameter is accepted for API compatibility but is not enforced
-// at the transaction level — use WithReadOnly() on Open to enforce read-only
-// access across the entire database connection.
-func (d *DB) BeginTx(ctx context.Context, _ bool) (*Tx, error) {
+// Use WithReadOnly() on Open to enforce read-only access across the entire
+// database connection.
+func (d *DB) BeginTx(ctx context.Context) (*Tx, error) {
 	txEx, err := d.st.BeginExecTx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("graphlite: begin transaction: %w", err)
@@ -209,7 +169,7 @@ type execer = store.Execer
 
 // runQuery is the execution pipeline for auto-commit mode.
 // beginTxFn is used to start an implicit transaction for atomic MERGE operations.
-func runQuery(ctx context.Context, ex execer, cypherStr string, params map[string]any, beginTxFn func(context.Context) (store.TxExecer, error)) (*QueryResult, error) {
+func runQuery(ctx context.Context, ex execer, cypherStr string, params map[string]any, beginTxFn func(context.Context) (store.TxExecer, error)) (*Result, error) {
 	sqlResult, err := buildSQLResult(cypherStr, params)
 	if err != nil {
 		return nil, err
@@ -219,7 +179,7 @@ func runQuery(ctx context.Context, ex execer, cypherStr string, params map[strin
 
 // runQueryTx is the execution pipeline for transactional mode. beginTxFn is
 // nil because the caller already holds an open transaction.
-func runQueryTx(ctx context.Context, ex execer, cypherStr string, params map[string]any) (*QueryResult, error) {
+func runQueryTx(ctx context.Context, ex execer, cypherStr string, params map[string]any) (*Result, error) {
 	sqlResult, err := buildSQLResult(cypherStr, params)
 	if err != nil {
 		return nil, err
@@ -271,12 +231,12 @@ func buildSQLResult(cypherStr string, params map[string]any) (glsql.Result, erro
 // ─────────────────────────────────────────────────────────────────────────────
 
 // executeStatements runs all Statements in sqlResult against ex. For a single
-// KindSelect it returns a lazy QueryResult; for write statements it executes
-// each in order and returns a QueryResult with counters.
+// KindSelect it returns a lazy Result; for write statements it executes
+// each in order and returns a Result with counters.
 //
 // beginTxFn, when non-nil, is called to start an implicit transaction for
 // atomic MERGE operations. Pass nil when ex is already transaction-scoped.
-func executeStatements(ctx context.Context, ex execer, sqlResult glsql.Result, beginTxFn func(context.Context) (store.TxExecer, error)) (*QueryResult, error) {
+func executeStatements(ctx context.Context, ex execer, sqlResult glsql.Result, beginTxFn func(context.Context) (store.TxExecer, error)) (*Result, error) {
 	stmts := sqlResult.Statements
 	if len(stmts) == 0 {
 		return nil, fmt.Errorf("graphlite: no SQL statements to execute")
@@ -288,7 +248,7 @@ func executeStatements(ctx context.Context, ex execer, sqlResult glsql.Result, b
 		if err != nil {
 			return nil, fmt.Errorf("graphlite: query: %w", err)
 		}
-		qr, err := NewQueryResultFromRows(rows)
+		qr, err := newResultFromRows(rows)
 		if err != nil {
 			_ = rows.Close()
 			return nil, err
@@ -346,10 +306,10 @@ func executeStatements(ctx context.Context, ex execer, sqlResult glsql.Result, b
 //   - Runs the match SELECT to get matched IDs row by row.
 //   - For each matched row: runs write statements, then runs the final SELECT.
 //   - Collects all result rows across all matched rows.
-func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement) (*QueryResult, error) {
+func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement) (*Result, error) {
 	selectStmt := stmts[len(stmts)-1]
 	writeStmts := stmts[:len(stmts)-1]
-	var ctr QueryCounters
+	var ctr queryCounters
 
 	// Check if the write batch starts with a KindMatchForWrite.
 	var matchStmt *glsql.Statement
@@ -373,8 +333,8 @@ func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement
 			if err != nil {
 				return nil, err
 			}
-			qr := newInMemoryQueryResult(keys, []*Record{nullRec})
-			qr.SetCounters(ctr)
+			qr := newInMemoryResult(keys, []*Record{nullRec})
+			qr.setCounters(ctr)
 			return qr, nil
 		}
 
@@ -408,7 +368,7 @@ func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement
 			if err != nil {
 				return nil, fmt.Errorf("graphlite: write-then-select query: %w", err)
 			}
-			rowQR, err := NewQueryResultFromRows(rows)
+			rowQR, err := newResultFromRows(rows)
 			if err != nil {
 				_ = rows.Close()
 				return nil, err
@@ -423,8 +383,8 @@ func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement
 			allRecords = append(allRecords, recs...)
 		}
 
-		qr := newInMemoryQueryResult(resultKeys, allRecords)
-		qr.SetCounters(ctr)
+		qr := newInMemoryResult(resultKeys, allRecords)
+		qr.setCounters(ctr)
 		return qr, nil
 	}
 
@@ -445,12 +405,12 @@ func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement
 	if err != nil {
 		return nil, fmt.Errorf("graphlite: write-then-select query: %w", err)
 	}
-	qr, err := NewQueryResultFromRows(rows)
+	qr, err := newResultFromRows(rows)
 	if err != nil {
 		_ = rows.Close()
 		return nil, err
 	}
-	qr.SetCounters(ctr)
+	qr.setCounters(ctr)
 	return qr, nil
 }
 
@@ -459,10 +419,10 @@ func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement
 // The statement sequence may begin with a KindMatchForWrite SELECT that returns
 // matched variable IDs row by row. When encountered, we execute all subsequent
 // write statements once per matched row, accumulating counters across all rows.
-func execWriteStatements(ctx context.Context, ex execer, stmts []glsql.Statement) (*QueryResult, error) {
+func execWriteStatements(ctx context.Context, ex execer, stmts []glsql.Statement) (*Result, error) {
 	// idMap: Cypher variable name → int64 row ID from INSERT or MATCH SELECT.
 	idMap := make(map[string]int64)
-	var ctr QueryCounters
+	var ctr queryCounters
 
 	// Separate the leading KindMatchForWrite statement (if any) from the rest.
 	var matchStmt *glsql.Statement
@@ -504,8 +464,8 @@ func execWriteStatements(ctx context.Context, ex execer, stmts []glsql.Statement
 		}
 	}
 
-	qr := &QueryResult{consumed: true}
-	qr.SetCounters(ctr)
+	qr := &Result{consumed: true}
+	qr.setCounters(ctr)
 	return qr, nil
 }
 
@@ -528,12 +488,12 @@ func buildOptionalNullRow(ctx context.Context, ex execer, stmt glsql.Statement) 
 		return nil, nil, fmt.Errorf("graphlite: optional null row: %w", err)
 	}
 	cols, err := rows.Columns()
-	rows.Close()
+	_ = rows.Close()
 	if err != nil {
 		return nil, nil, fmt.Errorf("graphlite: optional null row columns: %w", err)
 	}
 	vals := make([]any, len(cols))
-	return NewRecord(cols, vals), cols, nil
+	return newRecord(cols, vals), cols, nil
 }
 
 // collectMatchRows executes a KindMatchForWrite SELECT, drains all rows into
@@ -547,7 +507,7 @@ func collectMatchRows(ctx context.Context, ex execer, stmt *glsql.Statement) ([]
 	}
 	cols, err := rows.Columns()
 	if err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return nil, nil, fmt.Errorf("graphlite: match-for-write columns: %w", err)
 	}
 	var result [][]any
@@ -558,7 +518,7 @@ func collectMatchRows(ctx context.Context, ex execer, stmt *glsql.Statement) ([]
 			ptrs[i] = &vals[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, nil, fmt.Errorf("graphlite: match-for-write scan: %w", err)
 		}
 		row := make([]any, len(cols))
@@ -566,10 +526,10 @@ func collectMatchRows(ctx context.Context, ex execer, stmt *glsql.Statement) ([]
 		result = append(result, row)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return nil, nil, fmt.Errorf("graphlite: match-for-write iterate: %w", err)
 	}
-	rows.Close()
+	_ = rows.Close()
 	return result, cols, nil
 }
 
@@ -578,7 +538,7 @@ func collectMatchRows(ctx context.Context, ex execer, stmt *glsql.Statement) ([]
 //
 // MERGE statements (KindMergeCheck + KindMergeInsert + tagged KindUpdate) are
 // handled by execMergeBatch when a KindMergeCheck statement is encountered.
-func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idMap map[string]int64, ctr *QueryCounters) error {
+func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idMap map[string]int64, ctr *queryCounters) error {
 	i := 0
 	for i < len(stmts) {
 		stmt := stmts[i]
@@ -624,8 +584,8 @@ func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 			if stmt.CreatedVar != "" {
 				idMap[stmt.CreatedVar] = lastID
 			}
-			ctr.NodesCreated++
-			ctr.PropertiesSet += s.NumProps
+			ctr.nodesCreated++
+			ctr.propertiesSet += s.NumProps
 
 		case glsql.KindInsertEdge:
 			res, err := ex.ExecContext(ctx, s.SQL, s.Args...)
@@ -641,14 +601,14 @@ func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 				}
 				idMap[stmt.CreatedVar] = lastID
 			}
-			ctr.RelationshipsCreated++
-			ctr.PropertiesSet += s.NumProps
+			ctr.relationshipsCreated++
+			ctr.propertiesSet += s.NumProps
 
 		case glsql.KindUpdate:
 			if _, err := ex.ExecContext(ctx, s.SQL, s.Args...); err != nil {
 				return fmt.Errorf("graphlite: update: %w", err)
 			}
-			ctr.PropertiesSet++
+			ctr.propertiesSet++
 
 		case glsql.KindDeleteEdges:
 			res, err := ex.ExecContext(ctx, s.SQL, s.Args...)
@@ -659,7 +619,7 @@ func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 			if err != nil {
 				return fmt.Errorf("graphlite: delete edges rows affected: %w", err)
 			}
-			ctr.RelationshipsDeleted += int(n)
+			ctr.relationshipsDeleted += int(n)
 
 		case glsql.KindDeleteNodes:
 			res, err := ex.ExecContext(ctx, s.SQL, s.Args...)
@@ -670,7 +630,7 @@ func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 			if err != nil {
 				return fmt.Errorf("graphlite: delete nodes rows affected: %w", err)
 			}
-			ctr.NodesDeleted += int(n)
+			ctr.nodesDeleted += int(n)
 
 		default:
 			if _, err := ex.ExecContext(ctx, s.SQL, s.Args...); err != nil {
@@ -696,7 +656,7 @@ func execWriteBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 // If the check finds no row → run INSERT + ON CREATE SETs (skip ON MATCH SETs).
 // All actions run within the caller's execer scope (either a TxExecer already
 // in a transaction, or a plain Execer when beginTxFn wraps the MERGE).
-func execMergeBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idMap map[string]int64, ctr *QueryCounters) (consumed int, err error) {
+func execMergeBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idMap map[string]int64, ctr *queryCounters) (consumed int, err error) {
 	if len(stmts) == 0 || stmts[0].Kind != glsql.KindMergeCheck {
 		return 0, fmt.Errorf("graphlite: execMergeBatch called on non-MergeCheck statement")
 	}
@@ -766,7 +726,7 @@ func execMergeBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 			if _, err := ex.ExecContext(ctx, resolved.Statements[0].SQL, resolved.Statements[0].Args...); err != nil {
 				return consumed, fmt.Errorf("graphlite: MERGE ON MATCH SET: %w", err)
 			}
-			ctr.PropertiesSet++
+			ctr.propertiesSet++
 		}
 	} else {
 		// ── ON CREATE branch ──────────────────────────────────────────────────
@@ -791,8 +751,8 @@ func execMergeBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 		if varName != "" {
 			idMap[varName] = lastID
 		}
-		ctr.NodesCreated++
-		ctr.PropertiesSet += insertStmt.NumProps
+		ctr.nodesCreated++
+		ctr.propertiesSet += insertStmt.NumProps
 
 		for _, s := range onCreateStmts {
 			realVar := strings.TrimPrefix(s.CreatedVar, "oncreate:")
@@ -804,7 +764,7 @@ func execMergeBatch(ctx context.Context, ex execer, stmts []glsql.Statement, idM
 			if _, err := ex.ExecContext(ctx, resolved.Statements[0].SQL, resolved.Statements[0].Args...); err != nil {
 				return consumed, fmt.Errorf("graphlite: MERGE ON CREATE SET: %w", err)
 			}
-			ctr.PropertiesSet++
+			ctr.propertiesSet++
 		}
 	}
 

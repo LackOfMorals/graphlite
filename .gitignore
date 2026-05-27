@@ -34,3 +34,6 @@ vendor/
 # GoReleaser
 dist/
 .claude/worktrees/agent-a9b49e52a5a54faed
+examples/backend_switch/backend_switch
+examples/copy_from_neo4j/copy_from_neo4j
+examples/copy_to_neo4j/copy_to_neo4j

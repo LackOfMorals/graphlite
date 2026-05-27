@@ -25,7 +25,7 @@ type StatementKind int
 
 const (
 	// KindSelect is a read-only SELECT query. The execution layer calls
-	// QueryContext and wraps the rows in a QueryResult.
+	// QueryContext and wraps the rows in a Result.
 	KindSelect StatementKind = iota
 	// KindMatchForWrite is a SELECT emitted as the first step in a MATCH+write
 	// sequence. It returns one column per matched variable, named by the Cypher

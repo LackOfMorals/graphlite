@@ -1,18 +1,16 @@
 # graphlite
 
-**Embedded property graph database for Go — openCypher over SQLite, neo4j-shaped API.**
+**Zero-infrastructure embedded property graph database for Go — openCypher over SQLite.**
 
-graphlite gives you a zero-infrastructure, in-process property graph that speaks openCypher. Its public API mirrors the neo4j Go driver — same session, transaction, and `ExecuteQuery` patterns — so code written for graphlite ports easily to real Neo4j with a thin adapter.
+graphlite stores a labelled property graph in a local SQLite file (or in memory) and accepts queries written in openCypher. There is no external process to start, no driver dependency to manage, and no network — just open a file and query.
 
 ```go
-// In tests — no Docker, no network, no shared state
-driver, _ := graphlite.NewDriver(":memory:", graphlite.NoAuth())
-
-// In production — wrap your real Neo4j driver in a thin adapter
-driver = &myNeo4jAdapter{neo4jDriver}
+db, err := graphlite.Open(":memory:")
+result, err := db.RunQuery(ctx, `MATCH (n:Person) RETURN n.name AS name`, nil)
+for result.Next(ctx) {
+    fmt.Println(result.Record().Values()[0])
+}
 ```
-
-graphlite defines its own `Driver`, `Session`, `Transaction`, and `Result` interfaces. Because graphlite has no dependency on the neo4j Go driver package, you can import both in the same project without conflict.
 
 ---
 
@@ -20,8 +18,8 @@ graphlite defines its own `Driver`, `Session`, `Transaction`, and `Result` inter
 
 - **Tests run without infrastructure.** No Docker container to spin up, no port to reserve, no shared state between CI workers.
 - **Development is friction-free.** Clone the repo, run `go test` — it works. No `docker compose up`.
-- **No driver version lock-in.** graphlite defines its own interfaces; you upgrade the neo4j driver independently.
-- **Import both in one project.** Because graphlite does not depend on the neo4j driver package, tests and production code can co-exist in the same build.
+- **No driver dependency.** graphlite has no dependency on the neo4j Go driver package. Add it to any project without import conflicts.
+- **Use alongside Neo4j.** The `examples/` directory shows patterns for switching between a local graphlite database and a remote Neo4j instance, copying data in either direction, and running the same Cypher queries against both backends.
 
 graphlite is intentionally embedded-only. It does not implement the Bolt wire protocol and is not designed to run as a standalone server. Staying embedded means staying zero-infrastructure, CGO-free, and deployable anywhere Go runs.
 
@@ -71,67 +69,136 @@ Requires Go 1.24+. No CGO required. Works on Linux (amd64/arm64), macOS (arm64),
 
 ---
 
-## Switching Between graphlite and Neo4j
+## Quick Start
 
-graphlite's `Driver`, `Session`, `Transaction`, and `ManagedTransaction` interfaces mirror the neo4j Go driver's public API. To swap graphlite for a real Neo4j instance you write a thin adapter once:
+### Opening a database
 
 ```go
-// graphlite.Driver interface — implement this for real Neo4j
-type neo4jAdapter struct {
-    d neo4j.DriverWithContext
-}
+import "github.com/LackOfMorals/graphlite"
 
-func (a *neo4jAdapter) NewSession(ctx context.Context) graphlite.Session {
-    return &neo4jSessionAdapter{a.d.NewSession(ctx, neo4j.SessionConfig{})}
-}
-func (a *neo4jAdapter) VerifyConnectivity(ctx context.Context) error {
-    return a.d.VerifyConnectivity(ctx)
-}
-func (a *neo4jAdapter) Close(ctx context.Context) error {
-    return a.d.Close(ctx)
-}
+// In-memory — transient, great for tests
+db, err := graphlite.Open(":memory:")
 
-// newDriver selects graphlite or real Neo4j based on environment.
-func newDriver(ctx context.Context) (graphlite.Driver, error) {
-    if uri := os.Getenv("NEO4J_URI"); uri != "" {
-        auth := neo4j.BasicAuth(os.Getenv("NEO4J_USER"), os.Getenv("NEO4J_PASS"), "")
-        d, err := neo4j.NewDriverWithContext(uri, auth)
-        return &neo4jAdapter{d}, err
-    }
-    return graphlite.NewDriver(":memory:", graphlite.NoAuth())
-}
+// File-backed — persists across restarts
+db, err := graphlite.Open("/var/data/graph.db")
+
+// With options
+db, err := graphlite.Open("graph.db",
+    graphlite.WithBusyTimeout(5*time.Second),
+    graphlite.WithReadOnly(),
+)
+
+defer db.Close(ctx)
 ```
 
-Your application code accepts `graphlite.Driver` — it never imports graphlite or neo4j directly. Set `NEO4J_URI` in production; leave it unset for local unit tests.
-
-A file-backed store persists across process restarts:
+In tests, use `NewTestDB` to open an in-memory database that is closed automatically when the test ends:
 
 ```go
-driver, _ := graphlite.NewDriver("/var/data/graph.db", graphlite.NoAuth())
+db := graphlite.NewTestDB(t)
 ```
 
----
+### Auto-commit queries
 
-## Data Migration
-
-Move graph data between graphlite and any `graphlite.Driver` — including a real Neo4j instance wrapped in an adapter — using `CopyFrom` and `CopyTo`.
+`RunQuery` executes a Cypher statement in auto-commit mode and returns a lazy `*Result` cursor.
 
 ```go
-// Seed a local graphlite instance from a staging Neo4j database.
-staging := &neo4jAdapter{stagingNeo4jDriver}
-local, _ := graphlite.Open(":memory:")
-
-if err := local.CopyFrom(ctx, staging); err != nil {
+result, err := db.RunQuery(ctx,
+    `MATCH (p:Person {name: $name})-[:KNOWS*1..3]->(f:Person) RETURN f.name AS name`,
+    map[string]any{"name": "Alice"},
+)
+if err != nil {
     log.Fatal(err)
 }
-
-// Promote a locally built graph to Neo4j.
-if err := local.CopyTo(ctx, staging); err != nil {
+for result.Next(ctx) {
+    fmt.Println(result.Record().Values()[0])
+}
+if _, err := result.Consume(ctx); err != nil {
     log.Fatal(err)
 }
 ```
 
-`CopyFrom` runs inside a single graphlite transaction — either everything is imported or nothing is. `CopyTo` issues one `CREATE` per node and one per relationship; it is not atomic on the destination.
+### Explicit transactions
+
+`BeginTx` starts an explicit transaction. Call `Commit` or `Rollback` when done; `Close` is idempotent and always safe to defer.
+
+```go
+tx, err := db.BeginTx(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+defer tx.Close()
+
+_, err = tx.Run(ctx, `CREATE (n:Person {name: $name})`, map[string]any{"name": "Bob"})
+if err != nil {
+    _ = tx.Rollback()
+    log.Fatal(err)
+}
+if err := tx.Commit(); err != nil {
+    log.Fatal(err)
+}
+```
+
+### Collecting results
+
+`Collect` drains all records from a `*Result` into a slice:
+
+```go
+result, err := db.RunQuery(ctx, `MATCH (n:Person) RETURN n`, nil)
+records, err := result.Collect(ctx)
+for _, rec := range records {
+    node, _ := rec.Get("n")
+    fmt.Println(node.(*graphlite.Node).Props)
+}
+```
+
+`Single` returns the one record in a result, or an error if there are zero or more than one:
+
+```go
+result, err := db.RunQuery(ctx, `MATCH (n:Person {name: "Alice"}) RETURN n`, nil)
+rec, err := result.Single(ctx)
+// err is graphlite.ErrNoRecords or graphlite.ErrMultipleRecords when applicable
+```
+
+### Generic helpers
+
+Use the generic helpers for typed property and record access:
+
+```go
+// Extract a typed property from a Node or Relationship
+age, err := graphlite.GetProperty[int64](node, "age")
+
+// Extract a typed value from a Record column
+name, isNil, err := graphlite.GetRecordValue[string](rec, "name")
+
+// Collect all records as a typed slice using a mapper
+result, _ := db.RunQuery(ctx, `MATCH (n:Person) RETURN n.name AS name`, nil)
+names, err := graphlite.CollectT(ctx, result, func(rec *graphlite.Record) (string, error) {
+    return graphlite.GetRecordValue[string](rec, "name")
+})
+
+// Single with a mapper
+result, _ := db.RunQuery(ctx, `MATCH (n:Person {name: "Alice"}) RETURN n`, nil)
+node, err := graphlite.SingleT(ctx, result, func(rec *graphlite.Record) (*graphlite.Node, error) {
+    n, _, err := graphlite.GetRecordValue[*graphlite.Node](rec, "n")
+    return n, err
+})
+```
+
+### Bulk import and export
+
+```go
+// Import from JSON
+f, _ := os.Open("testdata/graph.json")
+if err := db.Import(ctx, f, graphlite.FormatJSON); err != nil {
+    log.Fatal(err)
+}
+
+// Export to JSON
+var buf bytes.Buffer
+if err := db.Export(ctx, &buf, graphlite.FormatJSON); err != nil {
+    log.Fatal(err)
+}
+```
 
 ### Snapshots
 
@@ -141,7 +208,6 @@ if err := local.CopyTo(ctx, staging); err != nil {
 db, _ := graphlite.Open(":memory:")
 // ... build or import graph data ...
 
-// Persist the in-memory graph before the process exits.
 if err := db.Snapshot("/var/data/graph-checkpoint.db"); err != nil {
     log.Fatal(err)
 }
@@ -152,71 +218,78 @@ snap, _ := graphlite.Open("/var/data/graph-checkpoint.db")
 
 ---
 
-## Quick Start
+## Examples: graphlite alongside Neo4j
 
-### Driver API (recommended)
+The `examples/` directory contains three self-contained programs. Each has its own `go.mod` that imports both graphlite and the neo4j Go driver, so they do not affect the root module.
 
-```go
-import "github.com/LackOfMorals/graphlite"
+| Example | What it shows |
+|---|---|
+| `examples/backend_switch/` | Choose graphlite or Neo4j at startup via an env var; both run the same Cypher query |
+| `examples/copy_from_neo4j/` | Seed a local graphlite database from a running Neo4j instance |
+| `examples/copy_to_neo4j/` | Push a graphlite sub-graph to a remote Neo4j cluster |
 
-driver, err := graphlite.NewDriver(":memory:", graphlite.NoAuth())
-if err != nil {
-    log.Fatal(err)
-}
-defer driver.Close(ctx)
+Run any example with `go run .` from its directory. See the comment block at the top of each `main.go` for environment variable configuration.
 
-// Tier 1 — ExecuteQuery (simplest)
-result, err := graphlite.ExecuteQuery[*graphlite.EagerResult](ctx, driver,
-    `MATCH (p:Person {name: $name})-[:KNOWS]->(f:Person) RETURN f.name AS name`,
-    map[string]any{"name": "Alice"},
-    graphlite.EagerResultTransformer,
-)
+---
 
-// Tier 2 — Managed transaction
-session := driver.NewSession(ctx)
-defer session.Close(ctx)
-names, err := session.ExecuteRead(ctx, func(tx graphlite.ManagedTransaction) (any, error) {
-    result, err := tx.Run(ctx, `MATCH (n:Person) RETURN n.name AS name`, nil)
-    if err != nil {
-        return nil, err
-    }
-    var names []string
-    for result.Next(ctx) {
-        names = append(names, result.Record().Values()[0].(string))
-    }
-    return names, result.Err()
-})
+## API Reference
 
-// Tier 3 — Explicit transaction
-tx, err := session.BeginTransaction(ctx)
-_, err = tx.Run(ctx, `CREATE (n:Person {name: $name})`, map[string]any{"name": "Bob"})
-err = tx.Commit(ctx)
-```
+### Entry point
 
-### Native API
+| Symbol | Signature | Description |
+|---|---|---|
+| `Open` | `Open(path string, opts ...Option) (*DB, error)` | Open or create a database. Use `":memory:"` for a transient in-memory store. |
+| `NewTestDB` | `NewTestDB(t testing.TB) *DB` | Open an in-memory database; registers `t.Cleanup` to close it. |
 
-For cases where you don't need driver compatibility — scripting, tooling, one-off data work:
+### DB methods
 
-```go
-import "github.com/LackOfMorals/graphlite"
+| Method | Signature | Description |
+|---|---|---|
+| `RunQuery` | `(*DB) RunQuery(ctx, cypher string, params map[string]any) (*Result, error)` | Execute a Cypher statement in auto-commit mode. |
+| `BeginTx` | `(*DB) BeginTx(ctx) (*Tx, error)` | Start an explicit transaction. |
+| `Import` | `(*DB) Import(ctx, r io.Reader, format Format) error` | Bulk-import nodes and relationships from JSON or CSV. |
+| `Export` | `(*DB) Export(ctx, w io.Writer, format Format) error` | Bulk-export the graph to JSON. |
+| `Snapshot` | `(*DB) Snapshot(path string) error` | Write an atomic consistent copy of the database to a file. |
+| `Close` | `(*DB) Close(ctx) error` | Release all resources. |
 
-db, err := graphlite.Open(":memory:")
-if err != nil {
-    log.Fatal(err)
-}
-defer db.Close(ctx)
+### Tx methods
 
-// Seed from JSON
-f, _ := os.Open("testdata/graph.json")
-if err := db.Import(ctx, f, graphlite.FormatJSON); err != nil {
-    log.Fatal(err)
-}
+| Method | Signature | Description |
+|---|---|---|
+| `Run` | `(*Tx) Run(ctx, cypher string, params map[string]any) (*Result, error)` | Execute a Cypher statement inside the transaction. |
+| `Commit` | `(*Tx) Commit() error` | Commit the transaction. |
+| `Rollback` | `(*Tx) Rollback() error` | Roll back the transaction. |
+| `Close` | `(*Tx) Close() error` | Close the transaction (rolls back if not yet committed). |
 
-result, err := db.RunQuery(ctx,
-    `MATCH (p:Person {name: $name})-[:KNOWS*1..3]->(f:Person) RETURN f.name AS name`,
-    map[string]any{"name": "Alice"},
-)
-```
+### Result methods
+
+| Method | Signature | Description |
+|---|---|---|
+| `Next` | `(*Result) Next(ctx) bool` | Advance the cursor; returns false when exhausted or on error. |
+| `Record` | `(*Result) Record() *Record` | Return the current record (valid after `Next` returns true). |
+| `Err` | `(*Result) Err() error` | Return any iteration error. |
+| `Keys` | `(*Result) Keys() []string` | Return the projection column names. |
+| `Collect` | `(*Result) Collect(ctx) ([]*Record, error)` | Drain all records into a slice. |
+| `Single` | `(*Result) Single(ctx) (*Record, error)` | Return the single record, or `ErrNoRecords` / `ErrMultipleRecords`. |
+| `Consume` | `(*Result) Consume(ctx) (*ResultSummary, error)` | Drain remaining records and return query counters. |
+
+### Generic helpers
+
+| Function | Description |
+|---|---|
+| `GetProperty[T PropertyValue](entity, key)` | Extract a typed property from a `*Node` or `*Relationship`. |
+| `GetRecordValue[T RecordValue](rec, key)` | Extract a typed value from a `*Record` column; second return is true when null. |
+| `CollectT[T any](ctx, result, mapper)` | Collect all records, applying a mapper to each; returns `[]T`. |
+| `SingleT[T any](ctx, result, mapper)` | Like `Single`, but applies a mapper to the one record; returns `T`. |
+
+### Sentinel errors
+
+| Error | Meaning |
+|---|---|
+| `ErrNoRecords` | `Single` found zero records. |
+| `ErrMultipleRecords` | `Single` found more than one record. |
+| `ErrReadOnly` | A write statement was attempted on a read-only database. |
+| `ErrUnsupportedCypher` | The Cypher feature is not yet implemented. |
 
 ---
 
@@ -224,12 +297,13 @@ result, err := db.RunQuery(ctx,
 
 ```
 graphlite/
-├── types.go          ← Node, Relationship, Record, errors (root package)
-├── interfaces.go     ← Driver, Session, Transaction, ManagedTransaction, Result, ExecuteQuery
-├── driver.go         ← graphlite.Open, native API, execution engine, Snapshot
-├── session.go        ← session, Tx, managedTx — implements the interfaces
-├── importer.go       ← Import/Export (JSON, CSV)
-├── migrate.go        ← CopyFrom, CopyTo
+├── types.go          ← Node, Relationship, Record, error types
+├── driver.go         ← graphlite.Open, DB, RunQuery, BeginTx, execution engine
+├── tx.go             ← Tx type (Run, Commit, Rollback, Close)
+├── result.go         ← Result cursor (Next, Record, Err, Keys, Collect, Single, Consume)
+├── helpers.go        ← generic helpers (GetProperty, GetRecordValue, CollectT, SingleT)
+├── importer.go       ← Import / Export (JSON, CSV)
+├── options.go        ← functional options (WithBusyTimeout, WithReadOnly)
 ├── cypher/
 │   ├── ast.go        ← Clause and expression AST types
 │   ├── parser.go     ← ANTLR/opencypher CST → AST
@@ -245,6 +319,10 @@ graphlite/
 │   └── schema.go     ← DDL: nodes/edges tables + indexes
 ├── compat/
 │   └── tck_test.go   ← openCypher TCK harness (opt-in: -tags=tck)
+├── examples/
+│   ├── backend_switch/   ← switch between graphlite and Neo4j at runtime
+│   ├── copy_from_neo4j/  ← seed graphlite from a Neo4j instance
+│   └── copy_to_neo4j/    ← push graphlite data to a Neo4j instance
 └── bench/
     └── *.go          ← benchmark suite
 ```
@@ -295,12 +373,12 @@ This covers the root package and all documented sub-packages. Adding new exporte
 
 | Version | Highlights |
 |---|---|
-| v0.1 | MATCH, CREATE, SET, DELETE, bulk JSON import, neo4j-shaped driver API |
+| v0.1 | MATCH, CREATE, SET, DELETE, bulk JSON import |
 | v0.2 | OPTIONAL MATCH, WITH, aggregation, COLLECT, DISTINCT, REMOVE, CSV import/export |
 | v0.3 | MERGE (with ON CREATE/ON MATCH), property-based tests, TCK harness |
 | **v1.0** | **CASE expressions, variable-length paths, 100% openCypher TCK pass rate** |
 | v1.1 | CopyFrom / CopyTo migration, Snapshot, functional options (WithBusyTimeout, WithReadOnly, NewTestDB) |
-| v1.2 | Remove neo4j driver dependency; graphlite now defines its own neo4j-shaped interfaces — no more shim files, import both packages without conflict |
+| **v2.0** | **Remove neo4j driver dependency; native `Open`/`RunQuery`/`BeginTx` API; `Single`, `ErrNoRecords`, `ErrMultipleRecords`; generic helpers (`GetProperty`, `GetRecordValue`, `CollectT`, `SingleT`)** |
 
 ---
 
