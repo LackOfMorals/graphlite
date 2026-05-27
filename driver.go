@@ -544,19 +544,27 @@ func collectMatchRows(ctx context.Context, ex execer, stmt *glsql.Statement) ([]
 		_ = rows.Close()
 		return nil, nil, fmt.Errorf("graphlite: match-for-write columns: %w", err)
 	}
+	// Pre-allocate scan buffers once and reuse across rows. vals is reset per row
+	// before each Scan call. Each collected row is copied into a fresh slice so
+	// the caller owns independent slices that won't be overwritten by the next iteration.
+	scanVals := make([]any, len(cols))
+	ptrs := make([]any, len(cols))
+	for i := range scanVals {
+		ptrs[i] = &scanVals[i]
+	}
 	var result [][]any
 	for rows.Next() {
-		vals := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range vals {
-			ptrs[i] = &vals[i]
+		// Zero out the scan buffer so stale values from the previous row don't leak
+		// through in the rare case that Scan leaves a slot unchanged (e.g. NULL).
+		for i := range scanVals {
+			scanVals[i] = nil
 		}
 		if err := rows.Scan(ptrs...); err != nil {
 			_ = rows.Close()
 			return nil, nil, fmt.Errorf("graphlite: match-for-write scan: %w", err)
 		}
 		row := make([]any, len(cols))
-		copy(row, vals)
+		copy(row, scanVals)
 		result = append(result, row)
 	}
 	if err := rows.Err(); err != nil {

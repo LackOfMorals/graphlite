@@ -585,7 +585,7 @@ func BenchmarkImportCSVEdges(b *testing.B) {
 	var nodeBuf bytes.Buffer
 	nodeBuf.WriteString(":ID,:LABEL\n")
 	for i := 1; i <= nodeCount; i++ {
-		nodeBuf.WriteString(fmt.Sprintf("%d,Person\n", i))
+		fmt.Fprintf(&nodeBuf, "%d,Person\n", i)
 	}
 	nodePayload := nodeBuf.Bytes()
 
@@ -596,7 +596,7 @@ func BenchmarkImportCSVEdges(b *testing.B) {
 	for i := 1; i <= edgeCount; i++ {
 		start := i
 		end := (i % nodeCount) + 1
-		edgeBuf.WriteString(fmt.Sprintf("%d,%d,KNOWS\n", start, end))
+		fmt.Fprintf(&edgeBuf, "%d,%d,KNOWS\n", start, end)
 	}
 	edgePayload := edgeBuf.Bytes()
 

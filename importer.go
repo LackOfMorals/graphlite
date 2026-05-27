@@ -144,16 +144,20 @@ func (d *DB) Export(ctx context.Context, w io.Writer, format ExportFormat) error
 
 // importJSON implements the JSON import path.
 func (d *DB) importJSON(ctx context.Context, r io.Reader) (retErr error) {
-	// Enforce the 500 MiB size limit by wrapping with a counting reader.
-	lr := &limitedReader{r: io.LimitReader(r, importMaxBytes+1), limit: importMaxBytes}
-
-	doc, err := decodeImportJSON(lr)
-	// Check the size limit before propagating any decode error: a truncated read
-	// (EOF mid-document) caused by io.LimitReader is reported as a JSON parse
-	// error, but the real root cause is the size limit being exceeded.
-	if lr.exceeded {
+	// Read the entire input into memory (up to importMaxBytes+1 bytes) so we can
+	// detect the oversize condition with a single length check. Using io.ReadAll with
+	// io.LimitReader is more efficient than streaming for size detection because it
+	// avoids the per-byte overhead of the JSON decoder's whitespace scanner on large
+	// inputs. The byte slice is then decoded with the streaming token-by-token parser.
+	raw, err := io.ReadAll(io.LimitReader(r, importMaxBytes+1))
+	if err != nil {
+		return fmt.Errorf("graphlite: import: read: %w", err)
+	}
+	if int64(len(raw)) > importMaxBytes {
 		return &ErrImportTooLarge{MaxBytes: importMaxBytes}
 	}
+
+	doc, err := decodeImportJSON(bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
@@ -907,10 +911,14 @@ func decodeImportJSON(r io.Reader) (*importJSONDocument, error) {
 
 		switch key {
 		case "nodes":
-			// Expect '['.
+			// Expect '[' or null (null is treated as an empty array).
 			tok, err := readToken()
 			if err != nil {
 				return nil, wrapErr(err)
+			}
+			if tok == nil {
+				// JSON null — no nodes to decode.
+				break
 			}
 			if d, ok := tok.(json.Delim); !ok || d != '[' {
 				return nil, fmt.Errorf("graphlite: import: \"nodes\" must be a JSON array")
@@ -928,10 +936,14 @@ func decodeImportJSON(r io.Reader) (*importJSONDocument, error) {
 			}
 
 		case "edges":
-			// Expect '['.
+			// Expect '[' or null (null is treated as an empty array).
 			tok, err := readToken()
 			if err != nil {
 				return nil, wrapErr(err)
+			}
+			if tok == nil {
+				// JSON null — no edges to decode.
+				break
 			}
 			if d, ok := tok.(json.Delim); !ok || d != '[' {
 				return nil, fmt.Errorf("graphlite: import: \"edges\" must be a JSON array")
@@ -998,21 +1010,3 @@ func checkJSONDepth(data []byte, maxDepth int, startDepth int) error {
 	return nil
 }
 
-// limitedReader wraps an io.Reader that has already been limited via
-// io.LimitReader. It sets exceeded=true if the underlying reader delivered
-// exactly limit+1 bytes (i.e. the real input was larger than limit).
-type limitedReader struct {
-	r        io.Reader
-	limit    int64
-	read     int64
-	exceeded bool
-}
-
-func (l *limitedReader) Read(p []byte) (int, error) {
-	n, err := l.r.Read(p)
-	l.read += int64(n)
-	if l.read > l.limit {
-		l.exceeded = true
-	}
-	return n, err
-}

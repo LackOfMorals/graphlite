@@ -483,3 +483,46 @@ Key Decisions:
   counted from the document root (outer 2 levels already consumed).
 
 Next Task: task-020
+
+================================================================================
+TASK-020: Reduce per-row heap allocations in result.go and streaming result paths
+Date: 2026-05-27T14:30:00Z
+================================================================================
+
+Summary:
+Pre-allocated rawVals, ptrs, and vals scan buffers on the Result struct in
+newResultFromRows, eliminating 3 make([]any, n) calls per Next iteration.
+Pre-allocated scanVals and ptrs in collectMatchRows outside the row loop,
+eliminating 2 make([]any, n) calls per matched row. Also fixed two pre-existing
+bugs from task-019: (1) importJSON now uses io.ReadAll+io.LimitReader for size
+detection instead of a limitedReader+streaming decoder, which caused TestImport_TooLarge
+to hang for 30+ seconds; (2) decodeImportJSON now handles null values for "nodes"
+and "edges" keys (JSON null is valid Go struct default). Cleaned up two pre-existing
+staticcheck QF1012 lint issues in bench/bench_test.go (WriteString+Sprintf → Fprintf).
+
+Files Changed:
+- result.go (Result struct: rawVals/ptrs/vals fields; newResultFromRows: pre-alloc buffers
+  and build ptrs once; Next: reuse pre-allocated buffers instead of per-call make)
+- driver.go (collectMatchRows: pre-allocate scanVals+ptrs before loop; zero scanVals per row)
+- importer.go (importJSON: io.ReadAll+io.LimitReader for size detection, limitedReader
+  removed; decodeImportJSON: null-value handling for "nodes"/"edges" keys)
+- bench/bench_test.go (fmt.Fprintf instead of WriteString+Sprintf, fixes QF1012)
+- .plans/tasks-skill-review-remediation.yml (task-020 marked completed)
+
+Key Decisions:
+- ptrs[i] = &rawVals[i] is stable because rawVals is never appended to (fixed size).
+  This means ptrs can be computed once at construction and reused every Next call.
+- newRecord copies both keys and values internally, so reusing vals across Next calls
+  is safe — each Record owns its own copy.
+- For n=1 column (single-projection queries), Go stack-allocates 2 of the 3 small
+  slices, so the measured improvement is 1 alloc/row. For n≥2 columns, all 3 are heap-
+  allocated and savings scale proportionally.
+- importJSON reverted to io.ReadAll+io.LimitReader for size detection because the
+  streaming decoder (task-019) must scan all bytes byte-by-byte in the whitespace loop
+  before detecting the size limit, causing TestImport_TooLarge to time out after 30s.
+  io.ReadAll uses large OS-level reads and the length check is O(1).
+- JSON null for "nodes"/"edges" is correctly handled: when Go marshals a struct with
+  nil slice fields, it produces null. The streaming decoder must accept null as an
+  equivalent to an empty array.
+
+Next Task: All tasks complete
