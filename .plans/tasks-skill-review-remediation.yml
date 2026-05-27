@@ -171,7 +171,7 @@ tasks:
       Unrecognised backslash sequences should return an error (or optionally pass through with
       a comment explaining the forward-compatibility choice). Currently only five sequences are
       handled and unrecognised ones silently pass through as literal backslashes.
-    status: pending
+    status: in_progress
     dependencies: []
     acceptance_criteria:
       - "The Cypher literal `'Hello\\nWorld'` produces a Go string containing a real newline character"

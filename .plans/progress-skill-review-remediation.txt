@@ -224,3 +224,27 @@ Key Decisions:
 - Interface doc updated at the definition level so custom dialect implementors see the escaping contract
 
 Next Task: task-010
+
+================================================================================
+TASK-010: Implement full openCypher escape sequences in unquoteString
+Date: 2026-05-27T00:00:00Z
+================================================================================
+
+Summary:
+Extended `unquoteString` in `cypher/parser.go` to handle the full openCypher
+string escape sequence table: \n, \r, \t, \b, \f (control chars), \uXXXX
+(4-digit Unicode), \uXXXXXXXX (8-digit Unicode). Added `isAllHex` helper.
+Added `unicode/utf8` import and `utf8.ValidRune` checks on both Unicode escape
+paths — code points above unicode.MaxRune and surrogate code points (U+D800–
+U+DFFF) now return a descriptive error rather than silently emitting U+FFFD.
+Applied De Morgan's law to `isAllHex` to satisfy staticcheck QF1001.
+
+Files Changed:
+- cypher/parser.go (escape sequence handling; isAllHex helper; utf8.ValidRune guards; unicode/utf8 import)
+- cypher/parser_test.go (tests for all new escape sequences and invalid Unicode rejection)
+
+Key Decisions:
+- utf8.ValidRune catches both surrogates and code points > MaxRune in one call
+- isAllHex rewritten with De Morgan's law per staticcheck QF1001
+
+Next Task: task-011
