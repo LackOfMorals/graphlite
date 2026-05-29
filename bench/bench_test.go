@@ -24,7 +24,7 @@ import (
 	"sync"
 	"testing"
 
-	graphlite "github.com/LackOfMorals/graphlite"
+	graphlite "github.com/LackOfMorals/graphlite/v2"
 )
 
 // bench1M is a flag that enables the 1M-node benchmark. Off by default because

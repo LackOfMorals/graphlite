@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/LackOfMorals/graphlite/store"
+	"github.com/LackOfMorals/graphlite/v2/store"
 )
 
 // Tx is an explicit graphlite transaction. All queries run via Run share the

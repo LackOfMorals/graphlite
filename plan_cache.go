@@ -4,7 +4,7 @@ import (
 	"container/list"
 	"sync"
 
-	glsql "github.com/LackOfMorals/graphlite/sql"
+	glsql "github.com/LackOfMorals/graphlite/v2/sql"
 )
 
 // planCacheMaxSize is the maximum number of entries kept in the plan cache.

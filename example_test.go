@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	graphlite "github.com/LackOfMorals/graphlite"
+	graphlite "github.com/LackOfMorals/graphlite/v2"
 )
 
 // ExampleOpen demonstrates opening an in-memory database and running a query.

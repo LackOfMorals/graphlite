@@ -23,7 +23,7 @@ import (
 	"log"
 	"os"
 
-	graphlite "github.com/LackOfMorals/graphlite"
+	graphlite "github.com/LackOfMorals/graphlite/v2"
 	"github.com/neo4j/neo4j-go-driver/v6/neo4j"
 )
 

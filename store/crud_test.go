@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/LackOfMorals/graphlite/store"
+	"github.com/LackOfMorals/graphlite/v2/store"
 )
 
 // helper opens an in-memory store and registers cleanup.

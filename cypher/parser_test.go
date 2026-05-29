@@ -3,7 +3,7 @@ package cypher_test
 import (
 	"testing"
 
-	"github.com/LackOfMorals/graphlite/cypher"
+	"github.com/LackOfMorals/graphlite/v2/cypher"
 )
 
 // ─── helpers ──────────────────────────────────────────────────────────────────

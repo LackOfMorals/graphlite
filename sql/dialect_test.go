@@ -3,7 +3,7 @@ package sql_test
 import (
 	"testing"
 
-	sqldialect "github.com/LackOfMorals/graphlite/sql"
+	sqldialect "github.com/LackOfMorals/graphlite/v2/sql"
 )
 
 // dialects lists every Dialect implementation under test.

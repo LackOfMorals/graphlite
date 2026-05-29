@@ -16,7 +16,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/LackOfMorals/graphlite/cypher"
+	"github.com/LackOfMorals/graphlite/v2/cypher"
 )
 
 // StatementKind classifies a Statement so the execution layer can dispatch it

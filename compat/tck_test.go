@@ -26,7 +26,7 @@ import (
 
 	"github.com/cucumber/godog"
 
-	graphlite "github.com/LackOfMorals/graphlite"
+	graphlite "github.com/LackOfMorals/graphlite/v2"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

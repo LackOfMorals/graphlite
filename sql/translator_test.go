@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/LackOfMorals/graphlite/cypher"
-	sqldialect "github.com/LackOfMorals/graphlite/sql"
+	"github.com/LackOfMorals/graphlite/v2/cypher"
+	sqldialect "github.com/LackOfMorals/graphlite/v2/sql"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

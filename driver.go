@@ -44,9 +44,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/LackOfMorals/graphlite/cypher"
-	glsql "github.com/LackOfMorals/graphlite/sql"
-	"github.com/LackOfMorals/graphlite/store"
+	"github.com/LackOfMorals/graphlite/v2/cypher"
+	glsql "github.com/LackOfMorals/graphlite/v2/sql"
+	"github.com/LackOfMorals/graphlite/v2/store"
 )
 
 // DB is an open graphlite database. All methods are safe for concurrent use

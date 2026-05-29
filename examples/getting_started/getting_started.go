@@ -16,7 +16,7 @@ import (
 	"fmt"
 	"strings"
 
-	graphlite "github.com/LackOfMorals/graphlite"
+	graphlite "github.com/LackOfMorals/graphlite/v2"
 )
 
 func main() {

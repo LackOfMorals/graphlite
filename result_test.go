@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/LackOfMorals/graphlite"
+	"github.com/LackOfMorals/graphlite/v2"
 )
 
 // openDB opens an in-memory graphlite database for use in result-layer tests.

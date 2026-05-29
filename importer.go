@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/LackOfMorals/graphlite/store"
+	"github.com/LackOfMorals/graphlite/v2/store"
 )
 
 // Format identifies the file format accepted by Import.

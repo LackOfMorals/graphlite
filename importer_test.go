@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/LackOfMorals/graphlite"
+	"github.com/LackOfMorals/graphlite/v2"
 )
 
 // openMem opens a fresh in-memory graphlite DB for testing.

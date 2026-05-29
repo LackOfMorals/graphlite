@@ -20,7 +20,7 @@ import (
 	"strings"
 	"testing"
 
-	graphlite "github.com/LackOfMorals/graphlite"
+	graphlite "github.com/LackOfMorals/graphlite/v2"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

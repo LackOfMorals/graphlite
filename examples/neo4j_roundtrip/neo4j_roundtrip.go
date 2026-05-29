@@ -14,7 +14,7 @@
 //
 //	import (
 //	    "github.com/neo4j/neo4j-go-driver/v6/neo4j"
-//	    "github.com/LackOfMorals/graphlite/neo4jadapter"
+//	    "github.com/LackOfMorals/graphlite/v2/neo4jadapter"
 //	)
 //
 //	neo4jDriver, err := neo4j.NewDriverWithContext(
@@ -36,7 +36,7 @@ import (
 	"context"
 	"fmt"
 
-	graphlite "github.com/LackOfMorals/graphlite"
+	graphlite "github.com/LackOfMorals/graphlite/v2"
 )
 
 func main() {
