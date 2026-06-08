@@ -10,3 +10,7 @@ Files: ~types.go
 Replace tryParseNode/tryParseRelationship (two separate json.Unmarshal-into-map calls) with a single tryParseGraphElement using a typed graphElementJSON struct. Removed jsonNumberToElementID (dead after refactor) and strconv import. The 12 TCK failures are pre-existing on this branch.
 Files: ~result.go
 Decisions: Guard requires both elem.ID != "" and len(elem.Props) > 0 to match old key-presence checks; relationship additionally requires StartID and EndID non-empty.
+
+## TASK-004 — 2026-06-08T22:50:00Z
+Benchmarks confirm 35% alloc reduction across all three targets (310020 vs 479774 for CollectLargeResult, 31013 vs 47752 for RunQuerySimpleSelect, 155021 vs 239769 for MatchByLabel). All exceed the 25% threshold.
+Files: ~.plans/tasks-result-row-materialisation-perf.yml
