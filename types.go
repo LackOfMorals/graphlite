@@ -44,15 +44,15 @@ type Record struct {
 
 // newRecord constructs a Record from parallel slices of keys and values.
 // The two slices must have the same length; if they do not, newRecord panics.
+// keys is stored by reference — callers must not mutate it after this call.
+// values is copied because the caller (Result.Next) reuses its vals buffer.
 func newRecord(keys []string, values []any) *Record {
 	if len(keys) != len(values) {
 		panic(fmt.Sprintf("graphlite: newRecord: keys length %d != values length %d", len(keys), len(values)))
 	}
-	k := make([]string, len(keys))
 	v := make([]any, len(values))
-	copy(k, keys)
 	copy(v, values)
-	return &Record{keys: k, values: v}
+	return &Record{keys: keys, values: v}
 }
 
 // Get returns the value associated with key and true, or nil and false if key

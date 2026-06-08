@@ -1,3 +1,7 @@
 ## TASK-001 — 2026-06-08T22:25:00Z
 Replace fmt.Sprintf with strconv.FormatInt in jsonNumberToElementID to eliminate reflection overhead per node ID conversion.
 Files: ~result.go
+
+## TASK-002 — 2026-06-08T22:30:00Z
+Share keys slice by reference in newRecord, eliminating one allocation and copy per row; values still copied since Result.Next reuses its vals buffer across rows.
+Files: ~types.go

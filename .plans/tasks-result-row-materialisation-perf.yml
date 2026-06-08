@@ -26,14 +26,14 @@ tasks:
       instead of make+copy. The values slice must still be copied since the caller
       (Result.Next) reuses its vals buffer across rows. Record.Keys() already copies
       on access so callers remain unaffected.
-    status: pending
+    status: completed
     dependencies: []
     acceptance_criteria:
       - "newRecord does not allocate a new []string for keys"
       - "newRecord still allocates and copies the values slice"
       - "Record.Keys() still returns a fresh copy (unchanged)"
       - "CGO_ENABLED=0 go test -count=1 ./... passes"
-    completed_at: null
+    completed_at: "2026-06-08T22:30:00Z"
 
   - id: task-003
     title: 'Replace map[string]json.RawMessage parsing with single typed struct unmarshal'
