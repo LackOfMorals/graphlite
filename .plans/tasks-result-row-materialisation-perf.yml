@@ -1,0 +1,79 @@
+feature: result-row-materialisation-perf
+prd: ./prd-result-row-materialisation-perf.md
+created_at: 2026-06-08T22:20:00Z
+updated_at: 2026-06-08T22:20:00Z
+
+tasks:
+  - id: task-001
+    title: 'Replace fmt.Sprintf with strconv.FormatInt in jsonNumberToElementID'
+    description: |
+      In result.go, replace the two fmt.Sprintf("%d", int64(n)) calls in jsonNumberToElementID
+      with strconv.FormatInt(int64(n), 10). Remove the "fmt" import if it is no longer used
+      elsewhere in result.go after this change.
+    status: completed
+    dependencies: []
+    acceptance_criteria:
+      - "jsonNumberToElementID float64 and int64 branches use strconv.FormatInt, not fmt.Sprintf"
+      - '"fmt" import removed from result.go if unused'
+      - "CGO_ENABLED=0 go test -count=1 ./... passes"
+      - "go vet ./... clean"
+    completed_at: "2026-06-08T22:25:00Z"
+
+  - id: task-002
+    title: 'Share keys slice by reference in newRecord'
+    description: |
+      In types.go, change newRecord to store the caller-supplied keys slice directly
+      instead of make+copy. The values slice must still be copied since the caller
+      (Result.Next) reuses its vals buffer across rows. Record.Keys() already copies
+      on access so callers remain unaffected.
+    status: completed
+    dependencies: []
+    acceptance_criteria:
+      - "newRecord does not allocate a new []string for keys"
+      - "newRecord still allocates and copies the values slice"
+      - "Record.Keys() still returns a fresh copy (unchanged)"
+      - "CGO_ENABLED=0 go test -count=1 ./... passes"
+    completed_at: "2026-06-08T22:30:00Z"
+
+  - id: task-003
+    title: 'Replace map[string]json.RawMessage parsing with single typed struct unmarshal'
+    description: |
+      In result.go, introduce a private graphElementJSON struct covering all node and
+      relationship fields (id, labels, type, start_id, end_id, props). Replace
+      tryParseNode and tryParseRelationship with a single tryParseGraphElement function
+      that unmarshals once into this struct and detects shape via field presence
+      (node: Type==""; relationship: Type!="" && StartID!="" && EndID!="").
+      mapColumnValue calls tryParseGraphElement instead of the two existing functions.
+    status: completed
+    dependencies:
+      - task-001
+    acceptance_criteria:
+      - "graphElementJSON struct defined with correct json tags for all six fields"
+      - "tryParseGraphElement performs exactly one json.Unmarshal call per value"
+      - "tryParseNode and tryParseRelationship removed or replaced"
+      - "Node shape (labels present, type absent) correctly returned as *Node"
+      - "Relationship shape (type/start_id/end_id present) correctly returned as *Relationship"
+      - "CGO_ENABLED=0 go test -count=1 ./... passes"
+      - "CGO_ENABLED=0 go test -tags=tck ./compat/... reports 235/235"
+    status: completed
+    completed_at: "2026-06-08T22:45:00Z"
+
+  - id: task-004
+    title: 'Verify benchmark alloc reduction meets acceptance threshold'
+    description: |
+      Run the three allocation-reporting benchmarks and confirm the combined changes
+      (tasks 001-003) deliver at least a 25% reduction in allocs/op on
+      BenchmarkCollectLargeResult versus the documented baseline of 479774 allocs/op.
+      Record the new numbers. Also confirm BenchmarkRunQuerySimpleSelect and
+      BenchmarkMatchByLabel allocs/op have decreased.
+    status: completed
+    dependencies:
+      - task-002
+      - task-003
+    acceptance_criteria:
+      - "BenchmarkCollectLargeResult allocs/op <= 359830 (25% below 479774 baseline)"
+      - "BenchmarkRunQuerySimpleSelect allocs/op lower than 47752 baseline"
+      - "BenchmarkMatchByLabel allocs/op lower than 239769 baseline"
+      - "go vet ./... clean"
+      - "CGO_ENABLED=0 go test -count=1 ./... passes"
+    completed_at: "2026-06-08T22:50:00Z"

@@ -305,6 +305,17 @@ func (c *counters) ContainsUpdates() bool {
 // Column value mapper
 // ─────────────────────────────────────────────────────────────────────────────
 
+// graphElementJSON is the common shape for both node and relationship JSON
+// objects emitted by the SQL translator's VarExpr projections.
+type graphElementJSON struct {
+	ID      json.Number     `json:"id"`
+	Labels  string          `json:"labels"`
+	Type    string          `json:"type"`
+	StartID json.Number     `json:"start_id"`
+	EndID   json.Number     `json:"end_id"`
+	Props   json.RawMessage `json:"props"`
+}
+
 // mapColumnValue converts a raw SQLite column value to a graph type.
 //
 // The translator emits whole-node VarExpr projections as:
@@ -323,11 +334,8 @@ func mapColumnValue(v any) any {
 	case string:
 		// JSON object columns from VarExpr projections start with '{'.
 		if len(val) > 0 && val[0] == '{' {
-			if node := tryParseNode(val); node != nil {
-				return node
-			}
-			if rel := tryParseRelationship(val); rel != nil {
-				return rel
+			if elem := tryParseGraphElement(val); elem != nil {
+				return elem
 			}
 		}
 		return val
@@ -335,11 +343,8 @@ func mapColumnValue(v any) any {
 		// SQLite may return JSON columns as []byte.
 		s := string(val)
 		if len(s) > 0 && s[0] == '{' {
-			if node := tryParseNode(s); node != nil {
-				return node
-			}
-			if rel := tryParseRelationship(s); rel != nil {
-				return rel
+			if elem := tryParseGraphElement(s); elem != nil {
+				return elem
 			}
 		}
 		return s
@@ -348,112 +353,38 @@ func mapColumnValue(v any) any {
 	}
 }
 
-// tryParseNode attempts to decode a JSON string as a node object.
-// Returns nil if the JSON does not match the node shape.
-func tryParseNode(s string) *Node {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(s), &raw); err != nil {
+// tryParseGraphElement attempts to decode a JSON string as either a node or
+// relationship object using a single unmarshal call. Returns nil if the JSON
+// does not match either shape.
+func tryParseGraphElement(s string) any {
+	var elem graphElementJSON
+	if err := json.Unmarshal([]byte(s), &elem); err != nil {
 		return nil
 	}
-	// Must have 'id', 'labels', and 'props'; must NOT have 'type' (that would be a rel).
-	if _, hasID := raw["id"]; !hasID {
+	if elem.ID == "" || len(elem.Props) == 0 {
 		return nil
 	}
-	labelsRaw, hasLabels := raw["labels"]
-	propsRaw, hasProps := raw["props"]
-	if !hasLabels || !hasProps {
-		return nil
-	}
-	if _, hasType := raw["type"]; hasType {
-		return nil // relationship shape
-	}
-
-	// Decode id.
-	var idVal any
-	if err := json.Unmarshal(raw["id"], &idVal); err != nil {
-		return nil
-	}
-	elemID := jsonNumberToElementID(idVal)
-
-	// Decode labels (comma-separated string).
-	var labelsStr string
-	if err := json.Unmarshal(labelsRaw, &labelsStr); err != nil {
-		return nil
-	}
-	labels := splitLabels(labelsStr)
-
-	// Decode props.
-	props, err := decodeProps(propsRaw)
+	props, err := decodeProps(elem.Props)
 	if err != nil {
 		return nil
 	}
-
-	return &Node{
-		ElementId: elemID,
-		Labels:    labels,
-		Props:     props,
-	}
-}
-
-// tryParseRelationship attempts to decode a JSON string as a relationship object.
-// Returns nil if the JSON does not match the relationship shape.
-func tryParseRelationship(s string) *Relationship {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(s), &raw); err != nil {
-		return nil
-	}
-	// Must have 'id', 'type', 'start_id', 'end_id', 'props'.
-	for _, key := range []string{"id", "type", "start_id", "end_id", "props"} {
-		if _, ok := raw[key]; !ok {
-			return nil
+	if elem.Type != "" && elem.StartID != "" && elem.EndID != "" {
+		return &Relationship{
+			ElementId:      elem.ID.String(),
+			Type:           elem.Type,
+			StartElementId: elem.StartID.String(),
+			EndElementId:   elem.EndID.String(),
+			Props:          props,
 		}
 	}
-
-	var idVal any
-	if err := json.Unmarshal(raw["id"], &idVal); err != nil {
-		return nil
+	if elem.Type == "" {
+		return &Node{
+			ElementId: elem.ID.String(),
+			Labels:    splitLabels(elem.Labels),
+			Props:     props,
+		}
 	}
-	var startIDVal any
-	if err := json.Unmarshal(raw["start_id"], &startIDVal); err != nil {
-		return nil
-	}
-	var endIDVal any
-	if err := json.Unmarshal(raw["end_id"], &endIDVal); err != nil {
-		return nil
-	}
-	var relType string
-	if err := json.Unmarshal(raw["type"], &relType); err != nil {
-		return nil
-	}
-	props, err := decodeProps(raw["props"])
-	if err != nil {
-		return nil
-	}
-
-	return &Relationship{
-		ElementId:      jsonNumberToElementID(idVal),
-		Type:           relType,
-		StartElementId: jsonNumberToElementID(startIDVal),
-		EndElementId:   jsonNumberToElementID(endIDVal),
-		Props:          props,
-	}
-}
-
-// jsonNumberToElementID converts a JSON-decoded numeric id (float64 or
-// json.Number) to a stable string ElementId.
-func jsonNumberToElementID(v any) string {
-	switch n := v.(type) {
-	case float64:
-		return fmt.Sprintf("%d", int64(n))
-	case json.Number:
-		return n.String()
-	case int64:
-		return fmt.Sprintf("%d", n)
-	case string:
-		return n
-	default:
-		return fmt.Sprintf("%v", v)
-	}
+	return nil
 }
 
 // splitLabels splits a comma-separated labels string into a slice. An empty
