@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -444,11 +445,11 @@ func tryParseRelationship(s string) *Relationship {
 func jsonNumberToElementID(v any) string {
 	switch n := v.(type) {
 	case float64:
-		return fmt.Sprintf("%d", int64(n))
+		return strconv.FormatInt(int64(n), 10)
 	case json.Number:
 		return n.String()
 	case int64:
-		return fmt.Sprintf("%d", n)
+		return strconv.FormatInt(n, 10)
 	case string:
 		return n
 	default:

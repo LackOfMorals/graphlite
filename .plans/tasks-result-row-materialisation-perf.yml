@@ -10,14 +10,14 @@ tasks:
       In result.go, replace the two fmt.Sprintf("%d", int64(n)) calls in jsonNumberToElementID
       with strconv.FormatInt(int64(n), 10). Remove the "fmt" import if it is no longer used
       elsewhere in result.go after this change.
-    status: pending
+    status: completed
     dependencies: []
     acceptance_criteria:
       - "jsonNumberToElementID float64 and int64 branches use strconv.FormatInt, not fmt.Sprintf"
       - '"fmt" import removed from result.go if unused'
       - "CGO_ENABLED=0 go test -count=1 ./... passes"
       - "go vet ./... clean"
-    completed_at: null
+    completed_at: "2026-06-08T22:25:00Z"
 
   - id: task-002
     title: 'Share keys slice by reference in newRecord'
