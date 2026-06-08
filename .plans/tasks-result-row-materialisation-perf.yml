@@ -44,7 +44,7 @@ tasks:
       that unmarshals once into this struct and detects shape via field presence
       (node: Type==""; relationship: Type!="" && StartID!="" && EndID!="").
       mapColumnValue calls tryParseGraphElement instead of the two existing functions.
-    status: pending
+    status: completed
     dependencies:
       - task-001
     acceptance_criteria:
@@ -55,7 +55,8 @@ tasks:
       - "Relationship shape (type/start_id/end_id present) correctly returned as *Relationship"
       - "CGO_ENABLED=0 go test -count=1 ./... passes"
       - "CGO_ENABLED=0 go test -tags=tck ./compat/... reports 235/235"
-    completed_at: null
+    status: completed
+    completed_at: "2026-06-08T22:45:00Z"
 
   - id: task-004
     title: 'Verify benchmark alloc reduction meets acceptance threshold'

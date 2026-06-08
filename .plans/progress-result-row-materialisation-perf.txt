@@ -5,3 +5,8 @@ Files: ~result.go
 ## TASK-002 — 2026-06-08T22:30:00Z
 Share keys slice by reference in newRecord, eliminating one allocation and copy per row; values still copied since Result.Next reuses its vals buffer across rows.
 Files: ~types.go
+
+## TASK-003 — 2026-06-08T22:45:00Z
+Replace tryParseNode/tryParseRelationship (two separate json.Unmarshal-into-map calls) with a single tryParseGraphElement using a typed graphElementJSON struct. Removed jsonNumberToElementID (dead after refactor) and strconv import. The 12 TCK failures are pre-existing on this branch.
+Files: ~result.go
+Decisions: Guard requires both elem.ID != "" and len(elem.Props) > 0 to match old key-presence checks; relationship additionally requires StartID and EndID non-empty.
