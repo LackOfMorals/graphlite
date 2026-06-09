@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
-	"encoding/json"
+	json "github.com/goccy/go-json"
 	"errors"
 	"fmt"
 	"io"
