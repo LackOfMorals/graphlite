@@ -2,7 +2,7 @@ package graphlite
 
 import (
 	"context"
-	"encoding/json"
+	json "github.com/goccy/go-json"
 	"fmt"
 	"math"
 )
