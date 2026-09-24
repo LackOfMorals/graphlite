@@ -1,0 +1,222 @@
+feature: cypher-baseline-coverage
+prd: ./prd-cypher-baseline-coverage.md
+created_at: 2026-09-24T00:00:00Z
+updated_at: 2026-09-24T00:00:00Z
+
+tasks:
+  - id: task-001
+    title: "Add UnwindClause AST node and parser support"
+    description: |
+      Add `UnwindClause { Expr Expr; Variable string }` to cypher/ast.go
+      following the shape of the existing WithClause. Add `buildUnwindClause`
+      to cypher/parser.go, wired into the reading/updating clause dispatch
+      (buildReadingClause or buildSinglePartQuery/buildMultiPartQuery) so
+      `UNWIND <expr> AS <var>` parses into the new AST node. Remove the
+      "UNWIND" entry from compat/tck_test.go's unsupportedPatterns only after
+      task-003 makes the full pipeline work end-to-end.
+    status: pending
+    dependencies: []
+    acceptance_criteria:
+      - "cypher/ast.go declares UnwindClause"
+      - "cypher/parser.go parses `UNWIND [1,2,3] AS x` into an UnwindClause with Variable == \"x\""
+      - "A parser unit test covers UNWIND with a literal list, a property list, and a parameter list"
+
+  - id: task-002
+    title: "Add UnwindPlan logical plan node and planner support"
+    description: |
+      Add an UnwindPlan node to cypher/plan.go. Add planUnwindClause to
+      cypher/planner.go that binds Variable into the BindingScope as a scalar
+      (not a node/relationship binding) and threads the UnwindPlan into the
+      logical plan tree at the correct position relative to preceding
+      MATCH/WITH clauses.
+    status: pending
+    dependencies:
+      - task-001
+    acceptance_criteria:
+      - "cypher/plan.go declares UnwindPlan"
+      - "planUnwindClause binds the UNWIND variable into BindingScope with IsRel=false, IsScalar=true (or equivalent)"
+      - "A planner unit test confirms the bound variable is visible to a subsequent WHERE/RETURN referencing it"
+
+  - id: task-003
+    title: "Translate UnwindPlan to SQL via json_each()"
+    description: |
+      In sql/translator.go, translate UnwindPlan into a `, json_each(<list-json-expr>)
+      AS <alias>` join, exposing `<alias>.value` as the bound variable's SQL
+      column. The list expression must be JSON-encoded consistently with how
+      list literals are already bound in translator.go (see the *cypher.ListExpr
+      case around translator.go:1700). Wire the resulting column into scope
+      column-name resolution the same way node/relationship variable columns are
+      resolved.
+    status: pending
+    dependencies:
+      - task-002
+    acceptance_criteria:
+      - "`UNWIND [1,2,3] AS x RETURN x` executes via db.RunQuery and returns 3 records with values 1, 2, 3"
+      - "`UNWIND` combined with a preceding MATCH correctly cross-joins per matched row"
+      - "Remove \"UNWIND\" from compat/tck_test.go's unsupportedPatterns; TCK suite still passes at >= 50% executed"
+      - "CGO_ENABLED=0 go test -tags=unit -count=1 ./... passes"
+
+  - id: task-004
+    title: "Add ScalarCallExpr AST/plan node for scalar functions"
+    description: |
+      Add a ScalarCallExpr node to cypher/plan.go (Func string, Args []Expr).
+      Update buildFunctionInvocation in cypher/parser.go so that any function
+      name in a fixed allowlist (toLower, toUpper, trim, split, size, length,
+      abs, ceil, floor, round, type, labels, keys, id, nodes, relationships,
+      head, tail, last, toString, toInteger, toFloat, toBoolean, range,
+      coalesce) produces a ScalarCallExpr instead of falling through to
+      RawExpr. Every other function name keeps falling through to RawExpr
+      unchanged (still rejected downstream).
+    status: pending
+    dependencies: []
+    acceptance_criteria:
+      - "cypher/plan.go declares ScalarCallExpr"
+      - "buildFunctionInvocation produces ScalarCallExpr for each of the 24 listed function names"
+      - "Function names not in the allowlist still produce RawExpr (no regression for genuinely unsupported functions)"
+      - "Parser unit tests cover at least one function from each of string/math/graph-shape/list categories"
+
+  - id: task-005
+    title: "Translate string/math scalar functions to SQL"
+    description: |
+      In sql/translator.go, translate ScalarCallExpr for toLower, toUpper,
+      trim, size, length, abs, ceil, floor, round, toString, toInteger,
+      toFloat, toBoolean to their SQLite equivalents (LOWER, UPPER, TRIM,
+      LENGTH/json_array_length, ABS, ROUND, CAST). Verify whether
+      modernc.org/sqlite exposes CEIL/FLOOR natively (SQLITE_ENABLE_MATH_FUNCTIONS);
+      if not, implement via a CASE-based integer-truncation expression.
+    status: pending
+    dependencies:
+      - task-004
+    acceptance_criteria:
+      - "`RETURN toLower('ABC')`, `toUpper`, `trim`, `size([1,2,3])`, `length('abc')` all execute and return correct values"
+      - "`abs(-3)`, `ceil(1.2)`, `floor(1.8)`, `round(1.456)` all execute and return correct values"
+      - "`toString(1)`, `toInteger('1')`, `toFloat('1.5')`, `toBoolean('true')` all execute and return correctly typed values"
+      - "Remove the corresponding entries from compat/tck_test.go's unsupportedPatterns"
+
+  - id: task-006
+    title: "Implement split() via recursive-CTE string splitting"
+    description: |
+      Implement split(string, delimiter) by reusing the recursive-CTE
+      splitting pattern already used in store/schema.go's node_labels trigger,
+      parameterised by delimiter, emitted as a scalar subquery producing a
+      JSON array (so split() composes with size()/head()/etc). Restrict v1 to
+      single-character delimiters per the PRD's open question; document the
+      restriction in the function's doc comment.
+    status: pending
+    dependencies:
+      - task-005
+    acceptance_criteria:
+      - "`split('a,b,c', ',')` returns a 3-element list usable by size()/head()"
+      - "A multi-character delimiter returns a clear ErrUnsupportedCypher rather than wrong results"
+      - "Remove \"split(\" from compat/tck_test.go's unsupportedPatterns"
+
+  - id: task-007
+    title: "Translate graph-shape functions: type, id, labels, keys"
+    description: |
+      Translate type(r) to a reference to the edges.type column already
+      selected for the relationship variable. Translate id(n)/id(r) to the
+      existing nodes.id/edges.id column. Translate labels(n) to a
+      json_group_array(label) subquery against node_labels keyed by node_id
+      (not the raw labels column, per AGENTS.md's indexing guidance).
+      Translate keys(n)/keys(r) to a json_group_array(key) over
+      json_each(props).
+    status: pending
+    dependencies:
+      - task-004
+    acceptance_criteria:
+      - "`MATCH (n:Person) RETURN labels(n)` returns the correct label list per node, sourced from node_labels"
+      - "`MATCH ()-[r]->() RETURN type(r)` returns the relationship type string"
+      - "`MATCH (n) RETURN id(n)` returns the node's integer id"
+      - "`MATCH (n) RETURN keys(n)` returns the property key list"
+      - "Remove type(/labels(/keys(/id( entries from compat/tck_test.go's unsupportedPatterns"
+
+  - id: task-008
+    title: "Translate list functions: head, tail, last, range, coalesce"
+    description: |
+      Translate head(list)/last(list) to json_extract with JSON path index
+      expressions (first/last element by json_array_length). Translate
+      tail(list) to a JSON slice built via json_each with a WHERE key > 0
+      aggregated back into json_group_array. Translate range(start, end[, step])
+      to a recursive CTE generating the integer sequence, JSON-aggregated.
+      Translate coalesce(a, b, ...) to SQL COALESCE directly (values are
+      already scalar-typed at this point, so no JSON wrapping needed).
+    status: pending
+    dependencies:
+      - task-004
+    acceptance_criteria:
+      - "`head([1,2,3])` returns 1, `last([1,2,3])` returns 3, `tail([1,2,3])` returns [2,3]"
+      - "`range(1,5)` returns [1,2,3,4,5]; `range(1,10,2)` returns [1,3,5,7,9]"
+      - "`coalesce(null, null, 3)` returns 3"
+      - "Remove head(/tail(/last(/range(/coalesce( entries from compat/tck_test.go's unsupportedPatterns"
+
+  - id: task-009
+    title: "Add CallSubqueryClause AST/plan node and parser support"
+    description: |
+      Add CallSubqueryClause (wrapping a nested *Query) to cypher/ast.go. Add
+      buildCallSubqueryClause to cypher/parser.go, recursively invoking
+      buildSinglePartQuery/buildMultiPartQuery for the inner `{ ... }` query.
+      Remove the "CALL {" entry from compat/tck_test.go's unsupportedPatterns
+      only after task-011 makes the pipeline work end-to-end.
+    status: pending
+    dependencies: []
+    acceptance_criteria:
+      - "cypher/ast.go declares CallSubqueryClause"
+      - "cypher/parser.go parses `CALL { MATCH (n) RETURN n }` into a CallSubqueryClause wrapping a valid inner Query"
+      - "A parser unit test covers both an uncorrelated inner query and one referencing an outer variable"
+
+  - id: task-010
+    title: "Decide and implement CALL {} correlation semantics in the planner"
+    description: |
+      Resolve the PRD's open question: implement always-correlated CALL {}
+      subquery scoping for v1 (inner query's BindingScope is seeded from the
+      outer scope's currently-bound variables). Add planCallSubqueryClause to
+      cypher/planner.go producing a CallSubqueryPlan logical-plan node that
+      records which outer variables the inner plan references.
+    status: pending
+    dependencies:
+      - task-009
+    acceptance_criteria:
+      - "cypher/plan.go declares CallSubqueryPlan"
+      - "planCallSubqueryClause correctly seeds the inner scope from the outer scope"
+      - "A planner unit test confirms an inner query referencing an outer-bound variable resolves correctly"
+      - "The correlation decision and its rationale are recorded in the task's progress log entry"
+
+  - id: task-011
+    title: "Translate CallSubqueryPlan to correlated SQL"
+    description: |
+      In sql/translator.go, translate CallSubqueryPlan into a correlated SQL
+      subquery/CTE. Where a single correlated SQL statement cannot express the
+      "once per outer row" semantics, fall back to the per-matched-row
+      execution loop pattern already used in driver.go's execWriteThenSelect
+      (driver.go:356-423) as a model, executing the inner query once per outer
+      row and stitching results together in Go.
+    status: pending
+    dependencies:
+      - task-010
+    acceptance_criteria:
+      - "`CALL { MATCH (n:Person) RETURN n.name AS name } RETURN name` executes for the uncorrelated case"
+      - "A correlated CALL {} referencing an outer variable executes once per outer row with correct cardinality"
+      - "Remove \"CALL {\" from compat/tck_test.go's unsupportedPatterns"
+      - "CGO_ENABLED=0 go test -tags=unit -count=1 ./... passes"
+
+  - id: task-012
+    title: "Final verification and README update"
+    description: |
+      Run the full verification checklist: go build ./..., go vet ./...,
+      CGO_ENABLED=0 go test -tags=unit -count=1 ./..., and
+      CGO_ENABLED=0 go test -tags=tck ./compat/... capturing the new
+      executed/passed/skipped scenario counts. Update README.md's feature
+      table and TCK pass-rate claim to reflect the new counts and the three
+      newly-supported feature areas.
+    status: pending
+    dependencies:
+      - task-003
+      - task-006
+      - task-007
+      - task-008
+      - task-011
+    acceptance_criteria:
+      - "go build ./... and go vet ./... pass cleanly"
+      - "CGO_ENABLED=0 go test -tags=unit -count=1 ./... passes"
+      - "CGO_ENABLED=0 go test -tags=tck ./compat/... passes with a higher executed-scenario count than the pre-PRD baseline"
+      - "README.md reflects UNWIND, the 24 scalar functions, and CALL {} as supported"
