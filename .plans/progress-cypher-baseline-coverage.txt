@@ -525,3 +525,87 @@ Verification:
 - CGO_ENABLED=0 go test -tags=tck ./compat/...: pass, 244/272 (89.7%)
 
 Next Task: task-009 (Add CallSubqueryClause AST/plan node and parser support)
+
+================================================================================
+TASK-009: Add CallSubqueryClause AST/plan node and parser support
+Date: 2026-09-24T00:00:00Z
+================================================================================
+
+Summary:
+Major discovery before writing any code: the vendored ANTLR grammar
+(cloudprivacylabs/opencypher) has NO rule for "CALL { subquery }" at all —
+only for "CALL <procedure>(...)" (a stored-procedure call, a completely
+different construct). Confirmed by inspecting the generated parser
+(OC_InQueryCallContext's accessors are CALL + OC_ExplicitProcedureInvocation
++ optional YIELD — no brace-delimited subquery rule anywhere) and by
+directly running the ANTLR parser on "CALL foo()" to see its CST shape.
+Since AGENTS.md already documents the antlr4-go runtime as frozen (locked
+pseudo-version, no newer opencypher release exists), regenerating the
+grammar was not a viable option. Flagged this to the user before proceeding
+rather than silently working around it or silently giving up — chose the
+hand-rolled preprocessor path.
+
+Implemented cypher/subquery.go: extractCallSubqueries scans the raw Cypher
+text for "CALL {" (case-insensitive, word-boundary-checked so it doesn't
+match inside a longer identifier), brace-matches to find the block's end
+(nested-brace-aware and string-literal-aware — a '{' or '}' inside a quoted
+string does not affect the balance, honouring the same backslash-escape
+convention as the existing unquoteString), and replaces each block with a
+synthetic "CALL __graphlite_subquery_<N>()" — verified via a standalone
+script that this exact shape parses cleanly through the real ANTLR grammar
+as an ordinary oC_InQueryCall. Each extracted inner text is recursively
+parsed via Parse itself (not a separate code path), which means nested
+"CALL { CALL { ... } }" is handled automatically by ordinary recursion with
+no special-casing.
+
+buildCallSubqueryClause (also in subquery.go) recognises the
+"__graphlite_subquery_" prefix on a real oC_InQueryCall's procedure name and
+substitutes the corresponding pre-parsed *Query back in as a
+CallSubqueryClause; any other procedure name (a genuine "CALL db.labels()")
+still returns a clear "not supported" error, not a false match.
+
+Threaded a new subqueries []*Query parameter through the existing
+buildQuery -> buildSingleQuery -> buildSinglePartQuery/buildMultiPartQuery
+-> buildReadingClause call chain (the only functions that needed it — all
+other AST builders are unaffected).
+
+Files Changed:
+- cypher/ast.go (added CallSubqueryClause{Inner *Query})
+- cypher/subquery.go (new file: extractCallSubqueries, matchBrace,
+  skipStringLiteral, isCallKeywordAt, isIdentChar, skipInlineWhitespace,
+  buildCallSubqueryClause)
+- cypher/parser.go (Parse now runs extractCallSubqueries first and
+  recursively parses each inner block; buildQuery/buildSingleQuery/
+  buildSinglePartQuery/buildMultiPartQuery/buildReadingClause all thread
+  subqueries []*Query through; buildReadingClause dispatches
+  OC_InQueryCall to buildCallSubqueryClause)
+- cypher/parser_test.go (added getCallSubquery helper and 6 tests:
+  uncorrelated subquery, a leading importing WITH, doubly-nested CALL {},
+  a brace inside a string literal not confusing the matcher, an
+  unterminated block producing a clear error, and a genuine procedure call
+  still being rejected)
+
+Key Decisions:
+- Preprocessing happens entirely in Go, before ANTLR ever sees the text —
+  the grammar itself is untouched, so this carries zero risk to the frozen
+  antlr4-go dependency.
+- The synthetic placeholder is a plain identifier + "()" (no dots, no
+  args) specifically because that is the simplest shape confirmed to parse
+  through oC_ExplicitProcedureInvocation without ambiguity.
+- No planner/translator changes yet — a query containing a
+  CallSubqueryClause parses correctly but fails at planning time with
+  "unsupported clause type *cypher.CallSubqueryClause" (planQuery's
+  default case), which is the same safe, non-panicking behavior every
+  other not-yet-planned clause type already has. "CALL {" stays in
+  compat/tck_test.go's unsupportedPatterns until task-011 lands.
+
+Verification:
+- CGO_ENABLED=0 go build ./...: clean
+- go vet ./...: clean
+- CGO_ENABLED=0 go test -tags=unit -count=1 ./... (timeout 60s): all pass
+- CGO_ENABLED=0 go test -tags=tck ./compat/...: pass, unchanged (CALL {
+  scenarios remain skipped as before — no planner/translator support yet)
+
+Next Task: task-010 (Decide and implement CALL {} correlation semantics —
+RESOLVED as strict scoping per user decision; see that task's updated
+description in tasks-cypher-baseline-coverage.yml)

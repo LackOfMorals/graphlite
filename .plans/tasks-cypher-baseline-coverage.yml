@@ -172,45 +172,79 @@ tasks:
       buildSinglePartQuery/buildMultiPartQuery for the inner `{ ... }` query.
       Remove the "CALL {" entry from compat/tck_test.go's unsupportedPatterns
       only after task-011 makes the pipeline work end-to-end.
-    status: pending
+    status: completed
     dependencies: []
     acceptance_criteria:
       - "cypher/ast.go declares CallSubqueryClause"
       - "cypher/parser.go parses `CALL { MATCH (n) RETURN n }` into a CallSubqueryClause wrapping a valid inner Query"
       - "A parser unit test covers both an uncorrelated inner query and one referencing an outer variable"
+    completed_at: "2026-09-24T00:00:00Z"
+    resolution_note: |
+      Discovered the vendored ANTLR grammar has NO rule for "CALL { subquery
+      }" at all (only for "CALL <procedure>(...)", a stored-procedure call)
+      — this was not visible from the PRD alone and materially changed this
+      task's shape. Since the antlr4-go runtime is frozen (AGENTS.md), the
+      grammar itself cannot be extended. Implemented instead as a
+      string-literal-aware brace-matching preprocessor (cypher/subquery.go)
+      that extracts each "CALL { ... }" block before the text reaches
+      ANTLR, recursively parses its inner text via Parse (handling nesting
+      via ordinary recursion), and substitutes a synthetic
+      "CALL __graphlite_subquery_<N>()" placeholder — a call shape the
+      grammar already accepts — which buildCallSubqueryClause recognises
+      and swaps back for the pre-parsed *Query. See the progress log.
 
   - id: task-010
     title: "Decide and implement CALL {} correlation semantics in the planner"
     description: |
-      Resolve the PRD's open question: implement always-correlated CALL {}
-      subquery scoping for v1 (inner query's BindingScope is seeded from the
-      outer scope's currently-bound variables). Add planCallSubqueryClause to
-      cypher/planner.go producing a CallSubqueryPlan logical-plan node that
-      records which outer variables the inner plan references.
+      RESOLVED (2026-09-24, user decision): strict scoping — the real
+      openCypher rule, not the PRD's originally-recommended always-correlated
+      fallback. The inner query sees NOTHING from the outer scope unless it
+      begins with an "importing WITH" naming exactly which outer variables to
+      bring in (e.g. "WITH n, m"); the imported names must be bare variable
+      references with no alias/expression/aggregation. Without such a
+      leading WITH, the inner query is planned against a completely fresh,
+      unrelated *BindingScope — not even lexically nested — and is therefore
+      uncorrelated. Add planCallSubqueryClause to cypher/planner.go
+      implementing exactly this: detect a leading pure-import WITH, copy only
+      the named outer Bindings into a fresh inner scope, plan the remaining
+      inner clauses against it, and produce a CallSubqueryPlan recording
+      whether it is correlated and which variables it imports.
     status: pending
     dependencies:
       - task-009
     acceptance_criteria:
       - "cypher/plan.go declares CallSubqueryPlan"
-      - "planCallSubqueryClause correctly seeds the inner scope from the outer scope"
-      - "A planner unit test confirms an inner query referencing an outer-bound variable resolves correctly"
-      - "The correlation decision and its rationale are recorded in the task's progress log entry"
+      - "A leading `WITH n, m` (bare variables only) imports exactly those Bindings from the outer scope into a fresh inner scope"
+      - "A subquery with no leading import-WITH is planned against a scope with zero visibility into the outer scope (referencing an outer variable inside it is an unresolved-variable error, not a lucky resolution)"
+      - "`WITH n AS x`, `WITH count(n)`, `WITH n.prop` (anything other than a bare variable list) are NOT treated as an importing WITH — the inner query proceeds as an ordinary (uncorrelated) first clause instead"
+      - "Importing a name not bound in the outer scope is a clear planning-time error"
+      - "A planner unit test confirms an inner query with a leading import-WITH correctly resolves the imported variable, and a planner unit test confirms an uncorrelated inner query cannot resolve an outer variable"
 
   - id: task-011
-    title: "Translate CallSubqueryPlan to correlated SQL"
+    title: "Execute CallSubqueryPlan: CROSS JOIN when uncorrelated, per-outer-row loop when correlated"
     description: |
-      In sql/translator.go, translate CallSubqueryPlan into a correlated SQL
-      subquery/CTE. Where a single correlated SQL statement cannot express the
-      "once per outer row" semantics, fall back to the per-matched-row
-      execution loop pattern already used in driver.go's execWriteThenSelect
-      (driver.go:356-423) as a model, executing the inner query once per outer
-      row and stitching results together in Go.
+      Two distinct execution strategies, chosen by whether task-010's
+      CallSubqueryPlan is correlated (has imported variables) or not:
+        - Uncorrelated: the inner query is independent of any outer row, so
+          translate it to SQL once and CROSS JOIN it onto the outer FROM/JOIN
+          chain in a single SQL statement (correct for read-only subqueries
+          since the same inner result set applies to every outer row).
+        - Correlated: no single SQL statement can express "once per outer
+          row with different bound values each time" without SQLite LATERAL
+          support (which doesn't exist). Fall back to a Go-level execution
+          loop mirroring driver.go's execWriteThenSelect/collectMatchRows
+          per-matched-row pattern: run the outer query far enough to
+          materialize each outer row's imported-variable values, then for
+          each outer row, bind those concrete values into a fresh execution
+          of the inner query (as anchor conditions — e.g. "WHERE n0.id = ?"
+          for an imported node/rel variable) and stitch the fanned-out
+          results back onto that outer row in Go.
     status: pending
     dependencies:
       - task-010
     acceptance_criteria:
-      - "`CALL { MATCH (n:Person) RETURN n.name AS name } RETURN name` executes for the uncorrelated case"
-      - "A correlated CALL {} referencing an outer variable executes once per outer row with correct cardinality"
+      - "`CALL { MATCH (n:Person) RETURN n.name AS name } RETURN name` executes for the uncorrelated case, via a single SQL statement (verify via a translator test asserting no per-row Go loop is used)"
+      - "A correlated `CALL { WITH n ... }` referencing an outer variable executes once per outer row with correct cardinality and correct per-row values"
       - "Remove \"CALL {\" from compat/tck_test.go's unsupportedPatterns"
       - "CGO_ENABLED=0 go test -tags=unit -count=1 ./... passes"
 

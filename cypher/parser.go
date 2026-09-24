@@ -25,7 +25,24 @@ import (
 //
 // Parse is safe to call from multiple goroutines.
 func Parse(input string) (*Query, error) {
-	p := opencypher.GetParser(input)
+	// "CALL { subquery }" has no rule in the vendored ANTLR grammar — extract
+	// and recursively parse each such block first, replacing it with a
+	// synthetic procedure-call placeholder the grammar does accept. See
+	// subquery.go for why and how.
+	rewritten, innerTexts, err := extractCallSubqueries(input)
+	if err != nil {
+		return nil, err
+	}
+	subqueries := make([]*Query, len(innerTexts))
+	for i, text := range innerTexts {
+		sq, err := Parse(text)
+		if err != nil {
+			return nil, fmt.Errorf("cypher: CALL {} subquery: %w", err)
+		}
+		subqueries[i] = sq
+	}
+
+	p := opencypher.GetParser(rewritten)
 
 	// Attach a custom error listener so syntax errors surface as Go errors
 	// rather than printing to stderr and continuing.
@@ -38,7 +55,7 @@ func Parse(input string) (*Query, error) {
 		return nil, fmt.Errorf("cypher syntax error: %w", errLst.err)
 	}
 
-	return buildQuery(tree.(*parser.OC_CypherContext))
+	return buildQuery(tree.(*parser.OC_CypherContext), subqueries)
 }
 
 // ─── internal error listener ──────────────────────────────────────────────────
@@ -62,7 +79,7 @@ func (e *errorCollector) SyntaxError(
 
 // ─── CST → AST builder ────────────────────────────────────────────────────────
 
-func buildQuery(ctx *parser.OC_CypherContext) (*Query, error) {
+func buildQuery(ctx *parser.OC_CypherContext, subqueries []*Query) (*Query, error) {
 	stmt := ctx.OC_Statement().(*parser.OC_StatementContext)
 	queryCtx := stmt.OC_Query().(*parser.OC_QueryContext)
 
@@ -78,25 +95,25 @@ func buildQuery(ctx *parser.OC_CypherContext) (*Query, error) {
 	}
 
 	sq := rq.OC_SingleQuery().(*parser.OC_SingleQueryContext)
-	return buildSingleQuery(sq)
+	return buildSingleQuery(sq, subqueries)
 }
 
-func buildSingleQuery(ctx *parser.OC_SingleQueryContext) (*Query, error) {
+func buildSingleQuery(ctx *parser.OC_SingleQueryContext, subqueries []*Query) (*Query, error) {
 	if spq := ctx.OC_SinglePartQuery(); spq != nil {
-		return buildSinglePartQuery(spq.(*parser.OC_SinglePartQueryContext))
+		return buildSinglePartQuery(spq.(*parser.OC_SinglePartQueryContext), subqueries)
 	}
 	if mpq := ctx.OC_MultiPartQuery(); mpq != nil {
-		return buildMultiPartQuery(mpq.(*parser.OC_MultiPartQueryContext))
+		return buildMultiPartQuery(mpq.(*parser.OC_MultiPartQueryContext), subqueries)
 	}
 	return nil, fmt.Errorf("cypher: unrecognised query structure")
 }
 
-func buildSinglePartQuery(ctx *parser.OC_SinglePartQueryContext) (*Query, error) {
+func buildSinglePartQuery(ctx *parser.OC_SinglePartQueryContext, subqueries []*Query) (*Query, error) {
 	q := &Query{}
 
 	// Reading clauses (MATCH).
 	for _, rc := range ctx.AllOC_ReadingClause() {
-		clause, err := buildReadingClause(rc.(*parser.OC_ReadingClauseContext))
+		clause, err := buildReadingClause(rc.(*parser.OC_ReadingClauseContext), subqueries)
 		if err != nil {
 			return nil, err
 		}
@@ -124,7 +141,7 @@ func buildSinglePartQuery(ctx *parser.OC_SinglePartQueryContext) (*Query, error)
 	return q, nil
 }
 
-func buildMultiPartQuery(ctx *parser.OC_MultiPartQueryContext) (*Query, error) {
+func buildMultiPartQuery(ctx *parser.OC_MultiPartQueryContext, subqueries []*Query) (*Query, error) {
 	// Only support single-stage WITH pipelines for now.
 	if len(ctx.AllOC_With()) > 1 {
 		return nil, fmt.Errorf("cypher: multiple WITH stages are not yet supported")
@@ -134,7 +151,7 @@ func buildMultiPartQuery(ctx *parser.OC_MultiPartQueryContext) (*Query, error) {
 
 	// Reading clauses (MATCH) that appear before the WITH.
 	for _, rc := range ctx.AllOC_ReadingClause() {
-		clause, err := buildReadingClause(rc.(*parser.OC_ReadingClauseContext))
+		clause, err := buildReadingClause(rc.(*parser.OC_ReadingClauseContext), subqueries)
 		if err != nil {
 			return nil, err
 		}
@@ -161,7 +178,7 @@ func buildMultiPartQuery(ctx *parser.OC_MultiPartQueryContext) (*Query, error) {
 
 	// Final single-part query (RETURN, etc.).
 	if sp := ctx.OC_SinglePartQuery(); sp != nil {
-		finalQ, err := buildSinglePartQuery(sp.(*parser.OC_SinglePartQueryContext))
+		finalQ, err := buildSinglePartQuery(sp.(*parser.OC_SinglePartQueryContext), subqueries)
 		if err != nil {
 			return nil, err
 		}
@@ -223,14 +240,17 @@ func buildWithClause(ctx *parser.OC_WithContext) (*WithClause, error) {
 
 // ─── reading clauses ──────────────────────────────────────────────────────────
 
-func buildReadingClause(ctx *parser.OC_ReadingClauseContext) (Clause, error) {
+func buildReadingClause(ctx *parser.OC_ReadingClauseContext, subqueries []*Query) (Clause, error) {
 	if m := ctx.OC_Match(); m != nil {
 		return buildMatchClause(m.(*parser.OC_MatchContext))
 	}
 	if u := ctx.OC_Unwind(); u != nil {
 		return buildUnwindClause(u.(*parser.OC_UnwindContext))
 	}
-	return nil, fmt.Errorf("cypher: only MATCH and UNWIND are supported as reading clauses (got %q)", ctx.GetText())
+	if c := ctx.OC_InQueryCall(); c != nil {
+		return buildCallSubqueryClause(c.(*parser.OC_InQueryCallContext), subqueries)
+	}
+	return nil, fmt.Errorf("cypher: only MATCH, UNWIND, and CALL {} are supported as reading clauses (got %q)", ctx.GetText())
 }
 
 // buildUnwindClause parses an OC_UnwindContext into an UnwindClause AST node.

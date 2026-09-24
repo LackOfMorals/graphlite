@@ -44,6 +44,18 @@ func getUnwind(t *testing.T, q *cypher.Query, idx int) *cypher.UnwindClause {
 	return uc
 }
 
+func getCallSubquery(t *testing.T, q *cypher.Query, idx int) *cypher.CallSubqueryClause {
+	t.Helper()
+	if idx >= len(q.Clauses) {
+		t.Fatalf("clause index %d out of range (len=%d)", idx, len(q.Clauses))
+	}
+	csc, ok := q.Clauses[idx].(*cypher.CallSubqueryClause)
+	if !ok {
+		t.Fatalf("clause[%d] is %T, want *CallSubqueryClause", idx, q.Clauses[idx])
+	}
+	return csc
+}
+
 func getReturn(t *testing.T, q *cypher.Query, idx int) *cypher.ReturnClause {
 	t.Helper()
 	if idx >= len(q.Clauses) {
@@ -795,6 +807,80 @@ func TestParse_UnrecognisedFunction_FallsBackToRawExpr(t *testing.T) {
 	rc := getReturn(t, q, 0)
 	if _, ok := rc.Items[0].Expr.(*cypher.RawExpr); !ok {
 		t.Fatalf("Expr is %T, want *RawExpr", rc.Items[0].Expr)
+	}
+}
+
+// ─── CALL {} subqueries ─────────────────────────────────────────────────────
+
+func TestParse_CallSubquery_Uncorrelated(t *testing.T) {
+	q := mustParse(t, "CALL { MATCH (x:Person) RETURN x } RETURN x")
+
+	csc := getCallSubquery(t, q, 0)
+	if csc.Inner == nil {
+		t.Fatal("Inner is nil")
+	}
+	getMatch(t, csc.Inner, 0)
+	getReturn(t, csc.Inner, 1)
+}
+
+func TestParse_CallSubquery_WithImportingWith(t *testing.T) {
+	q := mustParse(t, "MATCH (n:Person) CALL { WITH n MATCH (n)-[:KNOWS]->(m) RETURN m } RETURN n, m")
+
+	getMatch(t, q, 0)
+	csc := getCallSubquery(t, q, 1)
+	if len(csc.Inner.Clauses) != 3 {
+		t.Fatalf("expected 3 inner clauses (WITH, MATCH, RETURN), got %d", len(csc.Inner.Clauses))
+	}
+	wc, ok := csc.Inner.Clauses[0].(*cypher.WithClause)
+	if !ok {
+		t.Fatalf("Inner.Clauses[0] is %T, want *WithClause", csc.Inner.Clauses[0])
+	}
+	if len(wc.Items) != 1 {
+		t.Fatalf("expected 1 WITH item, got %d", len(wc.Items))
+	}
+	ve, ok := wc.Items[0].Expr.(*cypher.VarExpr)
+	if !ok || ve.Name != "n" {
+		t.Errorf("WITH item = %+v, want VarExpr{Name: \"n\"}", wc.Items[0].Expr)
+	}
+}
+
+func TestParse_CallSubquery_Nested(t *testing.T) {
+	q := mustParse(t, "CALL { CALL { RETURN 1 AS x } RETURN x } RETURN x")
+
+	outer := getCallSubquery(t, q, 0)
+	inner := getCallSubquery(t, outer.Inner, 0)
+	if inner.Inner == nil {
+		t.Fatal("doubly-nested Inner is nil")
+	}
+	getReturn(t, inner.Inner, 0)
+}
+
+func TestParse_CallSubquery_BraceInsideStringLiteral(t *testing.T) {
+	// A '{' or '}' inside a string literal inside the subquery must not
+	// confuse the brace-matching preprocessor.
+	q := mustParse(t, `CALL { RETURN "a{b}c" AS x } RETURN x`)
+
+	csc := getCallSubquery(t, q, 0)
+	rc := getReturn(t, csc.Inner, 0)
+	lit, ok := rc.Items[0].Expr.(*cypher.LiteralExpr)
+	if !ok || lit.Value != "a{b}c" {
+		t.Errorf("Expr = %+v, want LiteralExpr{Value: \"a{b}c\"}", rc.Items[0].Expr)
+	}
+}
+
+func TestParse_CallSubquery_UnterminatedBraceIsError(t *testing.T) {
+	_, err := cypher.Parse("CALL { MATCH (x) RETURN x")
+	if err == nil {
+		t.Error("expected error for unterminated CALL {} block, got nil")
+	}
+}
+
+func TestParse_RealProcedureCallIsRejected(t *testing.T) {
+	// A genuine procedure call (not our synthetic subquery placeholder) must
+	// still be rejected, not silently misread.
+	_, err := cypher.Parse("CALL db.labels() RETURN 1")
+	if err == nil {
+		t.Error("expected error for an unsupported real procedure call, got nil")
 	}
 }
 

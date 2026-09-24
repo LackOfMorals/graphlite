@@ -242,6 +242,23 @@ type UnwindClause struct {
 
 func (*UnwindClause) clauseNode() {}
 
+// CallSubqueryClause represents a "CALL { <subquery> }" clause. Inner is the
+// fully-parsed nested query, produced by extractCallSubqueries's
+// brace-matching preprocessing pass (the vendored ANTLR grammar has no rule
+// for this construct — only for "CALL <procedure>(...)" — so the "{ ... }"
+// form is handled entirely in Go before the text reaches ANTLR).
+//
+// Scoping — which outer variables, if any, the subquery can see — is a
+// planning-time concern, not a parsing one: openCypher requires the inner
+// query to explicitly import outer variables via a leading "WITH v1, v2"
+// (see planCallSubqueryClause); without one, the subquery is planned
+// against a completely independent scope.
+type CallSubqueryClause struct {
+	Inner *Query
+}
+
+func (*CallSubqueryClause) clauseNode() {}
+
 // ReturnItem is one projection in a RETURN or WITH clause.
 type ReturnItem struct {
 	// ExprText is the raw expression text (e.g. "n.name", "n", "count(n)").
