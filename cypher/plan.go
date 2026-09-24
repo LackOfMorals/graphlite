@@ -167,6 +167,22 @@ type ListLiteralExpr struct {
 
 func (*ListLiteralExpr) exprNode() {}
 
+// ScalarCallExpr represents a call to a scalar (non-aggregate) Cypher
+// function, e.g. toLower(n.name), size(list), coalesce(a, b, c).
+//
+// Only function names in the parser's scalarFunctionNames allowlist produce
+// a ScalarCallExpr; every other function call falls back to RawExpr, which
+// the translator rejects unless the raw text happens to be a bare
+// identifier.
+type ScalarCallExpr struct {
+	// Func is the lowercase function name (e.g. "tolower", "size").
+	Func string
+	// Args is the ordered list of argument expressions.
+	Args []Expr
+}
+
+func (*ScalarCallExpr) exprNode() {}
+
 // StringMatchExpr represents STARTS WITH, ENDS WITH, and CONTAINS predicates.
 type StringMatchExpr struct {
 	// Expr is the left-hand side expression (e.g. n.name).

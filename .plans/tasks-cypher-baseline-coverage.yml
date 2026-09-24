@@ -70,13 +70,14 @@ tasks:
       coalesce) produces a ScalarCallExpr instead of falling through to
       RawExpr. Every other function name keeps falling through to RawExpr
       unchanged (still rejected downstream).
-    status: pending
+    status: completed
     dependencies: []
     acceptance_criteria:
       - "cypher/plan.go declares ScalarCallExpr"
       - "buildFunctionInvocation produces ScalarCallExpr for each of the 24 listed function names"
       - "Function names not in the allowlist still produce RawExpr (no regression for genuinely unsupported functions)"
       - "Parser unit tests cover at least one function from each of string/math/graph-shape/list categories"
+    completed_at: "2026-09-24T00:00:00Z"
 
   - id: task-005
     title: "Translate string/math scalar functions to SQL"

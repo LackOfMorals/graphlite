@@ -169,3 +169,51 @@ Verification:
   executed, +1 newly passing, 24 newly failing on unrelated pre-existing gaps)
 
 Next Task: task-004 (Add ScalarCallExpr AST/plan node for scalar functions)
+
+================================================================================
+TASK-004: Add ScalarCallExpr AST/plan node for scalar functions
+Date: 2026-09-24T00:00:00Z
+================================================================================
+
+Summary:
+Added ScalarCallExpr{Func string, Args []Expr} to cypher/plan.go. Added a
+package-level scalarFunctionNames allowlist map (24 names: tolower, toupper,
+trim, split, size, length, abs, ceil, floor, round, type, labels, keys, id,
+nodes, relationships, head, tail, last, tostring, tointeger, tofloat,
+toboolean, range, coalesce) to cypher/parser.go. buildFunctionInvocation's
+default case (previously a bare RawExpr fallthrough) now checks this
+allowlist first via a new buildScalarCallExpr helper; every other function
+name is completely unchanged (still RawExpr, still rejected downstream by
+the translator's identifier-only allowlist).
+
+No translation to SQL yet — that is task-005 onward. This task is parser-
+only: a ScalarCallExpr for any of the 24 names exists in the AST, but the
+planner/translator don't yet have a case for it, so a query using one of
+these functions today produces an "unsupported expression type
+*cypher.ScalarCallExpr" translator error rather than working. This is
+expected and will resolve function-by-function across task-005/006/007/008.
+
+Files Changed:
+- cypher/plan.go (added ScalarCallExpr)
+- cypher/parser.go (added scalarFunctionNames, buildScalarCallExpr; wired
+  into buildFunctionInvocation's default case)
+- cypher/parser_test.go (6 new tests: one per category — string, math,
+  graph-shape, list — plus multi-arg coalesce, plus confirmation that an
+  unrecognised function name like sin() still falls back to RawExpr)
+
+Key Decisions:
+- Function names are matched case-insensitively via the existing
+  strings.ToLower(funcName) already done at the top of
+  buildFunctionInvocation for the aggregate/exists dispatch — no new
+  case-folding logic needed.
+- Kept the allowlist as a single flat map rather than splitting it by
+  category (string/math/graph-shape/list) in code, since the categories only
+  matter for how task-005/006/007/008 translate each one to SQL, not for
+  parsing.
+
+Verification:
+- CGO_ENABLED=0 go build ./...: clean
+- go vet ./...: clean
+- CGO_ENABLED=0 go test -tags=unit -count=1 ./...: all pass
+
+Next Task: task-005 (Translate string/math scalar functions to SQL)

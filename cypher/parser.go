@@ -1408,6 +1408,23 @@ func buildPropertyOrLabelsExpr(ctx *parser.OC_PropertyOrLabelsExpressionContext)
 // buildFunctionInvocation parses a function call into an Expr.
 // Aggregation functions (count, sum, avg, min, max) produce AggCallExpr.
 // All other functions fall back to RawExpr.
+// scalarFunctionNames is the fixed allowlist of scalar (non-aggregate)
+// Cypher functions that sql/translator.go knows how to translate via
+// ScalarCallExpr. Any function name not in this set falls back to RawExpr,
+// which the translator rejects unless the raw text happens to be a bare
+// identifier — this is a closed, deliberately curated list, not an attempt
+// to recognise every possible function name.
+var scalarFunctionNames = map[string]bool{
+	"tolower": true, "toupper": true, "trim": true, "split": true,
+	"size": true, "length": true,
+	"abs": true, "ceil": true, "floor": true, "round": true,
+	"type": true, "labels": true, "keys": true, "id": true,
+	"nodes": true, "relationships": true,
+	"head": true, "tail": true, "last": true,
+	"tostring": true, "tointeger": true, "tofloat": true, "toboolean": true,
+	"range": true, "coalesce": true,
+}
+
 func buildFunctionInvocation(ctx *parser.OC_FunctionInvocationContext) (Expr, error) {
 	nameCtx := ctx.OC_FunctionName()
 	funcName := strings.ToLower(trimWhitespace(nameCtx.GetText()))
@@ -1440,8 +1457,26 @@ func buildFunctionInvocation(ctx *parser.OC_FunctionInvocationContext) (Expr, er
 		// Fallback: treat as IS NOT NULL predicate on the inner expression.
 		return &NullCheckExpr{Expr: inner, IsNotNull: true}, nil
 	default:
+		if scalarFunctionNames[funcName] {
+			return buildScalarCallExpr(funcName, args)
+		}
 		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
 	}
+}
+
+// buildScalarCallExpr converts a scalar function call's argument list into a
+// ScalarCallExpr. funcName must already be confirmed present in
+// scalarFunctionNames by the caller.
+func buildScalarCallExpr(funcName string, args []parser.IOC_ExpressionContext) (Expr, error) {
+	exprArgs := make([]Expr, 0, len(args))
+	for _, a := range args {
+		e, err := buildExprFromCST(a)
+		if err != nil {
+			return nil, fmt.Errorf("cypher: %s() argument: %w", funcName, err)
+		}
+		exprArgs = append(exprArgs, e)
+	}
+	return &ScalarCallExpr{Func: funcName, Args: exprArgs}, nil
 }
 
 // buildAtomExpr converts an OC_AtomContext into an Expr.

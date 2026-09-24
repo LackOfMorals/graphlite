@@ -711,6 +711,93 @@ func TestParse_UnwindParamList(t *testing.T) {
 	}
 }
 
+// ─── scalar functions ────────────────────────────────────────────────────────
+
+func TestParse_ScalarFunction_String(t *testing.T) {
+	q := mustParse(t, "RETURN toLower('ABC')")
+	rc := getReturn(t, q, 0)
+	sc, ok := rc.Items[0].Expr.(*cypher.ScalarCallExpr)
+	if !ok {
+		t.Fatalf("Expr is %T, want *ScalarCallExpr", rc.Items[0].Expr)
+	}
+	if sc.Func != "tolower" {
+		t.Errorf("Func = %q, want %q", sc.Func, "tolower")
+	}
+	if len(sc.Args) != 1 {
+		t.Fatalf("len(Args) = %d, want 1", len(sc.Args))
+	}
+	lit, ok := sc.Args[0].(*cypher.LiteralExpr)
+	if !ok || lit.Value != "ABC" {
+		t.Errorf("Args[0] = %+v, want LiteralExpr{Value: \"ABC\"}", sc.Args[0])
+	}
+}
+
+func TestParse_ScalarFunction_Math(t *testing.T) {
+	q := mustParse(t, "RETURN abs(-3)")
+	rc := getReturn(t, q, 0)
+	sc, ok := rc.Items[0].Expr.(*cypher.ScalarCallExpr)
+	if !ok {
+		t.Fatalf("Expr is %T, want *ScalarCallExpr", rc.Items[0].Expr)
+	}
+	if sc.Func != "abs" {
+		t.Errorf("Func = %q, want %q", sc.Func, "abs")
+	}
+}
+
+func TestParse_ScalarFunction_GraphShape(t *testing.T) {
+	q := mustParse(t, "MATCH (n) RETURN labels(n)")
+	rc := getReturn(t, q, 1)
+	sc, ok := rc.Items[0].Expr.(*cypher.ScalarCallExpr)
+	if !ok {
+		t.Fatalf("Expr is %T, want *ScalarCallExpr", rc.Items[0].Expr)
+	}
+	if sc.Func != "labels" {
+		t.Errorf("Func = %q, want %q", sc.Func, "labels")
+	}
+	ve, ok := sc.Args[0].(*cypher.VarExpr)
+	if !ok || ve.Name != "n" {
+		t.Errorf("Args[0] = %+v, want VarExpr{Name: \"n\"}", sc.Args[0])
+	}
+}
+
+func TestParse_ScalarFunction_List(t *testing.T) {
+	q := mustParse(t, "RETURN head([1, 2, 3])")
+	rc := getReturn(t, q, 0)
+	sc, ok := rc.Items[0].Expr.(*cypher.ScalarCallExpr)
+	if !ok {
+		t.Fatalf("Expr is %T, want *ScalarCallExpr", rc.Items[0].Expr)
+	}
+	if sc.Func != "head" {
+		t.Errorf("Func = %q, want %q", sc.Func, "head")
+	}
+	if _, ok := sc.Args[0].(*cypher.ListLiteralExpr); !ok {
+		t.Fatalf("Args[0] is %T, want *ListLiteralExpr", sc.Args[0])
+	}
+}
+
+func TestParse_ScalarFunction_Coalesce_MultiArg(t *testing.T) {
+	q := mustParse(t, "RETURN coalesce(null, null, 3)")
+	rc := getReturn(t, q, 0)
+	sc, ok := rc.Items[0].Expr.(*cypher.ScalarCallExpr)
+	if !ok {
+		t.Fatalf("Expr is %T, want *ScalarCallExpr", rc.Items[0].Expr)
+	}
+	if len(sc.Args) != 3 {
+		t.Fatalf("len(Args) = %d, want 3", len(sc.Args))
+	}
+}
+
+func TestParse_UnrecognisedFunction_FallsBackToRawExpr(t *testing.T) {
+	// A function name outside the scalarFunctionNames allowlist (and not an
+	// aggregate/exists) must still fall back to RawExpr, unchanged, so it is
+	// rejected downstream rather than silently mishandled.
+	q := mustParse(t, "RETURN sin(1.0)")
+	rc := getReturn(t, q, 0)
+	if _, ok := rc.Items[0].Expr.(*cypher.RawExpr); !ok {
+		t.Fatalf("Expr is %T, want *RawExpr", rc.Items[0].Expr)
+	}
+}
+
 func TestParse_UnwindMissingVariable(t *testing.T) {
 	// UNWIND without AS <var> is a syntax error at the grammar level, so this
 	// should surface as a Parse error, not a panic.
