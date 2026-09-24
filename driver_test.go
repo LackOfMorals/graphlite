@@ -788,3 +788,44 @@ func TestRunQuery_UnaliasedAggregateColumnName(t *testing.T) {
 		})
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fresh relationship chain after a WITH boundary
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestRunQuery_FreshRelationshipChainAfterWith verifies that a MATCH clause
+// starting a brand new relationship chain (from a node not otherwise
+// connected to anything earlier in the query) after a WITH boundary
+// correctly joins its own start node's table. This previously produced
+// "no such column: nX.id" because buildFromClauseForSequence only
+// cross-joined a step's own FROM table when that step contributed no JOINs
+// of its own — true for a lone unconnected node (MATCH (a), (b)), but false
+// for a relationship hop, which always contributes both its own FROM
+// (the start node) and its own JOINs (the edge and end node).
+func TestRunQuery_FreshRelationshipChainAfterWith(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+	_, err := db.RunQuery(ctx, `CREATE (:A {n: 1}), (:B)-[:X]->(:C)`, nil)
+	if err != nil {
+		t.Fatalf("CREATE: %v", err)
+	}
+
+	qr, err := db.RunQuery(ctx,
+		`MATCH (a:A) WITH a MATCH (b:B)-[:X]->(c:C) RETURN a.n AS n, b.name AS bn`,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
+	recs, err := qr.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+	n, _ := recs[0].Get("n")
+	if n != int64(1) {
+		t.Errorf("n = %v, want 1", n)
+	}
+}

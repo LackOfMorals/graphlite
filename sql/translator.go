@@ -1171,6 +1171,18 @@ func (t *Translator) endNodeCond(mrp *cypher.MatchRelPlan, relAlias, startAlias,
 // allJoinArgs; WHERE args from all steps into allWhereArgs. The caller must
 // append allJoinArgs before allWhereArgs when assembling t.args, because SQL
 // places JOIN ON clauses before WHERE.
+// fromClauseAlias extracts the trailing SQL alias from a fromClause.from
+// string — e.g. "nodes n2" -> "n2", "edges r1" -> "r1",
+// "(SELECT ...) AS _sub0" -> "_sub0", "json_each(...) AS _uw0" -> "_uw0".
+// Every form buildFromClause* produces ends with exactly the alias as its
+// last whitespace-separated token.
+func fromClauseAlias(from string) string {
+	if idx := strings.LastIndexByte(from, ' '); idx >= 0 {
+		return from[idx+1:]
+	}
+	return from
+}
+
 func (t *Translator) buildFromClauseForSequence(sp *cypher.SequencePlan, scope *cypher.BindingScope) (fromClause, error) {
 	if len(sp.Steps) == 0 {
 		return fromClause{}, fmt.Errorf("sql: empty SequencePlan")
@@ -1181,6 +1193,15 @@ func (t *Translator) buildFromClauseForSequence(sp *cypher.SequencePlan, scope *
 	if err != nil {
 		return fromClause{}, err
 	}
+
+	// Track every SQL alias already introduced by steps processed so far
+	// (via collectPlanAliases, which reads the plan structure directly —
+	// not by parsing generated SQL text) so a later step's own "from" table
+	// (its start-node scan) is CROSS JOINed only when that alias is
+	// genuinely new, never when it's a continuation of an earlier step's
+	// already-joined node (see the loop below).
+	seenAliases := make(map[string]bool)
+	collectPlanAliases(sp.Steps[0], seenAliases)
 
 	// Promote any extraWhere from the first step so it is surfaced at the top
 	// level (e.g. a FilterPlan wrapping the first hop contributes a WHERE fragment).
@@ -1205,20 +1226,28 @@ func (t *Translator) buildFromClauseForSequence(sp *cypher.SequencePlan, scope *
 		if err != nil {
 			return fromClause{}, err
 		}
-		// A step that is a plain MatchNodePlan (or any step that contributes only
-		// a FROM table with no JOIN clause) must be folded in as a CROSS JOIN so
-		// its table alias is visible to the outer SELECT/WHERE. Without this the
-		// alias (e.g. n1) would be silently dropped from the query, causing
-		// "no such column: n1.id" errors for Cartesian-product patterns such as
-		// MATCH (a), (b) or MATCH (x:X), (y:Y) CREATE (x)-[:R]->(y).
-		if fc.from != "" && fc.joins == "" {
+		// This step's own "from" table (its start-node scan) must be folded in
+		// as a CROSS JOIN whenever that exact alias hasn't already been
+		// introduced by an earlier step — independently of whether this step
+		// ALSO contributes its own .joins. The two are not mutually exclusive:
+		// a MatchRelPlan starting a fresh (e.g. anonymous) node always sets
+		// .from to "nodes <its start alias>" AND has non-empty .joins for its
+		// edge/end-node — checking only "fc.joins == \"\"" (as this used to)
+		// missed exactly that case, silently dropping the start node's table
+		// from the query while its own .joins fragment still referenced that
+		// alias, producing a "no such column: nX.id" error. This is exactly
+		// what happens when a MATCH clause starts a brand new relationship
+		// chain partway through a sequence (e.g. after a WITH boundary), not
+		// just the already-handled Cartesian-product case (MATCH (a), (b)).
+		if fc.from != "" && !seenAliases[fromClauseAlias(fc.from)] {
 			crossJoin := "CROSS JOIN " + fc.from
 			if allJoins != "" {
 				allJoins += " " + crossJoin
 			} else {
 				allJoins = crossJoin
 			}
-		} else if fc.joins != "" {
+		}
+		if fc.joins != "" {
 			// Accumulate JOIN fragments and args (JOIN ON appears before WHERE in SQL,
 			// so joinArgs must be assembled before whereArgs at the final call site).
 			if allJoins != "" {
@@ -1227,6 +1256,7 @@ func (t *Translator) buildFromClauseForSequence(sp *cypher.SequencePlan, scope *
 				allJoins = fc.joins
 			}
 		}
+		collectPlanAliases(step, seenAliases)
 		allJoinArgs = append(allJoinArgs, fc.joinArgs...)
 		allWhere = append(allWhere, fc.whereFragments...)
 		allWhereArgs = append(allWhereArgs, fc.whereArgs...)
