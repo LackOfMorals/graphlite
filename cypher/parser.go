@@ -227,7 +227,26 @@ func buildReadingClause(ctx *parser.OC_ReadingClauseContext) (Clause, error) {
 	if m := ctx.OC_Match(); m != nil {
 		return buildMatchClause(m.(*parser.OC_MatchContext))
 	}
-	return nil, fmt.Errorf("cypher: only MATCH is supported as a reading clause in v0.1 (got %q)", ctx.GetText())
+	if u := ctx.OC_Unwind(); u != nil {
+		return buildUnwindClause(u.(*parser.OC_UnwindContext))
+	}
+	return nil, fmt.Errorf("cypher: only MATCH and UNWIND are supported as reading clauses (got %q)", ctx.GetText())
+}
+
+// buildUnwindClause parses an OC_UnwindContext into an UnwindClause AST node.
+func buildUnwindClause(ctx *parser.OC_UnwindContext) (*UnwindClause, error) {
+	expr, err := buildExprFromCST(ctx.OC_Expression())
+	if err != nil {
+		return nil, fmt.Errorf("cypher: UNWIND expression: %w", err)
+	}
+	varCtx := ctx.OC_Variable()
+	if varCtx == nil {
+		return nil, fmt.Errorf("cypher: UNWIND requires an AS variable")
+	}
+	return &UnwindClause{
+		Expr:     expr,
+		Variable: trimWhitespace(varCtx.GetText()),
+	}, nil
 }
 
 func buildMatchClause(ctx *parser.OC_MatchContext) (*MatchClause, error) {

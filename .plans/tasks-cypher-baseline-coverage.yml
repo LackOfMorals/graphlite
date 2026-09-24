@@ -14,12 +14,13 @@ tasks:
       `UNWIND <expr> AS <var>` parses into the new AST node. Remove the
       "UNWIND" entry from compat/tck_test.go's unsupportedPatterns only after
       task-003 makes the full pipeline work end-to-end.
-    status: pending
+    status: completed
     dependencies: []
     acceptance_criteria:
       - "cypher/ast.go declares UnwindClause"
       - "cypher/parser.go parses `UNWIND [1,2,3] AS x` into an UnwindClause with Variable == \"x\""
       - "A parser unit test covers UNWIND with a literal list, a property list, and a parameter list"
+    completed_at: "2026-09-24T00:00:00Z"
 
   - id: task-002
     title: "Add UnwindPlan logical plan node and planner support"

@@ -229,6 +229,19 @@ type WithClause struct {
 
 func (*WithClause) clauseNode() {}
 
+// UnwindClause represents an UNWIND clause, which expands a list-valued
+// expression into one row per element, binding each element to Variable.
+//
+//	UNWIND [1, 2, 3] AS x RETURN x
+type UnwindClause struct {
+	// Expr is the list-valued expression to expand.
+	Expr Expr
+	// Variable is the name bound to each element of the expanded list.
+	Variable string
+}
+
+func (*UnwindClause) clauseNode() {}
+
 // ReturnItem is one projection in a RETURN or WITH clause.
 type ReturnItem struct {
 	// ExprText is the raw expression text (e.g. "n.name", "n", "count(n)").

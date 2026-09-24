@@ -1,0 +1,47 @@
+================================================================================
+TASK-001: Add UnwindClause AST node and parser support
+Date: 2026-09-24T00:00:00Z
+================================================================================
+
+Summary:
+Added UnwindClause{Expr Expr; Variable string} to cypher/ast.go, alongside
+the existing WithClause. Added buildUnwindClause to cypher/parser.go and
+wired it into buildReadingClause via the ANTLR grammar's existing
+OC_ReadingClauseContext.OC_Unwind() accessor (the vendored
+cloudprivacylabs/opencypher grammar already parses UNWIND at the CST level;
+graphlite's own buildReadingClause simply wasn't dispatching to it yet).
+Because both buildSinglePartQuery and buildMultiPartQuery already iterate
+AllOC_ReadingClause() and call buildReadingClause generically, UNWIND now
+works in both single-part and WITH-pipeline queries with no separate wiring.
+
+Confirmed buildExprFromCST's existing buildAtomExpr -> buildLiteralExpr path
+already builds ListLiteralExpr for bare list literals like `[1,2,3]` in any
+general expression context (this machinery previously looked, from the
+outside, like it only served property-map values via a separate
+raw-text path — it does not; UNWIND's list-literal case needed no new
+expression-parsing code).
+
+Files Changed:
+- cypher/ast.go (added UnwindClause type)
+- cypher/parser.go (added buildUnwindClause; buildReadingClause now dispatches
+  to OC_Unwind() in addition to OC_Match())
+- cypher/parser_test.go (added getUnwind helper and 4 tests: literal list,
+  property list, parameter list, missing-AS-variable error case)
+
+Key Decisions:
+- UNWIND is wired into the *existing* buildReadingClause dispatch point
+  rather than a new one, since the ANTLR grammar already classifies UNWIND
+  as a reading clause (oC_ReadingClause: oC_Match | oC_Unwind | oC_InQueryCall)
+  and both call sites (single-part and multi-part queries) were already
+  generic over Clause.
+- Left cypher/ast.go's stale package-doc header (labelled "v0.1 target",
+  claims UNWIND unsupported) untouched — it was already flagged as stale in
+  a prior audit; fixing it is a docs cleanup, not part of this task's scope.
+
+Verification:
+- CGO_ENABLED=0 go build ./...: clean
+- go vet ./...: clean
+- CGO_ENABLED=0 go test -tags=unit -count=1 ./...: all pass (root, cypher,
+  sql, store packages)
+
+Next Task: task-002 (Add UnwindPlan logical plan node and planner support)

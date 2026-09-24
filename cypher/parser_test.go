@@ -32,6 +32,18 @@ func getMatch(t *testing.T, q *cypher.Query, idx int) *cypher.MatchClause {
 	return m
 }
 
+func getUnwind(t *testing.T, q *cypher.Query, idx int) *cypher.UnwindClause {
+	t.Helper()
+	if idx >= len(q.Clauses) {
+		t.Fatalf("clause index %d out of range (len=%d)", idx, len(q.Clauses))
+	}
+	uc, ok := q.Clauses[idx].(*cypher.UnwindClause)
+	if !ok {
+		t.Fatalf("clause[%d] is %T, want *UnwindClause", idx, q.Clauses[idx])
+	}
+	return uc
+}
+
 func getReturn(t *testing.T, q *cypher.Query, idx int) *cypher.ReturnClause {
 	t.Helper()
 	if idx >= len(q.Clauses) {
@@ -645,5 +657,65 @@ func TestParse_StringEscape_UnrecognisedReturnsError(t *testing.T) {
 	_, err := cypher.Parse(`MATCH (n) WHERE n.x = '\q' RETURN n`)
 	if err == nil {
 		t.Error("expected error for unrecognised escape sequence \\q, got nil")
+	}
+}
+
+// ─── UNWIND ────────────────────────────────────────────────────────────────────
+
+func TestParse_UnwindLiteralList(t *testing.T) {
+	q := mustParse(t, "UNWIND [1, 2, 3] AS x RETURN x")
+
+	uc := getUnwind(t, q, 0)
+	if uc.Variable != "x" {
+		t.Errorf("Variable = %q, want %q", uc.Variable, "x")
+	}
+	list, ok := uc.Expr.(*cypher.ListLiteralExpr)
+	if !ok {
+		t.Fatalf("Expr is %T, want *ListLiteralExpr", uc.Expr)
+	}
+	if len(list.Items) != 3 {
+		t.Fatalf("len(Items) = %d, want 3", len(list.Items))
+	}
+}
+
+func TestParse_UnwindPropertyList(t *testing.T) {
+	q := mustParse(t, "MATCH (n) UNWIND n.tags AS t RETURN t")
+
+	getMatch(t, q, 0)
+	uc := getUnwind(t, q, 1)
+	if uc.Variable != "t" {
+		t.Errorf("Variable = %q, want %q", uc.Variable, "t")
+	}
+	prop, ok := uc.Expr.(*cypher.PropExpr)
+	if !ok {
+		t.Fatalf("Expr is %T, want *PropExpr", uc.Expr)
+	}
+	if prop.Variable != "n" || prop.Property != "tags" {
+		t.Errorf("PropExpr = %+v, want Variable=n Property=tags", prop)
+	}
+}
+
+func TestParse_UnwindParamList(t *testing.T) {
+	q := mustParse(t, "UNWIND $list AS x RETURN x")
+
+	uc := getUnwind(t, q, 0)
+	if uc.Variable != "x" {
+		t.Errorf("Variable = %q, want %q", uc.Variable, "x")
+	}
+	param, ok := uc.Expr.(*cypher.ParamRef)
+	if !ok {
+		t.Fatalf("Expr is %T, want *ParamRef", uc.Expr)
+	}
+	if param.Name != "list" {
+		t.Errorf("ParamRef.Name = %q, want %q", param.Name, "list")
+	}
+}
+
+func TestParse_UnwindMissingVariable(t *testing.T) {
+	// UNWIND without AS <var> is a syntax error at the grammar level, so this
+	// should surface as a Parse error, not a panic.
+	_, err := cypher.Parse("UNWIND [1,2,3] RETURN 1")
+	if err == nil {
+		t.Error("expected error for UNWIND without AS variable, got nil")
 	}
 }
