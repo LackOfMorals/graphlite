@@ -45,6 +45,16 @@ func asReturn(t *testing.T, plan cypher.LogicalPlan) *cypher.ReturnPlan {
 	return rp
 }
 
+// asUnwind unwraps a plan as *UnwindPlan; fails if it is a different type.
+func asUnwind(t *testing.T, plan cypher.LogicalPlan) *cypher.UnwindPlan {
+	t.Helper()
+	up, ok := plan.(*cypher.UnwindPlan)
+	if !ok {
+		t.Fatalf("expected *UnwindPlan, got %T", plan)
+	}
+	return up
+}
+
 // asMatchNode unwraps a plan as *MatchNodePlan; fails otherwise.
 func asMatchNode(t *testing.T, plan cypher.LogicalPlan) *cypher.MatchNodePlan {
 	t.Helper()
@@ -1716,5 +1726,78 @@ func TestPlanner_MatchDeleteCompound(t *testing.T) {
 	}
 	if !b.IsNode {
 		t.Error("expected 'n' to be a node binding")
+	}
+}
+
+// ─── UNWIND ────────────────────────────────────────────────────────────────────
+
+func TestPlanner_UnwindLiteralList(t *testing.T) {
+	plan, scope := mustPlan(t, "UNWIND [1, 2, 3] AS x RETURN x")
+
+	rp := asReturn(t, plan)
+	up := asUnwind(t, rp.Source)
+
+	if up.Variable != "x" {
+		t.Errorf("Variable = %q, want %q", up.Variable, "x")
+	}
+	if up.Source != nil {
+		t.Errorf("Source = %v, want nil (no preceding MATCH)", up.Source)
+	}
+	if _, ok := up.Expr.(*cypher.ListLiteralExpr); !ok {
+		t.Fatalf("Expr is %T, want *ListLiteralExpr", up.Expr)
+	}
+	if up.SQLAlias == "" {
+		t.Error("expected a non-empty SQLAlias")
+	}
+
+	b, ok := scope.Resolve("x")
+	if !ok {
+		t.Fatal("expected 'x' in scope after UNWIND")
+	}
+	if b.IsNode || b.IsRel {
+		t.Errorf("expected 'x' to be a scalar binding, got IsNode=%v IsRel=%v", b.IsNode, b.IsRel)
+	}
+	if b.Column != up.SQLAlias+".value" {
+		t.Errorf("Column = %q, want %q", b.Column, up.SQLAlias+".value")
+	}
+}
+
+func TestPlanner_MatchThenUnwind(t *testing.T) {
+	plan, scope := mustPlan(t, "MATCH (n:Person) UNWIND n.tags AS t RETURN t")
+
+	rp := asReturn(t, plan)
+	up := asUnwind(t, rp.Source)
+
+	if up.Variable != "t" {
+		t.Errorf("Variable = %q, want %q", up.Variable, "t")
+	}
+	if _, ok := up.Source.(*cypher.MatchNodePlan); !ok {
+		t.Fatalf("UnwindPlan.Source: expected *MatchNodePlan, got %T", up.Source)
+	}
+	prop, ok := up.Expr.(*cypher.PropExpr)
+	if !ok {
+		t.Fatalf("Expr is %T, want *PropExpr", up.Expr)
+	}
+	if prop.Variable != "n" || prop.Property != "tags" {
+		t.Errorf("PropExpr = %+v, want Variable=n Property=tags", prop)
+	}
+
+	if _, ok := scope.Resolve("t"); !ok {
+		t.Fatal("expected 't' in scope after UNWIND")
+	}
+}
+
+func TestPlanner_UnwindAliasesDontCollide(t *testing.T) {
+	// Two UNWIND clauses in the same query must get distinct SQL aliases.
+	plan, _ := mustPlan(t, "UNWIND [1,2] AS x UNWIND [3,4] AS y RETURN x, y")
+
+	rp := asReturn(t, plan)
+	up2 := asUnwind(t, rp.Source)
+	up1, ok := up2.Source.(*cypher.UnwindPlan)
+	if !ok {
+		t.Fatalf("expected second UnwindPlan.Source to be *UnwindPlan, got %T", up2.Source)
+	}
+	if up1.SQLAlias == up2.SQLAlias {
+		t.Errorf("expected distinct aliases, both are %q", up1.SQLAlias)
 	}
 }

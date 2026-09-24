@@ -45,3 +45,53 @@ Verification:
   sql, store packages)
 
 Next Task: task-002 (Add UnwindPlan logical plan node and planner support)
+
+================================================================================
+TASK-002: Add UnwindPlan logical plan node and planner support
+Date: 2026-09-24T00:00:00Z
+================================================================================
+
+Summary:
+Added UnwindPlan{Source, Expr, Variable, SQLAlias} to cypher/plan.go,
+following the MatchNodePlan/MatchRelPlan SQLAlias naming convention (not
+WithPlan's AggExpr "expand me" convention — UNWIND's bound variable is a
+real SQL column from json_each(), not an alias to re-expand). Added
+aliasCounter.nextUnwind() (produces "_uw0", "_uw1", ...) and
+planUnwindClause, which binds the UNWIND variable into BindingScope as
+Binding{Alias, Column: "<alias>.value"} — a plain scalar binding
+(IsNode=false, IsRel=false).
+
+Wired UnwindClause into planQuery's clause-type switch. Discovered the
+existing WithClause case already implements exactly the "flush accumulated
+MATCH plans + WHERE predicate into base" logic UnwindClause needed too, so
+extracted it into a shared flushMatchesIntoBase helper used by both cases
+(and left ready for CALL {} subqueries in a later task, which will need the
+same flush). This is a behavior-preserving refactor of the WithClause path,
+verified by the full existing test suite passing unchanged.
+
+Files Changed:
+- cypher/plan.go (added UnwindPlan)
+- cypher/planner.go (added aliasCounter.unwindCount/nextUnwind,
+  flushMatchesIntoBase helper, planUnwindClause; WithClause and UnwindClause
+  cases in planQuery's switch now both call flushMatchesIntoBase)
+- cypher/planner_test.go (added asUnwind helper and 3 tests: UNWIND with no
+  preceding MATCH, MATCH then UNWIND on a property list, two UNWINDs get
+  distinct SQL aliases)
+
+Key Decisions:
+- UnwindPlan's bound-variable Binding uses Column: "<alias>.value" (a real
+  column reference), not WithPlan's AggExpr "expand me" pointer convention —
+  matches how MATCH-bound node/rel variables work, since UNWIND introduces a
+  genuine new SQL row source (json_each()), not a re-expandable expression.
+- Extracted flushMatchesIntoBase from the WithClause case rather than
+  duplicating it a second time, anticipating a third use when CALL {}
+  subqueries land later in this same PRD.
+
+Verification:
+- CGO_ENABLED=0 go build ./...: clean
+- go vet ./...: clean
+- CGO_ENABLED=0 go test -tags=unit -count=1 ./...: all pass
+- CGO_ENABLED=0 go test -tags=tck ./compat/...: pass (WithClause refactor
+  did not regress existing TCK scenarios)
+
+Next Task: task-003 (Translate UnwindPlan to SQL via json_each())

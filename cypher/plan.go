@@ -556,3 +556,22 @@ type WithPlan struct {
 }
 
 func (*WithPlan) planNode() {}
+
+// UnwindPlan represents an UNWIND clause: expands a list-valued expression
+// into one row per element, binding each element to Variable.
+//
+//	UNWIND [1, 2, 3] AS x RETURN x
+type UnwindPlan struct {
+	// Source is the sub-plan whose rows are being expanded against (nil when
+	// UNWIND is the first clause in the query, with no preceding MATCH/WITH).
+	Source LogicalPlan
+	// Expr is the list-valued expression to expand.
+	Expr Expr
+	// Variable is the Cypher variable bound to each element of the expanded list.
+	Variable string
+	// SQLAlias is the SQL alias assigned by the planner for the json_each()
+	// row source backing this UNWIND (e.g. "_uw0").
+	SQLAlias string
+}
+
+func (*UnwindPlan) planNode() {}

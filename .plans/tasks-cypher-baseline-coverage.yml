@@ -30,13 +30,14 @@ tasks:
       (not a node/relationship binding) and threads the UnwindPlan into the
       logical plan tree at the correct position relative to preceding
       MATCH/WITH clauses.
-    status: pending
+    status: completed
     dependencies:
       - task-001
     acceptance_criteria:
       - "cypher/plan.go declares UnwindPlan"
       - "planUnwindClause binds the UNWIND variable into BindingScope with IsRel=false, IsScalar=true (or equivalent)"
       - "A planner unit test confirms the bound variable is visible to a subsequent WHERE/RETURN referencing it"
+    completed_at: "2026-09-24T00:00:00Z"
 
   - id: task-003
     title: "Translate UnwindPlan to SQL via json_each()"

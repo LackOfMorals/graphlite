@@ -23,9 +23,10 @@ func Plan(q *Query, scope *BindingScope) (LogicalPlan, error) {
 // aliasCounter hands out monotonically-increasing SQL table aliases to avoid
 // collisions when the same table appears multiple times in a JOIN.
 type aliasCounter struct {
-	nodeCount int
-	relCount  int
-	anonCount int
+	nodeCount   int
+	relCount    int
+	anonCount   int
+	unwindCount int
 }
 
 func (a *aliasCounter) nextNode() string {
@@ -40,6 +41,14 @@ func (a *aliasCounter) nextRel() string {
 	return alias
 }
 
+// nextUnwind returns a unique SQL alias for an UNWIND clause's json_each()
+// row source (e.g. "_uw0").
+func (a *aliasCounter) nextUnwind() string {
+	alias := fmt.Sprintf("_uw%d", a.unwindCount)
+	a.unwindCount++
+	return alias
+}
+
 // nextAnon returns a unique internal variable name for anonymous CREATE nodes.
 // These names are bound in scope so the translator can resolve them for
 // CREATE relationship statements, but they are never exposed to users.
@@ -50,6 +59,30 @@ func (a *aliasCounter) nextAnon() string {
 }
 
 // ─── query planning ───────────────────────────────────────────────────────────
+
+// flushMatchesIntoBase folds any MATCH plans and WHERE predicate accumulated
+// so far into base, ready for base to become the Source of the next
+// pipeline-breaking stage (WITH, UNWIND, and later CALL {}). It returns the
+// updated base plus matchPlans/filterPred reset to their flushed (nil) state.
+func flushMatchesIntoBase(base LogicalPlan, matchPlans []LogicalPlan, filterPred Expr) (LogicalPlan, []LogicalPlan, Expr, error) {
+	switch len(matchPlans) {
+	case 0:
+		// No match plans yet — base unchanged.
+	case 1:
+		base = matchPlans[0]
+	default:
+		base = &SequencePlan{Steps: matchPlans}
+	}
+
+	if filterPred != nil {
+		if base == nil {
+			return nil, nil, nil, fmt.Errorf("cypher: WHERE clause without a preceding MATCH clause")
+		}
+		base = &FilterPlan{Source: base, Predicate: filterPred}
+	}
+
+	return base, nil, nil, nil
+}
 
 func planQuery(q *Query, scope *BindingScope) (LogicalPlan, error) {
 	ac := &aliasCounter{}
@@ -80,23 +113,10 @@ func planQuery(q *Query, scope *BindingScope) (LogicalPlan, error) {
 			}
 
 		case *WithClause:
-			// Flush accumulated match plans into the current base.
-			switch len(matchPlans) {
-			case 0:
-				// No match plans yet — base unchanged.
-			case 1:
-				base = matchPlans[0]
-			default:
-				base = &SequencePlan{Steps: matchPlans}
-			}
-			matchPlans = nil
-
-			if filterPred != nil {
-				if base == nil {
-					return nil, fmt.Errorf("cypher: WHERE clause without a preceding MATCH clause")
-				}
-				base = &FilterPlan{Source: base, Predicate: filterPred}
-				filterPred = nil
+			var err error
+			base, matchPlans, filterPred, err = flushMatchesIntoBase(base, matchPlans, filterPred)
+			if err != nil {
+				return nil, err
 			}
 
 			// Build WithPlan from the WITH clause items.
@@ -106,6 +126,20 @@ func planQuery(q *Query, scope *BindingScope) (LogicalPlan, error) {
 			}
 			wp.Source = base
 			base = wp
+
+		case *UnwindClause:
+			var err error
+			base, matchPlans, filterPred, err = flushMatchesIntoBase(base, matchPlans, filterPred)
+			if err != nil {
+				return nil, err
+			}
+
+			up, err := planUnwindClause(c, scope, ac)
+			if err != nil {
+				return nil, err
+			}
+			up.Source = base
+			base = up
 
 		case *ReturnClause:
 			rp, err := planReturnClause(c, scope)
@@ -573,6 +607,23 @@ func planWithItem(item ReturnItem, scope *BindingScope) (ProjectionItem, error) 
 		return ProjectionItem{}, fmt.Errorf("cypher: WITH item %q: %w", item.ExprText, err)
 	}
 	return ProjectionItem{Expr: expr, Alias: item.Alias}, nil
+}
+
+// planUnwindClause translates an UnwindClause into an UnwindPlan and binds
+// Variable into scope as a scalar column reference (not a node or
+// relationship) — the SQL translator resolves it to "<SQLAlias>.value",
+// the column json_each() exposes for each expanded list element.
+func planUnwindClause(uc *UnwindClause, scope *BindingScope, ac *aliasCounter) (*UnwindPlan, error) {
+	alias := ac.nextUnwind()
+	scope.Bind(uc.Variable, Binding{
+		Alias:  alias,
+		Column: alias + ".value",
+	})
+	return &UnwindPlan{
+		Expr:     uc.Expr,
+		Variable: uc.Variable,
+		SQLAlias: alias,
+	}, nil
 }
 
 // ─── CREATE clause planning ───────────────────────────────────────────────────
