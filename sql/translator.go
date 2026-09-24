@@ -668,9 +668,48 @@ func (t *Translator) buildFromClause(source cypher.LogicalPlan, scope *cypher.Bi
 	case *cypher.WithPlan:
 		return t.buildFromClauseForWithPlan(s, scope)
 
+	case *cypher.UnwindPlan:
+		return t.buildFromClauseForUnwind(s, scope)
+
 	default:
 		return fromClause{}, fmt.Errorf("sql: unsupported source plan %T in FROM clause", source)
 	}
+}
+
+// buildFromClauseForUnwind handles an UnwindPlan by adding a json_each() row
+// source for up.Expr, aliased to up.SQLAlias so "<alias>.value" resolves the
+// bound variable (see planUnwindClause's Binding).
+//
+// SQLite treats a table-valued function like json_each(x) as an implicit
+// lateral join when x references a column from an earlier FROM/JOIN item, so
+// a plain CROSS JOIN (or, when there is no preceding FROM at all, the primary
+// FROM table) is sufficient — no explicit LATERAL syntax is needed, and
+// SQLite doesn't support one anyway.
+func (t *Translator) buildFromClauseForUnwind(up *cypher.UnwindPlan, scope *cypher.BindingScope) (fromClause, error) {
+	fc, err := t.buildFromClause(up.Source, scope)
+	if err != nil {
+		return fromClause{}, err
+	}
+
+	sub := &Translator{dialect: t.dialect}
+	exprSQL, err := sub.exprToSQL(up.Expr, scope)
+	if err != nil {
+		return fromClause{}, fmt.Errorf("sql: UNWIND expression: %w", err)
+	}
+	unwindTable := fmt.Sprintf("json_each(%s) AS %s", exprSQL, up.SQLAlias)
+
+	if fc.from == "" {
+		fc.from = unwindTable
+	} else {
+		crossJoin := "CROSS JOIN " + unwindTable
+		if fc.joins != "" {
+			fc.joins += " " + crossJoin
+		} else {
+			fc.joins = crossJoin
+		}
+	}
+	fc.joinArgs = append(fc.joinArgs, sub.args...)
+	return fc, nil
 }
 
 // buildFromClauseForMatchNode handles a MatchNodePlan.

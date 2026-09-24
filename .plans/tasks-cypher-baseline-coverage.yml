@@ -49,7 +49,7 @@ tasks:
       case around translator.go:1700). Wire the resulting column into scope
       column-name resolution the same way node/relationship variable columns are
       resolved.
-    status: pending
+    status: completed
     dependencies:
       - task-002
     acceptance_criteria:
@@ -57,6 +57,7 @@ tasks:
       - "`UNWIND` combined with a preceding MATCH correctly cross-joins per matched row"
       - "Remove \"UNWIND\" from compat/tck_test.go's unsupportedPatterns; TCK suite still passes at >= 50% executed"
       - "CGO_ENABLED=0 go test -tags=unit -count=1 ./... passes"
+    completed_at: "2026-09-24T00:00:00Z"
 
   - id: task-004
     title: "Add ScalarCallExpr AST/plan node for scalar functions"

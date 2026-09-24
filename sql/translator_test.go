@@ -2411,3 +2411,49 @@ func TestTranslate_VarLength_UnboundedUsesHopCap(t *testing.T) {
 		t.Errorf("expected depth-guard arg 25 in args (custom cap), got %v", result.Args)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UNWIND
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestTranslate_UnwindLiteralList(t *testing.T) {
+	result := translateCypher(t, "UNWIND [1, 2, 3] AS x RETURN x")
+	containsAll(t, result,
+		"SELECT",
+		"json_each(",
+		"AS x",
+	)
+	if strings.Contains(result.SQL, "FROM nodes") {
+		t.Errorf("expected no nodes table for a MATCH-free UNWIND: %s", result.SQL)
+	}
+	if len(result.Args) != 1 {
+		t.Fatalf("expected 1 bind arg (the JSON-encoded list), got %d: %v", len(result.Args), result.Args)
+	}
+	if result.Args[0] != "[1,2,3]" {
+		t.Errorf("expected arg %q, got %q", "[1,2,3]", result.Args[0])
+	}
+}
+
+func TestTranslate_MatchThenUnwindProperty(t *testing.T) {
+	result := translateCypher(t, "MATCH (n:Person) UNWIND n.tags AS t RETURN t")
+	containsAll(t, result,
+		"SELECT",
+		"FROM nodes",
+		"CROSS JOIN json_each(",
+		"json_extract(",
+		"AS t",
+	)
+}
+
+func TestTranslate_UnwindTwice_DistinctAliasesCrossJoin(t *testing.T) {
+	result := translateCypher(t, "UNWIND [1,2] AS x UNWIND [3,4] AS y RETURN x, y")
+	containsAll(t, result,
+		"json_each(",
+		"CROSS JOIN json_each(",
+		"AS x",
+		"AS y",
+	)
+	if len(result.Args) != 2 {
+		t.Fatalf("expected 2 bind args (both JSON-encoded lists), got %d: %v", len(result.Args), result.Args)
+	}
+}

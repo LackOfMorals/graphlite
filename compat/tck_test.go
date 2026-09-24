@@ -97,7 +97,6 @@ var unsupportedPatterns = []struct {
 	// Unsupported clauses
 	{"CALL {", "CALL subquery not supported"},
 	{"FOREACH", "FOREACH not supported"},
-	{"UNWIND", "UNWIND not supported"},
 	{"UNION", "UNION not supported"},
 	{"RETURN *", "RETURN * not supported"},
 

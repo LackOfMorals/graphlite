@@ -599,3 +599,96 @@ func TestPlanCache_ConcurrentReadsAreSafe(t *testing.T) {
 		}
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UNWIND
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestRunQuery_UnwindLiteralList(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+
+	qr, err := db.RunQuery(ctx, `UNWIND [1, 2, 3] AS x RETURN x`, nil)
+	if err != nil {
+		t.Fatalf("UNWIND: %v", err)
+	}
+	recs, err := qr.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(recs) != 3 {
+		t.Fatalf("expected 3 records, got %d", len(recs))
+	}
+	var got []int64
+	for _, r := range recs {
+		v, ok := r.Get("x")
+		if !ok {
+			t.Fatal("expected 'x' key in record")
+		}
+		i, ok := v.(int64)
+		if !ok {
+			t.Fatalf("x = %T, want int64 (json_each().value integer affinity)", v)
+		}
+		got = append(got, i)
+	}
+	want := []int64{1, 2, 3}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("record[%d].x = %v, want %v", i, got[i], w)
+		}
+	}
+}
+
+func TestRunQuery_MatchThenUnwindProperty(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+
+	_, err := db.RunQuery(ctx, `CREATE (n:Person {name: "Alice", tags: ["red", "blue"]})`, nil)
+	if err != nil {
+		t.Fatalf("CREATE: %v", err)
+	}
+
+	qr, err := db.RunQuery(ctx, `MATCH (n:Person) UNWIND n.tags AS t RETURN t`, nil)
+	if err != nil {
+		t.Fatalf("MATCH+UNWIND: %v", err)
+	}
+	recs, err := qr.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(recs))
+	}
+	seen := map[string]bool{}
+	for _, r := range recs {
+		v, ok := r.Get("t")
+		if !ok {
+			t.Fatal("expected 't' key in record")
+		}
+		s, ok := v.(string)
+		if !ok {
+			t.Fatalf("t = %T, want string", v)
+		}
+		seen[s] = true
+	}
+	if !seen["red"] || !seen["blue"] {
+		t.Errorf("expected tags {red, blue}, got %v", seen)
+	}
+}
+
+func TestRunQuery_UnwindEmptyListProducesNoRows(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+
+	qr, err := db.RunQuery(ctx, `UNWIND [] AS x RETURN x`, nil)
+	if err != nil {
+		t.Fatalf("UNWIND: %v", err)
+	}
+	recs, err := qr.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(recs) != 0 {
+		t.Fatalf("expected 0 records for UNWIND [], got %d", len(recs))
+	}
+}

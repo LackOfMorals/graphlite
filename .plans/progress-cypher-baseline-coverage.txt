@@ -95,3 +95,77 @@ Verification:
   did not regress existing TCK scenarios)
 
 Next Task: task-003 (Translate UnwindPlan to SQL via json_each())
+
+================================================================================
+TASK-003: Translate UnwindPlan to SQL via json_each()
+Date: 2026-09-24T00:00:00Z
+================================================================================
+
+Summary:
+Added buildFromClauseForUnwind to sql/translator.go, wired into
+buildFromClause's dispatch switch. It recurses into UnwindPlan.Source (nil
+when UNWIND is the query's first clause), translates UnwindPlan.Expr via a
+sub-Translator (isolating its bind args the same way FilterPlan's WHERE
+predicate does), and adds a `json_each(<expr-sql>) AS <SQLAlias>` row
+source — either as the primary FROM table (when Source is nil) or as a
+`CROSS JOIN` onto the existing FROM/JOIN chain. Confirmed SQLite treats
+json_each(x) as an implicit lateral join when x references a column from an
+earlier FROM item, so a plain CROSS JOIN correctly handles the correlated
+case (`MATCH (n) UNWIND n.tags AS t`) with no LATERAL syntax needed (SQLite
+has none anyway).
+
+VarExpr resolution needed no changes: an UNWIND-bound Binding (from task-002)
+has AggExpr=nil, IsNode=false, IsRel=false, so exprToSQL's existing VarExpr
+case already falls through to `return binding.Column, nil` — the same code
+path used for ordinary scalar bindings.
+
+Added tests at all three layers: sql/translator_test.go (3 tests: literal
+list, MATCH+property CROSS JOIN, two UNWINDs get distinct aliases and two
+bind args), driver_test.go (3 end-to-end tests via db.RunQuery: literal
+list — values come back as int64 per SQLite's INTEGER affinity in
+json_each().value, NOT float64 like json_extract()-decoded property values;
+MATCH+property; and an empty-list edge case producing zero rows).
+
+Removed "UNWIND" from compat/tck_test.go's unsupportedPatterns. TCK
+executed-scenario count rose 235 -> 260 (+25), pass rate 236/260 (90.8%),
+comfortably above the 50% gate. All 24 newly-failing scenarios were
+individually inspected: every one uses UNWIND only as incidental test-data
+setup, and fails on a *different*, pre-existing gap that was simply masked
+before because these scenarios were unreachable — aggregate max()/min()
+returning nil (Aggregation2), SET += list concatenation (Set1), named path
+variable forwarding (With1 — explicitly out of scope per this PRD's
+Non-Goals), MERGE path-binding/update/deleted-node edge cases (Merge1),
+negative-SKIP-via-$param validation (ReturnSkipLimit1), REMOVE on a null
+relationship property (Remove1), and ORDER BY cross-type ordering
+(ReturnOrderBy1). None are UNWIND bugs; none are fixed by this task, and
+none are silently regressed either — they were always broken, just hidden.
+
+Files Changed:
+- sql/translator.go (added buildFromClauseForUnwind; added *cypher.UnwindPlan
+  case to buildFromClause's switch)
+- sql/translator_test.go (3 new tests)
+- driver_test.go (3 new end-to-end tests)
+- compat/tck_test.go (removed "UNWIND" from unsupportedPatterns)
+
+Key Decisions:
+- Used CROSS JOIN uniformly (never a bare JOIN, which would need an ON/USING
+  clause SQLite's lateral table-valued-function join doesn't require or
+  support) for both the correlated and uncorrelated UNWIND cases.
+- Did NOT attempt to fix any of the 24 newly-surfaced pre-existing gaps —
+  out of scope for this task; each is a distinct, separately-scoped feature
+  gap (aggregation, SET, MERGE, ORDER BY, path variables) that deserves its
+  own task/PRD rather than opportunistic scope creep here.
+- Left optionalInPlan/collectPlanAliases (used only by write-after-match
+  paths, e.g. MATCH+CREATE) without an UnwindPlan case — UNWIND combined
+  with a write clause in the same query is not exercised by this PRD's
+  scope (read-only UNWIND+RETURN) and isn't claimed as supported.
+
+Verification:
+- CGO_ENABLED=0 go build ./...: clean
+- go vet ./...: clean
+- CGO_ENABLED=0 go test -tags=unit -count=1 ./...: all pass
+- CGO_ENABLED=0 go test -tags=tck ./compat/...: pass, 236/260 (90.8%)
+  executed-scenario pass rate (up from 235/235 baseline; +25 scenarios newly
+  executed, +1 newly passing, 24 newly failing on unrelated pre-existing gaps)
+
+Next Task: task-004 (Add ScalarCallExpr AST/plan node for scalar functions)
