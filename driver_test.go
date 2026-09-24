@@ -740,3 +740,51 @@ func TestRunQuery_BareReturnImplicitGroupBy(t *testing.T) {
 		}
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Un-aliased aggregate column naming
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestRunQuery_UnaliasedAggregateColumnName verifies that an aggregate
+// projection with no explicit alias is named after its original Cypher call
+// text (e.g. "count(r)"), matching openCypher's convention, rather than the
+// compiled SQL expression (e.g. "COUNT(r0.id)"). The TCK compares result
+// column headers exactly, so this previously failed scenarios with a
+// correct VALUE but a wrong column NAME.
+func TestRunQuery_UnaliasedAggregateColumnName(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+	_, err := db.RunQuery(ctx, `CREATE (a), (a)-[:R]->(a)`, nil)
+	if err != nil {
+		t.Fatalf("CREATE: %v", err)
+	}
+
+	for _, tc := range []struct {
+		query   string
+		wantKey string
+		wantVal any
+	}{
+		{`MATCH ()-[r]-() RETURN count(r)`, "count(r)", int64(1)},
+		{`MATCH (n) RETURN count(*)`, "count(*)", int64(1)},
+		{`MATCH (n) RETURN count(DISTINCT n.x)`, "count(DISTINCT n.x)", int64(0)},
+	} {
+		t.Run(tc.query, func(t *testing.T) {
+			qr, err := db.RunQuery(ctx, tc.query, nil)
+			if err != nil {
+				t.Fatalf("RunQuery: %v", err)
+			}
+			keys := qr.Keys()
+			if len(keys) != 1 || keys[0] != tc.wantKey {
+				t.Fatalf("Keys() = %v, want [%q]", keys, tc.wantKey)
+			}
+			recs, err := qr.Collect(ctx)
+			if err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			v, _ := recs[0].Get(tc.wantKey)
+			if v != tc.wantVal {
+				t.Errorf("value = %v, want %v", v, tc.wantVal)
+			}
+		})
+	}
+}

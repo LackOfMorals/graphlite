@@ -1393,20 +1393,85 @@ func (t *Translator) buildSelectList(projections []cypher.ProjectionItem, scope 
 				// Use "variable.property" as the alias (matching Cypher convention).
 				// SQLite accepts quoted identifiers with dots: AS "a.name".
 				alias = e.Variable + "." + e.Property
+			case *cypher.AggCallExpr:
+				// openCypher names an un-aliased aggregate's result column after
+				// the original call text (e.g. "count(r)", "count(n.num)",
+				// "count(*)"), not the compiled SQL expression (e.g.
+				// "COUNT(r0.id)") — TCK scenarios compare column headers
+				// exactly. aggCallDisplayText returns "" for an argument shape
+				// it can't render, in which case we deliberately leave alias
+				// empty (no alias) rather than risk a wrong one.
+				alias = aggCallDisplayText(e)
 			}
 		}
 		if alias != "" {
-			// Quote aliases that contain non-identifier characters (e.g. dots).
-			// Plain identifiers are left unquoted for readability.
-			if strings.ContainsAny(alias, ". ") {
-				colSQL += ` AS "` + alias + `"`
-			} else {
+			// Quote aliases that contain characters an unquoted SQL identifier
+			// can't (dots, spaces, parens, "*", etc). Plain identifiers are left
+			// unquoted for readability.
+			if isPlainIdentifier(alias) {
 				colSQL += " AS " + alias
+			} else {
+				colSQL += ` AS "` + alias + `"`
 			}
 		}
 		parts = append(parts, colSQL)
 	}
 	return strings.Join(parts, ", "), nil
+}
+
+// aggCallDisplayText reconstructs the Cypher-like display text for an
+// un-aliased aggregate call, matching openCypher's convention of naming the
+// result column after the original call text (e.g. "count(r)", "count(*)")
+// rather than the compiled SQL expression. Returns "" if the argument is a
+// shape exprDisplayText doesn't recognise — the caller then leaves the
+// projection unaliased rather than risking an incorrect one.
+func aggCallDisplayText(e *cypher.AggCallExpr) string {
+	arg := "*"
+	if !e.CountStar && e.Arg != nil {
+		arg = exprDisplayText(e.Arg)
+		if arg == "" {
+			return ""
+		}
+	}
+	distinct := ""
+	if e.Distinct {
+		distinct = "DISTINCT "
+	}
+	return e.Func + "(" + distinct + arg + ")"
+}
+
+// exprDisplayText renders a small subset of Expr back to Cypher-like text,
+// solely to synthesise an implicit column alias for an un-aliased
+// projection. It only handles the shapes that can legally appear as an
+// aggregate argument in the current parser; anything else returns "".
+func exprDisplayText(expr cypher.Expr) string {
+	switch e := expr.(type) {
+	case *cypher.VarExpr:
+		return e.Name
+	case *cypher.PropExpr:
+		return e.Variable + "." + e.Property
+	default:
+		return ""
+	}
+}
+
+// isPlainIdentifier reports whether s can be used as an unquoted SQL
+// identifier: only letters, digits, and underscores, not starting with a
+// digit. Anything else (dots, spaces, parens, "*", etc — all of which show
+// up in synthesised aggregate/property aliases) must be double-quoted.
+func isPlainIdentifier(s string) bool {
+	if s == "" || (s[0] >= '0' && s[0] <= '9') {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		isLetter := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		isDigit := c >= '0' && c <= '9'
+		if !isLetter && !isDigit && c != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
