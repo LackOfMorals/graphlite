@@ -692,3 +692,91 @@ func TestRunQuery_UnwindEmptyListProducesNoRows(t *testing.T) {
 		t.Fatalf("expected 0 records for UNWIND [], got %d", len(recs))
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scalar functions
+// ─────────────────────────────────────────────────────────────────────────────
+
+// mustSingleValue runs query, expects exactly one record with exactly one
+// column, and returns that column's value.
+func mustSingleValue(t *testing.T, db *graphlite.DB, query string) any {
+	t.Helper()
+	ctx := context.Background()
+	qr, err := db.RunQuery(ctx, query, nil)
+	if err != nil {
+		t.Fatalf("RunQuery(%q): %v", query, err)
+	}
+	recs, err := qr.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect(%q): %v", query, err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("RunQuery(%q): expected 1 record, got %d", query, len(recs))
+	}
+	vals := recs[0].Values()
+	if len(vals) != 1 {
+		t.Fatalf("RunQuery(%q): expected 1 column, got %d", query, len(vals))
+	}
+	return vals[0]
+}
+
+func TestRunQuery_ScalarFunctions_StringAndMath(t *testing.T) {
+	db := openMemDB(t)
+
+	cases := []struct {
+		query string
+		want  any
+	}{
+		{`RETURN toLower('ABC')`, "abc"},
+		{`RETURN toUpper('abc')`, "ABC"},
+		{`RETURN trim('  hi  ')`, "hi"},
+		{`RETURN size([1,2,3])`, int64(3)},
+		{`RETURN size('abcde')`, int64(5)},
+		{`RETURN length('abcde')`, int64(5)},
+		{`RETURN abs(-3)`, int64(3)},
+		{`RETURN ceil(1.2)`, float64(2)},
+		{`RETURN floor(1.8)`, float64(1)},
+		{`RETURN round(1.456)`, float64(1)},
+		{`RETURN round(1.456, 2)`, float64(1.46)},
+		{`RETURN toString(1)`, "1"},
+		{`RETURN toInteger('1')`, int64(1)},
+		{`RETURN toFloat('1.5')`, float64(1.5)},
+		{`RETURN toBoolean('true')`, int64(1)},
+		{`RETURN toBoolean('false')`, int64(0)},
+		{`RETURN toBoolean('not a bool')`, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.query, func(t *testing.T) {
+			got := mustSingleValue(t, db, c.query)
+			if got != c.want {
+				t.Errorf("got %v (%T), want %v (%T)", got, got, c.want, c.want)
+			}
+		})
+	}
+}
+
+func TestRunQuery_ScalarFunction_SizeDoesNotDuplicateParamBinding(t *testing.T) {
+	// Regression test: size() references its argument's compiled SQL twice
+	// (json_type(v) and json_array_length(v)/LENGTH(v)) inside a derived
+	// table, specifically so that a parameterised argument's single bind arg
+	// is not silently required twice (which would either error or bind the
+	// wrong value to the wrong placeholder). $s is a string param, so this
+	// also confirms size() falls through to LENGTH for the string branch.
+	ctx := context.Background()
+	db := openMemDB(t)
+	qr, err := db.RunQuery(ctx, `RETURN size($s) AS n`, map[string]any{"s": "hello"})
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
+	recs, err := qr.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+	n, ok := recs[0].Get("n")
+	if !ok || n != int64(5) {
+		t.Errorf("n = %v, want 5", n)
+	}
+}

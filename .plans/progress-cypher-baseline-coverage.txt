@@ -217,3 +217,92 @@ Verification:
 - CGO_ENABLED=0 go test -tags=unit -count=1 ./...: all pass
 
 Next Task: task-005 (Translate string/math scalar functions to SQL)
+
+================================================================================
+TASK-005: Translate string/math scalar functions to SQL
+Date: 2026-09-24T00:00:00Z
+================================================================================
+
+Summary:
+Added scalarCallToSQL to sql/translator.go, wired into exprToSQL's switch as
+the *cypher.ScalarCallExpr case. Confirmed via a standalone script that
+modernc.org/sqlite exposes CEIL/FLOOR/ROUND natively (SQLITE_ENABLE_MATH_
+FUNCTIONS is compiled in) — no CASE-based fallback was needed, simplifying
+this task versus the PRD's contingency plan.
+
+Translated: toLower/toUpper/trim -> LOWER/UPPER/TRIM; abs/ceil/floor -> ABS/
+CEIL/FLOOR; round(x[, n]) -> ROUND(x[, n]); toString/toInteger/toFloat ->
+CAST(... AS TEXT/INTEGER/REAL); length(x) -> LENGTH(x) (string only for
+now — length() also applies to paths once prd-shortest-path-traversal.md
+adds a path value); size(x) -> dynamic dispatch between json_array_length
+(lists) and LENGTH (strings) via json_valid(v) AND json_type(v)='array',
+since no static type info exists at translate time; toBoolean(x) -> passes
+through an already-integer (boolean) value unchanged, else matches
+lower(x) against 'true'/'false', else NULL.
+
+Two real bugs surfaced and fixed while writing end-to-end tests (not
+pre-existing-and-deferred like the UNWIND-batch failures — these directly
+blocked the task's own acceptance criteria, so fixed in scope):
+1. json_type() THROWS "malformed JSON" on non-JSON text rather than
+   returning NULL (contrary to my initial assumption) — size('abcde') broke
+   immediately. Fixed by guarding with json_valid(v) AND ...; SQLite
+   short-circuits AND (confirmed empirically with a standalone script), so
+   json_type() is never evaluated on invalid input.
+2. Unary minus on a numeric literal (e.g. "-3") fell through to RawExpr and
+   was rejected as "complex expressions are not yet supported" — this
+   blocked abs(-3), the single most common real-world use of abs(). Fixed
+   in cypher/parser.go's buildUnaryExpr: fold a leading "-"/"+" directly in
+   front of a LiteralExpr(int64|float64) into the literal itself; anything
+   else (a variable, property, or parenthesized sub-expression) is
+   unchanged, still RawExpr. This is a general fix (also unblocks e.g.
+   "WHERE n.age > -5"), not scalar-function-specific.
+
+Also fixed a correctness hazard before it could bite: size() and toBoolean()
+reference their compiled argument SQL more than once (to inspect its runtime
+type, then again to use its value). Naively repeating that SQL text would
+silently duplicate any bind-argument placeholder without a matching extra
+entry in t.args. Wrapped the argument in "(SELECT <argSQL> AS v)" — a
+single-row derived table — so it's evaluated exactly once regardless of how
+many times the outer expression references "v". Added a regression test
+(RETURN size($s)) specifically to exercise this with a parameterised
+argument.
+
+Removed toLower(/toUpper(/trim(/size(/length(/abs(/ceil(/floor(/round(/
+toString(/toInteger(/toFloat(/toBoolean( from compat/tck_test.go's
+unsupportedPatterns (split/type/labels/keys/id/nodes/relationships/head/
+tail/last/range/coalesce remain, pending task-006/007/008). TCK executed
+scenarios rose 260 -> 262 (+2), pass rate held at 236 (90.1%, still well
+above the 50% gate). The 2 newly-failing scenarios (MatchWhere1.feature
+"Filter path with path length predicate") use length(p) on a named path
+variable — out of scope per this PRD's Non-Goals, deferred to
+prd-shortest-path-traversal.md, same pattern as the earlier UNWIND-batch
+failures (pre-existing gap in a different feature, not a regression).
+
+Files Changed:
+- sql/translator.go (added scalarCallToSQL; wired into exprToSQL; added
+  *cypher.ScalarCallExpr case to collectReferencedVarsFromExpr for correct
+  GROUP BY/WITH-pipeline variable tracking)
+- cypher/parser.go (buildUnaryExpr now folds unary minus/plus into numeric
+  LiteralExpr values instead of always falling back to RawExpr)
+- driver_test.go (table-driven end-to-end test covering all 13 translated
+  functions, plus the size()-with-$param regression test)
+
+Key Decisions:
+- length() is string-only for now (no path support) — correct per current
+  scope, since no path value type exists yet.
+- toInteger/toFloat/toString use plain CAST rather than replicating
+  openCypher's exact edge-case semantics (e.g. returning null for a
+  non-numeric string rather than SQLite's CAST-to-INTEGER-of-invalid-text
+  behavior, which parses a leading numeric prefix or returns 0). Not
+  exercised by this task's test cases; flagged here in case a TCK scenario
+  later surfaces a mismatch.
+- Did not attempt to fix the named-path-variable gap the length(p) failures
+  exposed — explicitly out of scope, tracked by a different PRD.
+
+Verification:
+- CGO_ENABLED=0 go build ./...: clean
+- go vet ./...: clean
+- CGO_ENABLED=0 go test -tags=unit -count=1 ./...: all pass
+- CGO_ENABLED=0 go test -tags=tck ./compat/...: pass, 236/262 (90.1%)
+
+Next Task: task-006 (Implement split() via recursive-CTE string splitting)

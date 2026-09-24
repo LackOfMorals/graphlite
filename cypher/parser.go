@@ -1240,10 +1240,30 @@ func buildUnaryExpr(ctx *parser.OC_UnaryAddOrSubtractExpressionContext) (Expr, e
 	if slnCtx == nil {
 		return &RawExpr{Text: trimWhitespace(ctx.GetText())}, nil
 	}
-	// Unary minus / plus — fall back for v0.1.
-	// Check for leading minus token in the text.
 	text := trimWhitespace(ctx.GetText())
 	if strings.HasPrefix(text, "-") || strings.HasPrefix(text, "+") {
+		// Fold a unary minus/plus directly in front of a numeric literal into
+		// the literal itself (e.g. "-3" -> LiteralExpr{int64(-3)}) — the
+		// overwhelmingly common case (abs(-3), WHERE n.age > -5, CREATE
+		// ({x: -1})). Anything else (a variable, property, or parenthesized
+		// sub-expression) still falls back to RawExpr, unchanged.
+		if inner, err := buildStringListNullExpr(slnCtx.(*parser.OC_StringListNullOperatorExpressionContext)); err == nil {
+			if lit, ok := inner.(*LiteralExpr); ok {
+				negate := strings.HasPrefix(text, "-")
+				switch v := lit.Value.(type) {
+				case int64:
+					if negate {
+						return &LiteralExpr{Value: -v}, nil
+					}
+					return lit, nil
+				case float64:
+					if negate {
+						return &LiteralExpr{Value: -v}, nil
+					}
+					return lit, nil
+				}
+			}
+		}
 		return &RawExpr{Text: text}, nil
 	}
 	return buildStringListNullExpr(slnCtx.(*parser.OC_StringListNullOperatorExpressionContext))

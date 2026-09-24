@@ -402,6 +402,10 @@ func collectReferencedVarsFromExpr(expr cypher.Expr, refs map[string]bool) {
 			collectReferencedVarsFromExpr(wc.Value, refs)
 		}
 		collectReferencedVarsFromExpr(e.Else, refs)
+	case *cypher.ScalarCallExpr:
+		for _, arg := range e.Args {
+			collectReferencedVarsFromExpr(arg, refs)
+		}
 	}
 	// LiteralExpr, ParamRef, RawExpr — no variable references.
 }
@@ -1733,6 +1737,9 @@ func (t *Translator) exprToSQL(expr cypher.Expr, scope *cypher.BindingScope) (st
 	case *cypher.CaseExpr:
 		return t.caseExprToSQL(e, scope)
 
+	case *cypher.ScalarCallExpr:
+		return t.scalarCallToSQL(e, scope)
+
 	case *cypher.ListLiteralExpr:
 		// List literal used as a property value: encode as a JSON array string
 		// bound as a single parameter (e.g. [1,2,3] → '?'  where ? = "[1,2,3]").
@@ -1841,6 +1848,116 @@ func (t *Translator) caseExprToSQL(e *cypher.CaseExpr, scope *cypher.BindingScop
 
 	b.WriteString(" END")
 	return b.String(), nil
+}
+
+// scalarCallToSQL translates a ScalarCallExpr into its SQLite equivalent.
+// e.Func is guaranteed to be one of scalarFunctionNames (the parser only
+// constructs ScalarCallExpr for allowlisted names), but not every allowlisted
+// name is translated yet — functions belonging to later tasks in the
+// cypher-baseline-coverage PRD (graph-shape, list, split) fall to the
+// default case until their own translation lands.
+//
+// For size() and toBoolean(), the argument expression is referenced more
+// than once in the generated SQL (once to inspect its runtime type, again to
+// use its value). Repeating the compiled argSQL text directly would silently
+// duplicate any bind-argument placeholder it contains without a matching
+// extra entry in t.args. Wrapping it in "(SELECT <argSQL> AS v)" evaluates it
+// exactly once — as a derived table — so the outer expression can reference
+// the single result column "v" as many times as needed with no placeholder
+// mismatch.
+func (t *Translator) scalarCallToSQL(e *cypher.ScalarCallExpr, scope *cypher.BindingScope) (string, error) {
+	if len(e.Args) == 0 {
+		return "", fmt.Errorf("sql: %s() requires an argument", e.Func)
+	}
+	switch e.Func {
+	case "tolower", "toupper", "trim", "abs", "ceil", "floor":
+		argSQL, err := t.exprToSQL(e.Args[0], scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: %s() argument: %w", e.Func, err)
+		}
+		sqlFunc := map[string]string{
+			"tolower": "LOWER", "toupper": "UPPER", "trim": "TRIM",
+			"abs": "ABS", "ceil": "CEIL", "floor": "FLOOR",
+		}[e.Func]
+		return fmt.Sprintf("%s(%s)", sqlFunc, argSQL), nil
+
+	case "round":
+		argSQL, err := t.exprToSQL(e.Args[0], scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: round() argument: %w", err)
+		}
+		if len(e.Args) < 2 {
+			return fmt.Sprintf("ROUND(%s)", argSQL), nil
+		}
+		precSQL, err := t.exprToSQL(e.Args[1], scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: round() precision argument: %w", err)
+		}
+		return fmt.Sprintf("ROUND(%s, %s)", argSQL, precSQL), nil
+
+	case "length":
+		// Character length. length() also applies to paths in full openCypher,
+		// but no path value exists yet (see prd-shortest-path-traversal.md).
+		argSQL, err := t.exprToSQL(e.Args[0], scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: length() argument: %w", err)
+		}
+		return fmt.Sprintf("LENGTH(%s)", argSQL), nil
+
+	case "size":
+		// size() applies to both strings (character count) and lists (element
+		// count); dispatch dynamically on the runtime JSON type since no static
+		// type information is available at translate time. json_type() throws
+		// "malformed JSON" on plain (non-JSON) text rather than returning NULL
+		// (that's the common case for a string property value extracted via
+		// json_extract), so json_valid() must guard it first — SQLite
+		// short-circuits AND, so json_type() is never evaluated on invalid input.
+		argSQL, err := t.exprToSQL(e.Args[0], scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: size() argument: %w", err)
+		}
+		return fmt.Sprintf(
+			"(SELECT CASE WHEN json_valid(v) AND json_type(v) = 'array' THEN json_array_length(v) ELSE LENGTH(v) END FROM (SELECT %s AS v))",
+			argSQL,
+		), nil
+
+	case "tostring":
+		argSQL, err := t.exprToSQL(e.Args[0], scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: toString() argument: %w", err)
+		}
+		return fmt.Sprintf("CAST(%s AS TEXT)", argSQL), nil
+
+	case "tointeger":
+		argSQL, err := t.exprToSQL(e.Args[0], scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: toInteger() argument: %w", err)
+		}
+		return fmt.Sprintf("CAST(%s AS INTEGER)", argSQL), nil
+
+	case "tofloat":
+		argSQL, err := t.exprToSQL(e.Args[0], scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: toFloat() argument: %w", err)
+		}
+		return fmt.Sprintf("CAST(%s AS REAL)", argSQL), nil
+
+	case "toboolean":
+		// Booleans are stored as SQL integers 0/1 (see literalToSQL), so an
+		// already-boolean argument passes through unchanged; a text argument
+		// is matched case-insensitively against "true"/"false", else NULL.
+		argSQL, err := t.exprToSQL(e.Args[0], scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: toBoolean() argument: %w", err)
+		}
+		return fmt.Sprintf(
+			"(SELECT CASE WHEN typeof(v) = 'integer' THEN v WHEN LOWER(v) = 'true' THEN 1 WHEN LOWER(v) = 'false' THEN 0 ELSE NULL END FROM (SELECT %s AS v))",
+			argSQL,
+		), nil
+
+	default:
+		return "", fmt.Errorf("sql: %s() is not yet supported", e.Func)
+	}
 }
 
 // stringMatchPattern returns the LIKE pattern string for a string match

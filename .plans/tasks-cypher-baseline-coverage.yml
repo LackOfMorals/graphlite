@@ -88,7 +88,7 @@ tasks:
       LENGTH/json_array_length, ABS, ROUND, CAST). Verify whether
       modernc.org/sqlite exposes CEIL/FLOOR natively (SQLITE_ENABLE_MATH_FUNCTIONS);
       if not, implement via a CASE-based integer-truncation expression.
-    status: pending
+    status: completed
     dependencies:
       - task-004
     acceptance_criteria:
@@ -96,6 +96,7 @@ tasks:
       - "`abs(-3)`, `ceil(1.2)`, `floor(1.8)`, `round(1.456)` all execute and return correct values"
       - "`toString(1)`, `toInteger('1')`, `toFloat('1.5')`, `toBoolean('true')` all execute and return correctly typed values"
       - "Remove the corresponding entries from compat/tck_test.go's unsupportedPatterns"
+    completed_at: "2026-09-24T00:00:00Z"
 
   - id: task-006
     title: "Implement split() via recursive-CTE string splitting"
