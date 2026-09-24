@@ -458,6 +458,22 @@ func (t *Translator) translateReturnPlan(rp *cypher.ReturnPlan, scope *cypher.Bi
 		return "", err
 	}
 
+	// A bare RETURN mixing an aggregate with non-aggregate columns (e.g.
+	// "RETURN n.name, count(n.num)", no preceding WITH) needs the same
+	// implicit GROUP BY a WITH stage already gets. Only compute it here when
+	// fc.groupBy isn't already populated — it will be when rp.Source is
+	// (or contains) a WithPlan that already grouped these rows, and this
+	// RETURN's own projections reference the resulting aliases rather than
+	// raw aggregate calls, so computeGroupBy would correctly find nothing to
+	// do in that case regardless; the guard is just belt-and-suspenders.
+	if len(fc.groupBy) == 0 {
+		groupBy, err := t.computeGroupBy(rp.Projections, scope)
+		if err != nil {
+			return "", err
+		}
+		fc.groupBy = groupBy
+	}
+
 	// Build SELECT list before assembling FROM/WHERE args so that any
 	// arg-producing expressions in the SELECT position (e.g. literal strings)
 	// are appended to t.args first, matching their position in the SQL text.
@@ -1249,30 +1265,11 @@ func (t *Translator) buildFromClauseForWithPlan(wp *cypher.WithPlan, scope *cyph
 		return fromClause{}, err
 	}
 
-	// Determine whether any projection is an aggregate.
-	hasAgg := false
-	for _, proj := range wp.Projections {
-		if isAggExpr(proj.Expr) {
-			hasAgg = true
-			break
-		}
+	groupBy, err := t.computeGroupBy(wp.Projections, scope)
+	if err != nil {
+		return fromClause{}, err
 	}
-
-	if hasAgg {
-		// Non-aggregate projections become GROUP BY columns.
-		for _, proj := range wp.Projections {
-			if isAggExpr(proj.Expr) {
-				continue
-			}
-			groupSQL, err := t.toGroupBySQL(proj.Expr, scope)
-			if err != nil {
-				return fromClause{}, fmt.Errorf("sql: GROUP BY expression: %w", err)
-			}
-			if groupSQL != "" {
-				fc.groupBy = append(fc.groupBy, groupSQL)
-			}
-		}
-	}
+	fc.groupBy = append(fc.groupBy, groupBy...)
 
 	// HAVING predicate (post-WITH WHERE).
 	if wp.Having != nil {
@@ -1292,6 +1289,41 @@ func (t *Translator) buildFromClauseForWithPlan(wp *cypher.WithPlan, scope *cyph
 func isAggExpr(expr cypher.Expr) bool {
 	_, ok := expr.(*cypher.AggCallExpr)
 	return ok
+}
+
+// computeGroupBy returns the GROUP BY column expressions for a projection
+// list that mixes aggregate and non-aggregate items (e.g. "RETURN n.name,
+// count(n.num)" or "WITH n.name, count(n.num) AS c") — every non-aggregate
+// projection becomes a GROUP BY key, matching openCypher's implicit
+// grouping rule. Returns nil (no error) when no projection is an aggregate,
+// since no GROUP BY is needed at all in that case. Shared by
+// buildFromClauseForWithPlan (a WITH stage) and translateReturnPlan (a bare
+// RETURN with no preceding WITH) — the SQL-level need is identical.
+func (t *Translator) computeGroupBy(projections []cypher.ProjectionItem, scope *cypher.BindingScope) ([]string, error) {
+	hasAgg := false
+	for _, proj := range projections {
+		if isAggExpr(proj.Expr) {
+			hasAgg = true
+			break
+		}
+	}
+	if !hasAgg {
+		return nil, nil
+	}
+	var groupBy []string
+	for _, proj := range projections {
+		if isAggExpr(proj.Expr) {
+			continue
+		}
+		groupSQL, err := t.toGroupBySQL(proj.Expr, scope)
+		if err != nil {
+			return nil, fmt.Errorf("sql: GROUP BY expression: %w", err)
+		}
+		if groupSQL != "" {
+			groupBy = append(groupBy, groupSQL)
+		}
+	}
+	return groupBy, nil
 }
 
 // toGroupBySQL returns the SQL GROUP BY expression for a non-aggregate

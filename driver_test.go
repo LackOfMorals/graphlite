@@ -697,3 +697,46 @@ func TestRunQuery_WriteThenNonAggregate_StillOnePerRow(t *testing.T) {
 		t.Errorf("expected names {a, b}, got %v", seen)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bare RETURN with implicit GROUP BY
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestRunQuery_BareReturnImplicitGroupBy verifies that a RETURN clause with
+// no preceding WITH still groups by its non-aggregate columns when mixed
+// with an aggregate, matching openCypher's implicit grouping rule (the same
+// rule a WITH stage already implements).
+func TestRunQuery_BareReturnImplicitGroupBy(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+	for _, q := range []string{
+		`CREATE ({name: 'a', num: 33})`,
+		`CREATE ({name: 'a'})`,
+		`CREATE ({name: 'b', num: 42})`,
+	} {
+		if _, err := db.RunQuery(ctx, q, nil); err != nil {
+			t.Fatalf("CREATE: %v", err)
+		}
+	}
+
+	qr, err := db.RunQuery(ctx, `MATCH (n) RETURN n.name AS name, count(n.num) AS c ORDER BY name`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
+	recs, err := qr.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("expected 2 grouped records, got %d", len(recs))
+	}
+	wantName := []string{"a", "b"}
+	wantCount := []int64{1, 1}
+	for i := range recs {
+		name, _ := recs[i].Get("name")
+		c, _ := recs[i].Get("c")
+		if name != wantName[i] || c != wantCount[i] {
+			t.Errorf("record[%d] = {name:%v c:%v}, want {name:%v c:%v}", i, name, c, wantName[i], wantCount[i])
+		}
+	}
+}
