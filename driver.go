@@ -372,6 +372,51 @@ func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement
 			return qr, nil
 		}
 
+		// An aggregate RETURN (count(), sum(), etc.) must range over every
+		// matched row in a single evaluation, not be re-run once per row scoped
+		// to that one row's id (which is what the plain per-row loop below does,
+		// correct for a non-aggregate RETURN like "RETURN n.name"). Run the
+		// write batch for every matched row first, accumulating each
+		// variable's full id set, then run the final SELECT exactly once.
+		if selectStmt.Aggregated {
+			idSets := make(map[string][]int64)
+			for _, rowVals := range matchedRows {
+				idMap := make(map[string]int64)
+				for i, col := range cols {
+					switch v := rowVals[i].(type) {
+					case int64:
+						idMap[col] = v
+						idSets[col] = append(idSets[col], v)
+					case float64:
+						iv := int64(v)
+						idMap[col] = iv
+						idSets[col] = append(idSets[col], iv)
+					}
+				}
+				if err := execWriteBatch(ctx, ex, writeBatch, idMap, &ctr); err != nil {
+					return nil, err
+				}
+			}
+
+			resolved, err := glsql.ResolveIDSets(glsql.Result{Statements: []glsql.Statement{selectStmt}}, nil, idSets)
+			if err != nil {
+				return nil, fmt.Errorf("graphlite: write-then-select resolve ID sets: %w", err)
+			}
+			s := resolved.Statements[0]
+
+			rows, err := ex.QueryContext(ctx, s.SQL, s.Args...)
+			if err != nil {
+				return nil, fmt.Errorf("graphlite: write-then-select query: %w", err)
+			}
+			qr, err := newResultFromRows(rows)
+			if err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			qr.setCounters(ctr)
+			return qr, nil
+		}
+
 		// Collect all result rows from the SELECT across all matched rows.
 		var allRecords []*Record
 		var resultKeys []string
@@ -428,8 +473,20 @@ func execWriteThenSelect(ctx context.Context, ex execer, stmts []glsql.Statement
 		return nil, err
 	}
 
-	// Resolve idSentinels in the SELECT statement using the populated idMap.
-	resolved, err := glsql.ResolveIDs(glsql.Result{Statements: []glsql.Statement{selectStmt}}, idMap)
+	// Resolve idSentinels (or, for an aggregate RETURN, idSetSentinels — each
+	// variable created here is bound to exactly one id, so its "set" is a
+	// single-element one) in the SELECT statement using the populated idMap.
+	var resolved glsql.Result
+	var err error
+	if selectStmt.Aggregated {
+		idSets := make(map[string][]int64, len(idMap))
+		for k, v := range idMap {
+			idSets[k] = []int64{v}
+		}
+		resolved, err = glsql.ResolveIDSets(glsql.Result{Statements: []glsql.Statement{selectStmt}}, idMap, idSets)
+	} else {
+		resolved, err = glsql.ResolveIDs(glsql.Result{Statements: []glsql.Statement{selectStmt}}, idMap)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("graphlite: write-then-select resolve IDs: %w", err)
 	}

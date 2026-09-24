@@ -599,3 +599,101 @@ func TestPlanCache_ConcurrentReadsAreSafe(t *testing.T) {
 		}
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Write clause + RETURN-level aggregate
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestRunQuery_WriteThenAggregate_MatchForWrite verifies that a write clause
+// following a MATCH (which drives per-matched-row write execution via
+// KindMatchForWrite) still produces a single aggregated row when the RETURN
+// aggregates, rather than one row per matched node each aggregating over
+// just itself.
+func TestRunQuery_WriteThenAggregate_MatchForWrite(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+	_, err := db.RunQuery(ctx, `CREATE (), (), ()`, nil)
+	if err != nil {
+		t.Fatalf("CREATE: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		query string
+	}{
+		{"REMOVE", `MATCH (n) REMOVE n.num RETURN count(n) AS c`},
+		{"SET", `MATCH (n) SET n.touched = true RETURN count(n) AS c`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			qr, err := db.RunQuery(ctx, tc.query, nil)
+			if err != nil {
+				t.Fatalf("RunQuery: %v", err)
+			}
+			recs, err := qr.Collect(ctx)
+			if err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			if len(recs) != 1 {
+				t.Fatalf("expected exactly 1 aggregated record, got %d", len(recs))
+			}
+			c, _ := recs[0].Get("c")
+			if c != int64(3) {
+				t.Errorf("count(n) = %v, want 3", c)
+			}
+		})
+	}
+}
+
+// TestRunQuery_WriteThenAggregate_PureCreate verifies the no-MATCH write path
+// (CREATE with no preceding MATCH) is unaffected by the aggregate fix — each
+// created variable is trivially bound to exactly one id either way.
+func TestRunQuery_WriteThenAggregate_PureCreate(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+	qr, err := db.RunQuery(ctx, `CREATE (n) RETURN count(n) AS c`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
+	recs, err := qr.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+	c, _ := recs[0].Get("c")
+	if c != int64(1) {
+		t.Errorf("count(n) = %v, want 1", c)
+	}
+}
+
+// TestRunQuery_WriteThenNonAggregate_StillOnePerRow guards against the fix
+// regressing the common case: a write clause following MATCH with a
+// non-aggregating RETURN must still produce one row per matched node.
+func TestRunQuery_WriteThenNonAggregate_StillOnePerRow(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+	_, err := db.RunQuery(ctx, `CREATE (:P {name: "a"}), (:P {name: "b"})`, nil)
+	if err != nil {
+		t.Fatalf("CREATE: %v", err)
+	}
+	qr, err := db.RunQuery(ctx, `MATCH (n:P) SET n.x = 1 RETURN n.name AS name`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
+	recs, err := qr.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(recs))
+	}
+	seen := map[string]bool{}
+	for _, r := range recs {
+		name, _ := r.Get("name")
+		seen[name.(string)] = true
+	}
+	if !seen["a"] || !seen["b"] {
+		t.Errorf("expected names {a, b}, got %v", seen)
+	}
+}

@@ -91,6 +91,14 @@ type Statement struct {
 	// MATCH. When true, the execution layer must still execute write and SELECT
 	// statements exactly once (with all matched IDs nil) even when no rows are found.
 	Optional bool
+	// Aggregated is true for a KindSelectAfterWrite statement whose RETURN
+	// projections contain a top-level aggregate (count(), sum(), etc.). Such a
+	// statement's id-scoping args are idSetSentinel (resolved to an "IN
+	// (SELECT value FROM json_each(?))" membership test over every matched
+	// row's id) rather than idSentinel (resolved to a single "= ?" id) — the
+	// aggregate must run exactly once over the whole matched set, not once per
+	// matched row. See execWriteThenSelect's Aggregated branch.
+	Aggregated bool
 }
 
 // Result carries the output of a single translation pass.
@@ -244,6 +252,17 @@ func (t *Translator) Translate(plan cypher.LogicalPlan, scope *cypher.BindingSco
 // Only variables that appear in the RETURN projections are included in the FROM
 // clause to avoid unnecessary table scans.
 func (t *Translator) translateReturnAfterWrite(rp *cypher.ReturnPlan, scope *cypher.BindingScope) (Statement, error) {
+	// An aggregate projection (count(), sum(), etc.) must range over every
+	// matched row at once, not be re-evaluated once per row scoped to a single
+	// id — see the Aggregated field's doc comment and execWriteThenSelect.
+	aggregated := false
+	for _, proj := range rp.Projections {
+		if isAggExpr(proj.Expr) {
+			aggregated = true
+			break
+		}
+	}
+
 	// Determine which variables are referenced in the RETURN projections.
 	// We only add tables for variables that actually appear in the SELECT list.
 	referencedVars := collectReferencedVars(rp.Projections)
@@ -279,14 +298,21 @@ func (t *Translator) translateReturnAfterWrite(rp *cypher.ReturnPlan, scope *cyp
 		}
 		seenAliases[b.Alias] = true
 
-		if b.IsNode {
-			fromParts = append(fromParts, "nodes "+b.Alias)
-			whereFrags = append(whereFrags, b.Alias+".id = ?")
-			sentinelArgs = append(sentinelArgs, idSentinel{VarName: name, Alias: b.Alias})
-		} else if b.IsRel {
-			fromParts = append(fromParts, "edges "+b.Alias)
-			whereFrags = append(whereFrags, b.Alias+".id = ?")
-			sentinelArgs = append(sentinelArgs, idSentinel{VarName: name, Alias: b.Alias})
+		table := "nodes"
+		if b.IsRel {
+			table = "edges"
+		}
+		if b.IsNode || b.IsRel {
+			fromParts = append(fromParts, table+" "+b.Alias)
+			if aggregated {
+				// Every matched row's id, not just one — the aggregate must
+				// range over the whole set in a single evaluation.
+				whereFrags = append(whereFrags, b.Alias+".id IN (SELECT value FROM json_each(?))")
+				sentinelArgs = append(sentinelArgs, idSetSentinel{VarName: name, Alias: b.Alias})
+			} else {
+				whereFrags = append(whereFrags, b.Alias+".id = ?")
+				sentinelArgs = append(sentinelArgs, idSentinel{VarName: name, Alias: b.Alias})
+			}
 		}
 	}
 
@@ -342,9 +368,10 @@ func (t *Translator) translateReturnAfterWrite(rp *cypher.ReturnPlan, scope *cyp
 	allArgs = append(allArgs, sentinelArgs...)
 
 	return Statement{
-		SQL:  b.String(),
-		Args: allArgs,
-		Kind: KindSelectAfterWrite,
+		SQL:        b.String(),
+		Args:       allArgs,
+		Kind:       KindSelectAfterWrite,
+		Aggregated: aggregated,
 	}, nil
 }
 
@@ -1964,6 +1991,7 @@ func BindParams(result Result, params map[string]any) (Result, error) {
 			MatchedVars: stmt.MatchedVars,
 			NumProps:    stmt.NumProps,
 			Optional:    stmt.Optional,
+			Aggregated:  stmt.Aggregated,
 		}
 	}
 	out := Result{
@@ -2893,6 +2921,16 @@ type idSentinel struct {
 	Alias string
 }
 
+// idSetSentinel is the aggregate-query counterpart to idSentinel: it is
+// resolved to a JSON-encoded array of every matched row's id for VarName
+// (bound to the "<alias>.id IN (SELECT value FROM json_each(?))" fragment
+// translateReturnAfterWrite emits for an Aggregated Statement), rather than
+// a single id bound to "= ?". See ResolveIDSets.
+type idSetSentinel struct {
+	VarName string
+	Alias   string
+}
+
 // ResolveIDs replaces every idSentinel in result's Statements with the
 // corresponding int64 value from idMap (keyed by Cypher variable name).
 // If any sentinel variable is absent from idMap, ResolveIDs returns an error.
@@ -2912,6 +2950,7 @@ func ResolveIDs(result Result, idMap map[string]int64) (Result, error) {
 			MatchedVars: stmt.MatchedVars,
 			NumProps:    stmt.NumProps,
 			Optional:    stmt.Optional,
+			Aggregated:  stmt.Aggregated,
 		}
 	}
 	out := Result{Statements: newStmts}
@@ -2936,6 +2975,71 @@ func resolveIDArgs(args []any, idMap map[string]int64) ([]any, error) {
 			}
 			out[i] = id
 		} else {
+			out[i] = a
+		}
+	}
+	return out, nil
+}
+
+// ResolveIDSets is the aggregate-query counterpart to ResolveIDs: it replaces
+// every idSetSentinel in result's Statements with a JSON-encoded array of all
+// ids collected for that variable (from idSets), for binding to a
+// "<alias>.id IN (SELECT value FROM json_each(?))" fragment. Plain idSentinel
+// values (if any) are resolved the ordinary single-id way via idMap, so a
+// Statement may safely mix both sentinel kinds.
+func ResolveIDSets(result Result, idMap map[string]int64, idSets map[string][]int64) (Result, error) {
+	newStmts := make([]Statement, len(result.Statements))
+	for i, stmt := range result.Statements {
+		resolved, err := resolveIDSetArgs(stmt.Args, idMap, idSets)
+		if err != nil {
+			return result, err
+		}
+		newStmts[i] = Statement{
+			SQL:         stmt.SQL,
+			Args:        resolved,
+			Kind:        stmt.Kind,
+			CreatedVar:  stmt.CreatedVar,
+			MatchedVars: stmt.MatchedVars,
+			NumProps:    stmt.NumProps,
+			Optional:    stmt.Optional,
+			Aggregated:  stmt.Aggregated,
+		}
+	}
+	out := Result{Statements: newStmts}
+	if len(newStmts) > 0 {
+		out.SQL = newStmts[0].SQL
+		out.Args = newStmts[0].Args
+	}
+	return out, nil
+}
+
+// resolveIDSetArgs replaces idSetSentinel values with a JSON-encoded id-array
+// string, and (for completeness, mirroring resolveIDArgs) any plain
+// idSentinel values with a single resolved id.
+func resolveIDSetArgs(args []any, idMap map[string]int64, idSets map[string][]int64) ([]any, error) {
+	if len(args) == 0 {
+		return args, nil
+	}
+	out := make([]any, len(args))
+	for i, a := range args {
+		switch s := a.(type) {
+		case idSetSentinel:
+			ids, found := idSets[s.VarName]
+			if !found {
+				return nil, fmt.Errorf("sql: no resolved ID set for variable %q (alias %q)", s.VarName, s.Alias)
+			}
+			jsonBytes, err := json.Marshal(ids)
+			if err != nil {
+				return nil, fmt.Errorf("sql: encode ID set for variable %q: %w", s.VarName, err)
+			}
+			out[i] = string(jsonBytes)
+		case idSentinel:
+			id, found := idMap[s.VarName]
+			if !found {
+				return nil, fmt.Errorf("sql: no resolved ID for variable %q (alias %q)", s.VarName, s.Alias)
+			}
+			out[i] = id
+		default:
 			out[i] = a
 		}
 	}
