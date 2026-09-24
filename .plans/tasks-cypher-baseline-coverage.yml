@@ -292,7 +292,8 @@ tasks:
       executed/passed/skipped scenario counts. Update README.md's feature
       table and TCK pass-rate claim to reflect the new counts and the three
       newly-supported feature areas.
-    status: pending
+    status: completed
+    completed_at: "2026-09-24T00:00:00Z"
     dependencies:
       - task-003
       - task-006

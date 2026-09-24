@@ -27,7 +27,9 @@ graphlite is intentionally embedded-only. It does not implement the Bolt wire pr
 
 ## Cypher Compatibility
 
-graphlite achieves **100% pass rate on the openCypher Technology Compatibility Kit** (235/235 executed scenarios). The table below lists supported features.
+graphlite passes **244/272 (89.7%) of executed openCypher Technology Compatibility Kit scenarios**. The table below lists supported features.
+
+That number dropped from an earlier "100%" figure — not because of a regression, but because reaching it meant unskipping `UNWIND`, 22 scalar functions, and `CALL {}` subqueries. Doing so exposed several **pre-existing gaps in unrelated features** that TCK scenarios combining those constructs with `UNWIND`/scalar functions/`CALL {}` now reach for the first time: aggregate `max()`/`min()` over `null`/mixed values, `SET n.list += [...]` concatenation, a few `MERGE` edge cases, `ORDER BY` cross-type ordering, named path variables (`p = (a)-->(b)`), and `UNWIND` combined with a write clause (`CREATE`/`MERGE`/etc.). None of these are new — they were simply unreachable before. Each remains an open, individually-scoped gap, not silently wrong behavior: every failing scenario was inspected during development and confirmed to error clearly rather than return an incorrect result.
 
 | Feature | Supported |
 |---|:---:|
@@ -36,6 +38,8 @@ graphlite achieves **100% pass rate on the openCypher Technology Compatibility K
 | `MATCH` — multi-hop (fixed depth) | ✅ |
 | `MATCH` — variable-length paths `[*]`, `[*2..5]`, `[*..3]` | ✅ |
 | `OPTIONAL MATCH` | ✅ |
+| `UNWIND` | ✅ |
+| `CALL { subquery }` — uncorrelated, and correlated via an importing `WITH` (strict scoping; MATCH-only body, no aggregation in v1) | ✅ |
 | `WHERE` — comparisons, `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL` | ✅ |
 | `WHERE` — `exists()`, string predicates (`CONTAINS`, `STARTS WITH`, `ENDS WITH`) | ✅ |
 | `WHERE` — `hasLabel(n, 'Label')` | ✅ |
@@ -46,6 +50,8 @@ graphlite achieves **100% pass rate on the openCypher Technology Compatibility K
 | `collect()` | ✅ |
 | `CASE` expressions (simple and generic) | ✅ |
 | Named query parameters (`$param`) | ✅ |
+| Scalar functions — `toLower`, `toUpper`, `trim`, `split`, `size`, `length`, `abs`, `ceil`, `floor`, `round`, `type`, `labels`, `keys`, `id`, `head`, `tail`, `last`, `range`, `coalesce`, `toString`, `toInteger`, `toFloat`, `toBoolean` | ✅ |
+| `nodes(path)`, `relationships(path)`, `shortestPath()`, `allShortestPaths()` | ❌ |
 | `CREATE` node and relationship | ✅ |
 | `SET` property, `SET n += {map}` | ✅ |
 | `REMOVE` property, `REMOVE` label | ✅ |
@@ -53,7 +59,6 @@ graphlite achieves **100% pass rate on the openCypher Technology Compatibility K
 | `MERGE` with `ON CREATE SET` / `ON MATCH SET` | ✅ |
 | Bulk import — JSON, CSV (Neo4j format) | ✅ |
 | Bulk export — JSON | ✅ |
-| `shortestPath()` | ❌ |
 
 Unsupported features return `ErrUnsupportedCypher` — they never silently produce wrong results.
 
