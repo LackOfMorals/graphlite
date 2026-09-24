@@ -73,6 +73,10 @@ func Open(uri string, cfg Config) (*SQLiteStore, error) {
 	}
 
 	if cfg.BusyTimeout > 0 {
+		// SQLite's PRAGMA grammar does not accept "?" bind parameters for the
+		// pragma-value, so this must be a literal in the SQL string. It is safe
+		// despite the fmt.Sprintf: ms is an int64 derived from a Go time.Duration
+		// supplied by the caller, never an untrusted string.
 		ms := cfg.BusyTimeout.Milliseconds()
 		if _, err := db.Exec(fmt.Sprintf("PRAGMA busy_timeout=%d;", ms)); err != nil {
 			_ = db.Close()

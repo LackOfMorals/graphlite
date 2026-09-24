@@ -24,9 +24,14 @@ import (
 type StatementKind int
 
 const (
+	// KindUnknown is the zero value of StatementKind. A Statement left at this
+	// value (e.g. a zero-initialized Statement{} that was never given a real
+	// Kind) is not dispatchable — the execution layer must reject it rather
+	// than silently treating it as a real query.
+	KindUnknown StatementKind = iota
 	// KindSelect is a read-only SELECT query. The execution layer calls
 	// QueryContext and wraps the rows in a Result.
-	KindSelect StatementKind = iota
+	KindSelect
 	// KindMatchForWrite is a SELECT emitted as the first step in a MATCH+write
 	// sequence. It returns one column per matched variable, named by the Cypher
 	// variable name, containing the row's integer id. The execution layer runs
