@@ -386,3 +386,67 @@ Verification:
   unchanged — no scenario in this suite exercises split())
 
 Next Task: task-007 (Translate graph-shape functions: type, id, labels, keys)
+
+================================================================================
+TASK-007: Translate graph-shape functions: type, id, labels, keys
+Date: 2026-09-24T00:00:00Z
+================================================================================
+
+Summary:
+Added a graphShapeCallToSQL method to sql/translator.go, dispatched from
+scalarCallToSQL for "id"/"type"/"labels"/"keys". All four require their
+single argument to be a bare *cypher.VarExpr resolving to an in-scope
+node/relationship binding — a clear error otherwise, not a best-effort
+guess. id(n)/id(r) return binding.Column directly (already "<alias>.id" per
+scope.go's Binding doc comment — no new SQL needed). type(r) returns
+"<alias>.type", rejecting node variables. labels(n) queries node_labels
+(not the raw nodes.labels column, per AGENTS.md's indexing guidance) via a
+correlated "(SELECT json_group_array(label) FROM node_labels WHERE
+node_id = <alias>.id)". keys(n)/keys(r) aggregate over
+"json_each(<alias>.props)" the same way for both node and relationship
+bindings.
+
+Removed type(/labels(/keys(/id( from compat/tck_test.go's
+unsupportedPatterns. TCK executed scenarios rose 262 -> 271 (+9), passed
+236 -> 244 (+8), one net-new failure (27 total, up from 26).
+
+Investigated that one new failure directly (Remove1.feature "Remove a
+missing node property": `MATCH (n) REMOVE n.num RETURN
+sum(size(keys(n))) AS totalNumberOfProps` expects a single row with value
+0, got 3 rows instead). Isolated it with a standalone script: the identical
+query WITHOUT the preceding REMOVE clause correctly collapses to 1
+aggregated row - so keys()/size()/sum() compose correctly on their own.
+The bug is specifically in how a write clause (REMOVE) followed by a
+RETURN-level aggregate is planned/translated (likely execWriteThenSelect's
+per-matched-row loop bypasses whatever makes a plain aggregate SELECT
+collapse to one row). This is a pre-existing gap in write+aggregate
+interaction, unrelated to graph-shape functions — it was simply
+unreachable before because keys() was skipped, and this specific TCK
+scenario is the first to combine REMOVE with a RETURN-level aggregate over
+keys(). Same pattern as every other newly-surfaced failure in this PRD so
+far: verified via direct investigation, left unfixed, documented here for
+whoever picks up write+aggregate correctness next.
+
+Files Changed:
+- sql/translator.go (added graphShapeCallToSQL; wired "id"/"type"/"labels"/
+  "keys" cases into scalarCallToSQL)
+- driver_test.go (6 sub-tests: id, type, labels containing both of a
+  multi-label node's labels, keys on a node, keys on a relationship, and
+  type() on a node variable correctly erroring)
+- compat/tck_test.go (removed type(/labels(/keys(/id( from
+  unsupportedPatterns)
+
+Key Decisions:
+- All four functions require a bare VarExpr argument (not a property access
+  or other expression) — matches real openCypher semantics (id(n.prop)
+  isn't meaningful) and keeps error messages precise.
+- Did not investigate or fix the REMOVE+aggregate collapse bug — out of
+  scope for this task; flagged clearly above for a future task.
+
+Verification:
+- CGO_ENABLED=0 go build ./...: clean
+- go vet ./...: clean
+- CGO_ENABLED=0 go test -tags=unit -count=1 ./... (timeout 60s): all pass
+- CGO_ENABLED=0 go test -tags=tck ./compat/...: pass, 244/271 (90.0%)
+
+Next Task: task-008 (Translate list functions: head, tail, last, range, coalesce)

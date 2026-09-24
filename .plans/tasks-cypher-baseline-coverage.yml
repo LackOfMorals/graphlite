@@ -133,7 +133,7 @@ tasks:
       (not the raw labels column, per AGENTS.md's indexing guidance).
       Translate keys(n)/keys(r) to a json_group_array(key) over
       json_each(props).
-    status: pending
+    status: completed
     dependencies:
       - task-004
     acceptance_criteria:
@@ -142,6 +142,7 @@ tasks:
       - "`MATCH (n) RETURN id(n)` returns the node's integer id"
       - "`MATCH (n) RETURN keys(n)` returns the property key list"
       - "Remove type(/labels(/keys(/id( entries from compat/tck_test.go's unsupportedPatterns"
+    completed_at: "2026-09-24T00:00:00Z"
 
   - id: task-008
     title: "Translate list functions: head, tail, last, range, coalesce"

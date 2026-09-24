@@ -106,10 +106,6 @@ var unsupportedPatterns = []struct {
 	{"= ()--", "named path variables not supported"},
 
 	// Unsupported functions
-	{"type(", "type() function not supported"},
-	{"labels(", "labels() function not supported"},
-	{"keys(", "keys() function not supported"},
-	{"id(", "id() function not supported"},
 	{"nodes(", "nodes() function not supported"},
 	{"relationships(", "relationships() function not supported"},
 	{"head(", "head() function not supported"},

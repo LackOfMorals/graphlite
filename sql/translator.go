@@ -1992,6 +1992,57 @@ func (t *Translator) scalarCallToSQL(e *cypher.ScalarCallExpr, scope *cypher.Bin
 			argSQL,
 		), nil
 
+	case "id", "type", "labels", "keys":
+		return t.graphShapeCallToSQL(e, scope)
+
+	default:
+		return "", fmt.Errorf("sql: %s() is not yet supported", e.Func)
+	}
+}
+
+// graphShapeCallToSQL translates id(), type(), labels(), and keys() — the
+// four scalar functions that operate on a bound node or relationship
+// variable itself rather than on a scalar value. All four require their
+// single argument to be a bare VarExpr referencing a node/relationship
+// variable already in scope; anything else (a property access, a literal,
+// an unbound name) is a clear error, not a best-effort guess.
+func (t *Translator) graphShapeCallToSQL(e *cypher.ScalarCallExpr, scope *cypher.BindingScope) (string, error) {
+	ve, ok := e.Args[0].(*cypher.VarExpr)
+	if !ok {
+		return "", fmt.Errorf("sql: %s() requires a node or relationship variable, got %T", e.Func, e.Args[0])
+	}
+	b, ok := scope.Resolve(ve.Name)
+	if !ok {
+		return "", fmt.Errorf("sql: variable %q not in scope", ve.Name)
+	}
+	if !b.IsNode && !b.IsRel {
+		return "", fmt.Errorf("sql: %s(%s): %q is not a node or relationship variable", e.Func, ve.Name, ve.Name)
+	}
+
+	switch e.Func {
+	case "id":
+		// b.Column is already "<alias>.id" for both node and relationship
+		// bindings (see the Binding doc comment in scope.go).
+		return b.Column, nil
+
+	case "type":
+		if !b.IsRel {
+			return "", fmt.Errorf("sql: type(%s): %q is not a relationship variable", ve.Name, ve.Name)
+		}
+		return b.Alias + ".type", nil
+
+	case "labels":
+		if !b.IsNode {
+			return "", fmt.Errorf("sql: labels(%s): %q is not a node variable", ve.Name, ve.Name)
+		}
+		// Sourced from the node_labels junction table (and its
+		// idx_node_labels_label index), not the raw nodes.labels column,
+		// per AGENTS.md's indexing guidance.
+		return fmt.Sprintf("(SELECT json_group_array(label) FROM node_labels WHERE node_id = %s)", b.Column), nil
+
+	case "keys":
+		return fmt.Sprintf("(SELECT json_group_array(key) FROM json_each(%s.props))", b.Alias), nil
+
 	default:
 		return "", fmt.Errorf("sql: %s() is not yet supported", e.Func)
 	}

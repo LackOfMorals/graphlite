@@ -802,6 +802,69 @@ func TestRunQuery_ScalarFunction_SplitComposesWithSize(t *testing.T) {
 	}
 }
 
+func TestRunQuery_ScalarFunctions_GraphShape(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+
+	_, err := db.RunQuery(ctx,
+		`CREATE (a:Person:Employee {name: "Alice", age: 30})-[:KNOWS {since: 2020}]->(b:Person {name: "Bob"})`,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("CREATE: %v", err)
+	}
+
+	t.Run("id", func(t *testing.T) {
+		got := mustSingleValue(t, db, `MATCH (n:Person {name: "Alice"}) RETURN id(n)`)
+		if _, ok := got.(int64); !ok {
+			t.Errorf("id(n) = %v (%T), want int64", got, got)
+		}
+	})
+
+	t.Run("type", func(t *testing.T) {
+		got := mustSingleValue(t, db, `MATCH ()-[r:KNOWS]->() RETURN type(r)`)
+		if got != "KNOWS" {
+			t.Errorf("type(r) = %v, want KNOWS", got)
+		}
+	})
+
+	t.Run("labels", func(t *testing.T) {
+		got := mustSingleValue(t, db, `MATCH (n:Person {name: "Alice"}) RETURN labels(n)`)
+		s, ok := got.(string)
+		if !ok {
+			t.Fatalf("labels(n) = %T, want string (raw JSON array)", got)
+		}
+		if !strings.Contains(s, "Person") || !strings.Contains(s, "Employee") {
+			t.Errorf("labels(n) = %v, want to contain both Person and Employee", s)
+		}
+	})
+
+	t.Run("keys_node", func(t *testing.T) {
+		got := mustSingleValue(t, db, `MATCH (n:Person {name: "Alice"}) RETURN keys(n)`)
+		s, ok := got.(string)
+		if !ok {
+			t.Fatalf("keys(n) = %T, want string (raw JSON array)", got)
+		}
+		if !strings.Contains(s, "name") || !strings.Contains(s, "age") {
+			t.Errorf("keys(n) = %v, want to contain both name and age", s)
+		}
+	})
+
+	t.Run("keys_rel", func(t *testing.T) {
+		got := mustSingleValue(t, db, `MATCH ()-[r:KNOWS]->() RETURN keys(r)`)
+		if got != `["since"]` {
+			t.Errorf("keys(r) = %v, want [\"since\"]", got)
+		}
+	})
+
+	t.Run("type_on_node_is_error", func(t *testing.T) {
+		_, err := db.RunQuery(ctx, `MATCH (n:Person {name: "Alice"}) RETURN type(n)`, nil)
+		if err == nil {
+			t.Error("expected error for type() on a node variable, got nil")
+		}
+	})
+}
+
 func TestRunQuery_ScalarFunction_SizeDoesNotDuplicateParamBinding(t *testing.T) {
 	// Regression test: size() references its argument's compiled SQL twice
 	// (json_type(v) and json_array_length(v)/LENGTH(v)) inside a derived
