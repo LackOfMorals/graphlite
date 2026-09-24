@@ -450,3 +450,78 @@ Verification:
 - CGO_ENABLED=0 go test -tags=tck ./compat/...: pass, 244/271 (90.0%)
 
 Next Task: task-008 (Translate list functions: head, tail, last, range, coalesce)
+
+================================================================================
+TASK-008: Translate list functions: head, tail, last, range, coalesce
+Date: 2026-09-24T00:00:00Z
+================================================================================
+
+Summary:
+Added head/last/tail/range/coalesce cases to sql/translator.go's
+scalarCallToSQL (range via a new rangeCallToSQL helper). head(list) ->
+dialect.JSONExtract(argSQL, "$[0]") (referenced once, no wrapping needed).
+last(list) -> json_extract(v, '$[' || (json_array_length(v)-1) || ']')
+over a derived-table-bound v (referenced twice). tail(list) ->
+json_group_array(je.value) FROM json_each(argSQL) AS je WHERE je.key > 0
+(argSQL referenced once — inside json_each() — so no wrapping needed).
+range(start, end[, step]) -> a recursive CTE correlated to a
+start/end/step derived table, step defaulting to the literal "1" when
+omitted. coalesce(...) -> plain SQL COALESCE(...), no wrapping needed
+since no argument repeats.
+
+Verified range()'s edge cases empirically before wiring it in: ascending,
+descending (negative step), an invalid direction (start > end with a
+positive step) correctly produces an empty array rather than a wrong
+one-element array, and step = 0 also produces an empty array rather than
+hanging — the same base-case WHERE guard technique used for split()'s
+empty-delimiter case in task-006.
+
+Removed head(/tail(/last(/range(/coalesce( from compat/tck_test.go's
+unsupportedPatterns (nodes(/relationships( remain — they need a Path
+value, deferred to prd-shortest-path-traversal.md, as already noted in
+this PRD's own requirements). TCK executed scenarios rose 271 -> 272 (+1),
+pass rate held at 244 (89.7%, still comfortably above the 50% gate).
+
+Investigated the one net-new failure directly (ReturnSkipLimit1.feature
+"SKIP with an expression that does not depend on variables", whose fixture
+setup is "UNWIND range(1, 10) AS i CREATE ({nr: i})", failing with "SQL
+logic error: no such column: _uw0.value"). Reproduced standalone: any
+"UNWIND ... CREATE (...)" query fails the same way, regardless of what
+produces the unwound list — this is not a range() bug. Root cause: CREATE
+translates to a bare "INSERT INTO nodes (...) VALUES (...)" statement,
+which has no FROM/JOIN clause at all, so it cannot see an UNWIND-introduced
+json_each() row source the way a plain SELECT can. This mirrors exactly
+what MATCH-for-write already solves for MATCH+CREATE (collectMatchRows
+enumerates matched rows first, then the write batch runs once per row via
+KindMatchForWrite) — UNWIND+CREATE needs the equivalent "drive the write
+batch once per UNWIND-expanded value" execution-layer mechanism, which
+does not exist yet. This was explicitly flagged as unexercised in task-003's
+own progress notes ("UNWIND combined with a write clause in the same query
+is not exercised by this PRD's scope") — range() simply made the first TCK
+scenario that combines them reachable. Not fixed here: this is a
+distinct, non-trivial execution-layer feature (UNWIND-driven write
+iteration), not a translation bug in any of this task's five functions,
+and deserves its own scoped task rather than being bolted onto task-008.
+
+Files Changed:
+- sql/translator.go (added head/last/tail/range/coalesce cases to
+  scalarCallToSQL; added rangeCallToSQL)
+- driver_test.go (9-case table-driven test covering all five functions,
+  including range()'s ascending/descending/invalid-direction/default-step
+  variants)
+- compat/tck_test.go (removed head(/tail(/last(/range(/coalesce( from
+  unsupportedPatterns)
+
+Key Decisions:
+- Did not attempt UNWIND+write support — flagged as a distinct follow-up
+  task (mirroring KindMatchForWrite's per-matched-row execution model),
+  not scope creep into task-008's actual subject (list function
+  translation, which is complete and correct on its own for read-only use).
+
+Verification:
+- CGO_ENABLED=0 go build ./...: clean
+- go vet ./...: clean
+- CGO_ENABLED=0 go test -tags=unit -count=1 ./... (timeout 60s): all pass
+- CGO_ENABLED=0 go test -tags=tck ./compat/...: pass, 244/272 (89.7%)
+
+Next Task: task-009 (Add CallSubqueryClause AST/plan node and parser support)

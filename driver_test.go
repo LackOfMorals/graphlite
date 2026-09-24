@@ -865,6 +865,33 @@ func TestRunQuery_ScalarFunctions_GraphShape(t *testing.T) {
 	})
 }
 
+func TestRunQuery_ScalarFunctions_List(t *testing.T) {
+	db := openMemDB(t)
+
+	cases := []struct {
+		query string
+		want  any
+	}{
+		{`RETURN head([1,2,3])`, int64(1)},
+		{`RETURN last([1,2,3])`, int64(3)},
+		{`RETURN tail([1,2,3])`, "[2,3]"},
+		{`RETURN range(1,5)`, "[1,2,3,4,5]"},
+		{`RETURN range(1,10,2)`, "[1,3,5,7,9]"},
+		{`RETURN range(5,1,-1)`, "[5,4,3,2,1]"},
+		{`RETURN range(5,1)`, "[]"},
+		{`RETURN coalesce(null, null, 3)`, int64(3)},
+		{`RETURN coalesce(1, 2)`, int64(1)},
+	}
+	for _, c := range cases {
+		t.Run(c.query, func(t *testing.T) {
+			got := mustSingleValue(t, db, c.query)
+			if got != c.want {
+				t.Errorf("got %v (%T), want %v (%T)", got, got, c.want, c.want)
+			}
+		})
+	}
+}
+
 func TestRunQuery_ScalarFunction_SizeDoesNotDuplicateParamBinding(t *testing.T) {
 	// Regression test: size() references its argument's compiled SQL twice
 	// (json_type(v) and json_array_length(v)/LENGTH(v)) inside a derived

@@ -1995,6 +1995,51 @@ func (t *Translator) scalarCallToSQL(e *cypher.ScalarCallExpr, scope *cypher.Bin
 	case "id", "type", "labels", "keys":
 		return t.graphShapeCallToSQL(e, scope)
 
+	case "head":
+		// Only referenced once, so no derived-table wrapping is needed.
+		argSQL, err := t.exprToSQL(e.Args[0], scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: head() argument: %w", err)
+		}
+		return t.dialect.JSONExtract(argSQL, "$[0]"), nil
+
+	case "last":
+		argSQL, err := t.exprToSQL(e.Args[0], scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: last() argument: %w", err)
+		}
+		return fmt.Sprintf(
+			"(SELECT json_extract(v, '$[' || (json_array_length(v) - 1) || ']') FROM (SELECT %s AS v))",
+			argSQL,
+		), nil
+
+	case "tail":
+		// Referenced only once (inside json_each()), so no wrapping needed.
+		argSQL, err := t.exprToSQL(e.Args[0], scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: tail() argument: %w", err)
+		}
+		return fmt.Sprintf(
+			"(SELECT json_group_array(je.value) FROM json_each(%s) AS je WHERE je.key > 0)",
+			argSQL,
+		), nil
+
+	case "range":
+		return t.rangeCallToSQL(e, scope)
+
+	case "coalesce":
+		// No argument is referenced more than once, so each translates directly
+		// with no derived-table wrapping needed.
+		parts := make([]string, len(e.Args))
+		for i, arg := range e.Args {
+			argSQL, err := t.exprToSQL(arg, scope)
+			if err != nil {
+				return "", fmt.Errorf("sql: coalesce() argument %d: %w", i, err)
+			}
+			parts[i] = argSQL
+		}
+		return fmt.Sprintf("COALESCE(%s)", strings.Join(parts, ", ")), nil
+
 	default:
 		return "", fmt.Errorf("sql: %s() is not yet supported", e.Func)
 	}
@@ -2046,6 +2091,46 @@ func (t *Translator) graphShapeCallToSQL(e *cypher.ScalarCallExpr, scope *cypher
 	default:
 		return "", fmt.Errorf("sql: %s() is not yet supported", e.Func)
 	}
+}
+
+// rangeCallToSQL translates range(start, end[, step]) into a JSON array via
+// a recursive CTE. step defaults to 1 when omitted. start/end/step are each
+// referenced multiple times in the generated SQL, so all three are bound
+// once via a derived table (the same technique used by "split") before the
+// CTE references them repeatedly, avoiding a duplicate-placeholder mismatch
+// for any argument that compiles to "?".
+//
+// The base case's WHERE guard ((st > 0 AND s <= e) OR (st < 0 AND s >= e))
+// makes an invalid range (e.g. range(5, 1) with the default ascending step)
+// produce an empty array instead of a wrong one-element array, and also
+// makes step = 0 produce an empty array rather than hang — confirmed
+// empirically for all of these cases before writing this.
+func (t *Translator) rangeCallToSQL(e *cypher.ScalarCallExpr, scope *cypher.BindingScope) (string, error) {
+	if len(e.Args) != 2 && len(e.Args) != 3 {
+		return "", fmt.Errorf("sql: range() requires 2 or 3 arguments, got %d", len(e.Args))
+	}
+	startSQL, err := t.exprToSQL(e.Args[0], scope)
+	if err != nil {
+		return "", fmt.Errorf("sql: range() start argument: %w", err)
+	}
+	endSQL, err := t.exprToSQL(e.Args[1], scope)
+	if err != nil {
+		return "", fmt.Errorf("sql: range() end argument: %w", err)
+	}
+	stepSQL := "1"
+	if len(e.Args) == 3 {
+		stepSQL, err = t.exprToSQL(e.Args[2], scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: range() step argument: %w", err)
+		}
+	}
+	return fmt.Sprintf(`(SELECT (WITH RECURSIVE _range(n) AS (
+		SELECT s WHERE (st > 0 AND s <= e) OR (st < 0 AND s >= e)
+		UNION ALL
+		SELECT n + st FROM _range WHERE (st > 0 AND n + st <= e) OR (st < 0 AND n + st >= e)
+	) SELECT json_group_array(n) FROM _range) FROM (SELECT %s AS s, %s AS e, %s AS st))`,
+		startSQL, endSQL, stepSQL,
+	), nil
 }
 
 // stringMatchPattern returns the LIKE pattern string for a string match

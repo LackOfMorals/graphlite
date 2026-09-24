@@ -154,7 +154,7 @@ tasks:
       to a recursive CTE generating the integer sequence, JSON-aggregated.
       Translate coalesce(a, b, ...) to SQL COALESCE directly (values are
       already scalar-typed at this point, so no JSON wrapping needed).
-    status: pending
+    status: completed
     dependencies:
       - task-004
     acceptance_criteria:
@@ -162,6 +162,7 @@ tasks:
       - "`range(1,5)` returns [1,2,3,4,5]; `range(1,10,2)` returns [1,3,5,7,9]"
       - "`coalesce(null, null, 3)` returns 3"
       - "Remove head(/tail(/last(/range(/coalesce( entries from compat/tck_test.go's unsupportedPatterns"
+    completed_at: "2026-09-24T00:00:00Z"
 
   - id: task-009
     title: "Add CallSubqueryClause AST/plan node and parser support"

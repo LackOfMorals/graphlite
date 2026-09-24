@@ -108,11 +108,6 @@ var unsupportedPatterns = []struct {
 	// Unsupported functions
 	{"nodes(", "nodes() function not supported"},
 	{"relationships(", "relationships() function not supported"},
-	{"head(", "head() function not supported"},
-	{"tail(", "tail() function not supported"},
-	{"last(", "last() function not supported"},
-	{"range(", "range() function not supported"},
-	{"coalesce(", "coalesce() function not supported"},
 	{"shortestPath(", "shortestPath() not supported"},
 	{"allShortestPaths(", "allShortestPaths() not supported"},
 
