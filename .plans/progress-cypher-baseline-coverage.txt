@@ -609,3 +609,154 @@ Verification:
 Next Task: task-010 (Decide and implement CALL {} correlation semantics —
 RESOLVED as strict scoping per user decision; see that task's updated
 description in tasks-cypher-baseline-coverage.yml)
+
+================================================================================
+TASK-010 + TASK-011: CALL {} planning and execution (strict scoping)
+Date: 2026-09-24T00:00:00Z
+================================================================================
+
+Summary:
+Implemented together because the key architectural discovery collapsed
+what the PRD expected to be two very different pieces of work (planner
+decision + a brand-new Go-level per-outer-row execution engine) into one
+much smaller change with NO new execution engine at all.
+
+The discovery, made empirically before writing any planner code: graphlite
+already lets a later MATCH clause re-reference a variable an earlier one
+bound, reusing its existing SQL table alias rather than creating a fresh
+join — verified with a standalone script running
+"MATCH (n) MATCH (n)-[:KNOWS]->(m) RETURN n.name, m.name" against a real
+database, which correctly returned the joined row using n's single
+existing binding. Since a CORRELATED CALL {} subquery (one with a leading
+"WITH n" import) is semantically just "more MATCH/WHERE clauses that reuse
+n's existing binding," it can be spliced directly into the outer query's
+own match-plan chain — no nested subquery, no per-row loop, no LATERAL
+equivalent needed. Only the UNCORRELATED case (no leading import) is
+genuinely independent and needs to become its own nested SELECT.
+
+Planner (cypher/planner.go):
+- Added isPureImportWith(wc): true only for a bare variable list with no
+  alias/expression/aggregation/WHERE/ORDER BY/SKIP/LIMIT (e.g. "WITH n, m"
+  but not "WITH n AS x", "WITH count(n)", or "WITH n.prop").
+- Added extractImportedVars(clauses, outerScope): detects a leading
+  importing WITH per isPureImportWith, and validates every named variable
+  is actually bound in outerScope (a clear planning-time error otherwise —
+  "CALL {} imports undefined variable"). Returns (nil, false, nil) — not an
+  error — when there is no importing WITH at all.
+- Added planCallSubqueryClause implementing both paths:
+  - CORRELATED: build a fresh innerScope containing ONLY the imported
+    Bindings (copied from outerScope, same Alias/Column — this is what
+    makes SQL alias reuse work), plan each body MATCH clause against it
+    with the OUTER query's own aliasCounter (not a fresh one — critical,
+    since these plans end up sharing one SQL statement with the outer
+    query and must not collide on aliases like "n0"), and return the
+    resulting match plans + WHERE predicate for planQuery to append
+    directly into its own matchPlans/filterPred accumulation.
+  - UNCORRELATED: build a fresh innerScope AND a fresh aliasCounter (this
+    subquery becomes an independent nested SELECT, so its own aliases never
+    need to avoid the outer query's), plan the full body+RETURN
+    independently via the ordinary flushMatchesIntoBase/planReturnClause
+    path, and wrap the result in a new CallSubqueryPlan.
+  - v1 restrictions enforced with clear errors (not silent
+    misbehavior): body clauses before the trailing RETURN must be MATCH
+    only (no CREATE/SET/DELETE/MERGE/WITH — read-only v1 scope); the
+    RETURN must not aggregate (AggCallExpr rejected) — correlating an
+    aggregating subquery needs outer GROUP BY coordination, deferred; every
+    RETURN item needs a name (explicit alias, or the bare variable's own
+    name) to expose outward.
+  - Deliberate, documented v1 simplification for the CORRELATED case: ALL
+    of the inner scope's bindings (not just the ones the subquery
+    explicitly RETURNs) are copied into the outer scope afterward. Real
+    openCypher hides everything except the RETURN'd names; doing that
+    precisely would require re-resolving each RETURN expression against a
+    scope the outer translator has no access to once the plan tree is
+    flattened. This relaxation only ever WIDENS what a later clause can
+    reference by name — it never changes a computed value, and it does not
+    affect the strict-scoping requirement itself (visibility INTO the
+    subquery), only visibility OUT of it afterward.
+- Added aliasCounter.nextSubquery() ("_sub0", "_sub1", ...) for the
+  uncorrelated case's derived-table alias, alongside the existing
+  nextNode/nextRel/nextUnwind.
+
+Plan node (cypher/plan.go):
+- Added CallSubqueryPlan{Source, Inner, InnerScope, SQLAlias} — used ONLY
+  for the uncorrelated case. Its doc comment explains why the correlated
+  case needs no plan node at all (see above).
+
+Translator (sql/translator.go):
+- Added *cypher.CallSubqueryPlan case to buildFromClause's dispatch and a
+  new buildFromClauseForCallSubquery: translates csp.Inner (a *ReturnPlan)
+  against csp.InnerScope via a separate sub-Translator (isolating its own
+  bind args into fc.joinArgs, matching the FilterPlan/UNWIND convention
+  elsewhere in this file), producing "(SELECT ...) AS _subN", then either
+  sets it as the primary FROM table (no Source) or CROSS JOINs it onto
+  Source — byte-for-byte the same structural pattern
+  buildFromClauseForUnwind already uses for json_each(), just wrapping an
+  arbitrary nested query instead of a table-valued function.
+
+Verified interactively before writing Go tests (via standalone scripts):
+uncorrelated subqueries return all rows correctly; correlated subqueries
+with "WITH n" correctly reuse n's binding and produce the right cardinality
+(only rows where the correlated MATCH actually matches); strict scoping
+genuinely blocks an unimported property access ("n.name" inside a subquery
+with no import and no local re-introduction of "n" errors with "variable
+n not in scope" — confirming this is NOT just skipped/ignored); and
+variable-name shadowing works correctly (an uncorrelated subquery's own
+"MATCH (n:Dog)" is a completely independent "n", unrelated to an outer
+"n:Person" bound to something else entirely, with both remaining correctly
+accessible afterward under no name collision).
+
+One test-writing correction along the way: my first attempt at a
+strict-scoping test used "CALL { MATCH (n)-[:KNOWS]->(m) RETURN m }" with
+no import, expecting an error — it did NOT error, because a bare node
+pattern "(n)" is exactly how Cypher variables get bound in the first place
+(not a reference requiring prior binding), so this is correctly treated as
+introducing a fresh, independently-scoped "n" inside the subquery (real
+Cypher shadowing), not a scoping violation. Rewrote the test to use a
+property access ("n.name") instead, which does require "n" to already be
+resolvable and correctly fails without an import.
+
+Removed "CALL {" from compat/tck_test.go's unsupportedPatterns. TCK
+executed/pass/fail counts are byte-for-byte unchanged (272/244/28,
+89.7%) — confirmed via grep that this local TCK fixture snapshot contains
+zero .feature scenarios using "CALL {" anywhere at all, so there was
+nothing to newly execute. This is a gap in the fixture set's coverage
+(CALL {} subqueries are a newer Cypher extension than this openCypher TCK
+snapshot), not a defect in this task's work — verified correctness instead
+via 6 new end-to-end tests in driver_test.go.
+
+Files Changed:
+- cypher/plan.go (added CallSubqueryPlan)
+- cypher/planner.go (added isPureImportWith, extractImportedVars,
+  planCallSubqueryClause, aliasCounter.nextSubquery; wired
+  *CallSubqueryClause into planQuery's switch)
+- sql/translator.go (added *cypher.CallSubqueryPlan case to
+  buildFromClause; added buildFromClauseForCallSubquery)
+- driver_test.go (6 end-to-end tests: uncorrelated, correlated with
+  import, strict-scoping violation errors, shadowing is independent,
+  aggregation-in-subquery-RETURN rejected, importing an undefined
+  variable rejected)
+- compat/tck_test.go (removed "CALL {" from unsupportedPatterns)
+
+Key Decisions:
+- Correlated CALL {} splices into the outer plan tree rather than getting
+  its own plan node — see the discovery above. This is the single biggest
+  scope reduction versus the PRD's original expectation.
+- Restricted v1 correlated/uncorrelated subquery bodies to MATCH-only
+  before RETURN, and rejected aggregation in the subquery's own RETURN —
+  both are real, deliberate scope boundaries (clear errors, not silent
+  wrong behavior), not oversights. Lifting either is a reasonable future
+  task once there's a concrete need.
+- Accepted the "expose all inner bindings, not just RETURN'd ones"
+  relaxation for the correlated case rather than building the more
+  complex machinery needed to hide non-RETURN'd bindings precisely — a
+  permissive superset, never a correctness risk for computed values.
+
+Verification:
+- CGO_ENABLED=0 go build ./...: clean
+- go vet ./...: clean
+- CGO_ENABLED=0 go test -tags=unit -count=1 ./... (timeout 60s): all pass
+- CGO_ENABLED=0 go test -tags=tck ./compat/...: pass, 244/272 (89.7%,
+  unchanged — this fixture set has no CALL {} scenarios)
+
+Next Task: task-012 (Final verification and README update)

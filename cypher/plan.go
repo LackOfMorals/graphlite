@@ -591,3 +591,34 @@ type UnwindPlan struct {
 }
 
 func (*UnwindPlan) planNode() {}
+
+// CallSubqueryPlan represents an UNCORRELATED "CALL { ... }" subquery
+// (no leading importing WITH). Since it has no visibility into the outer
+// query, it is planned and translated as a fully independent nested SELECT,
+// then CROSS JOINed onto Source — the same pattern UnwindPlan uses for
+// json_each(), except the row source here is an arbitrary nested query
+// instead of a table-valued function.
+//
+// A CORRELATED CALL {} subquery (has a leading importing WITH) has no
+// corresponding plan node at all: because Cypher already lets a later MATCH
+// clause re-reference a variable bound by an earlier one (reusing the same
+// SQL alias, not a fresh join), a correlated subquery's MATCH/WHERE clauses
+// are planned directly against the outer scope's imported bindings and
+// spliced into the outer query's own match-plan chain by planQuery — they
+// end up as ordinary MatchNodePlan/MatchRelPlan/FilterPlan nodes,
+// indistinguishable from a MATCH clause written directly in the outer
+// query. See planCallSubqueryClause.
+type CallSubqueryPlan struct {
+	// Source is the sub-plan whose rows this subquery's result set is
+	// CROSS JOINed onto (nil when CALL {} is the query's first clause).
+	Source LogicalPlan
+	// Inner is the subquery's own fully-planned logical plan (a *ReturnPlan).
+	Inner LogicalPlan
+	// InnerScope is the independent scope Inner was planned against — needed
+	// to translate Inner's variable references correctly.
+	InnerScope *BindingScope
+	// SQLAlias is the SQL alias assigned to the nested SELECT (e.g. "_sub0").
+	SQLAlias string
+}
+
+func (*CallSubqueryPlan) planNode() {}

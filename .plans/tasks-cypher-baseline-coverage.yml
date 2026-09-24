@@ -209,7 +209,23 @@ tasks:
       the named outer Bindings into a fresh inner scope, plan the remaining
       inner clauses against it, and produce a CallSubqueryPlan recording
       whether it is correlated and which variables it imports.
-    status: pending
+    status: completed
+    completed_at: "2026-09-24T00:00:00Z"
+    resolution_note: |
+      Discovered mid-implementation that a CORRELATED subquery needs no
+      CallSubqueryPlan node at all: graphlite's planner already lets a
+      later MATCH clause re-reference a variable an earlier MATCH bound
+      (reusing its existing SQL alias, not a fresh join — confirmed
+      empirically with "MATCH (n) MATCH (n)-[:X]->(m) RETURN n,m" before
+      writing any new code). So a correlated CALL {} body's MATCH/WHERE
+      clauses are planned against a scope pre-seeded with only the
+      imported Bindings, then spliced directly into the outer query's own
+      matchPlans/filterPred accumulation in planQuery's switch — they
+      become ordinary MatchNodePlan/MatchRelPlan/FilterPlan nodes,
+      indistinguishable from MATCH clauses written directly in the outer
+      query. CallSubqueryPlan exists only for the UNCORRELATED case (see
+      task-011's resolution_note) — v1 needed no new execution engine at
+      all, contrary to the PRD's expectation. See the progress log.
     dependencies:
       - task-009
     acceptance_criteria:
@@ -239,7 +255,26 @@ tasks:
           of the inner query (as anchor conditions — e.g. "WHERE n0.id = ?"
           for an imported node/rel variable) and stitch the fanned-out
           results back onto that outer row in Go.
-    status: pending
+    status: completed
+    completed_at: "2026-09-24T00:00:00Z"
+    resolution_note: |
+      No Go-level per-outer-row execution loop was needed — task-010's
+      resolution_note explains why: a correlated subquery splices into the
+      outer query's own matchPlans as ordinary plan nodes, so it is already
+      part of the single outer SQL statement with no separate execution
+      path at all. CallSubqueryPlan (added to cypher/plan.go) exists solely
+      for the uncorrelated case: buildFromClauseForCallSubquery in
+      sql/translator.go translates its Inner plan independently (own
+      scope, own alias space) into a nested SELECT and CROSS JOINs it onto
+      Source, exactly mirroring buildFromClauseForUnwind's "primary FROM
+      table when there's no Source, else CROSS JOIN" pattern for
+      json_each(). "CALL {" was removed from the TCK skip list, but this
+      local TCK fixture set turns out to contain zero scenarios using CALL
+      {} at all (confirmed via grep) — a pre-existing gap in the fixture
+      set's coverage, not a defect in this implementation. See the
+      progress log for the 6 end-to-end tests covering both execution
+      paths, strict scoping, shadowing, and the two v1 restrictions
+      (aggregation rejected, undefined imports rejected).
     dependencies:
       - task-010
     acceptance_criteria:

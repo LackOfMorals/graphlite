@@ -23,10 +23,11 @@ func Plan(q *Query, scope *BindingScope) (LogicalPlan, error) {
 // aliasCounter hands out monotonically-increasing SQL table aliases to avoid
 // collisions when the same table appears multiple times in a JOIN.
 type aliasCounter struct {
-	nodeCount   int
-	relCount    int
-	anonCount   int
-	unwindCount int
+	nodeCount     int
+	relCount      int
+	anonCount     int
+	unwindCount   int
+	subqueryCount int
 }
 
 func (a *aliasCounter) nextNode() string {
@@ -46,6 +47,14 @@ func (a *aliasCounter) nextRel() string {
 func (a *aliasCounter) nextUnwind() string {
 	alias := fmt.Sprintf("_uw%d", a.unwindCount)
 	a.unwindCount++
+	return alias
+}
+
+// nextSubquery returns a unique SQL alias for an uncorrelated CALL {}
+// subquery's nested SELECT (e.g. "_sub0").
+func (a *aliasCounter) nextSubquery() string {
+	alias := fmt.Sprintf("_sub%d", a.subqueryCount)
+	a.subqueryCount++
 	return alias
 }
 
@@ -140,6 +149,31 @@ func planQuery(q *Query, scope *BindingScope) (LogicalPlan, error) {
 			}
 			up.Source = base
 			base = up
+
+		case *CallSubqueryClause:
+			correlated, spliceMatches, spliceWhere, uncorrelatedPlan, err := planCallSubqueryClause(c, scope, ac)
+			if err != nil {
+				return nil, err
+			}
+			if correlated {
+				// Splices directly into the ordinary match-plan chain — see
+				// CallSubqueryPlan's doc comment for why no plan node is needed.
+				matchPlans = append(matchPlans, spliceMatches...)
+				if spliceWhere != nil {
+					if filterPred == nil {
+						filterPred = spliceWhere
+					} else {
+						filterPred = &BoolExpr{Left: filterPred, Op: "AND", Right: spliceWhere}
+					}
+				}
+			} else {
+				base, matchPlans, filterPred, err = flushMatchesIntoBase(base, matchPlans, filterPred)
+				if err != nil {
+					return nil, err
+				}
+				uncorrelatedPlan.Source = base
+				base = uncorrelatedPlan
+			}
 
 		case *ReturnClause:
 			rp, err := planReturnClause(c, scope)
@@ -624,6 +658,209 @@ func planUnwindClause(uc *UnwindClause, scope *BindingScope, ac *aliasCounter) (
 		Variable: uc.Variable,
 		SQLAlias: alias,
 	}, nil
+}
+
+// ─── CALL {} subquery planning ────────────────────────────────────────────────
+
+// planCallSubqueryClause plans a CALL {} subquery under strict openCypher
+// scoping: the subquery sees NOTHING from the outer scope unless it begins
+// with an "importing WITH" naming exactly which outer variables to bring in
+// (e.g. "WITH n, m" — bare variable references only, no alias, no
+// expression, no aggregation; see isPureImportWith). Without one, the
+// subquery is planned against a completely fresh, unrelated scope and
+// alias space (uncorrelated).
+//
+// v1 scope: the subquery body (everything between the optional importing
+// WITH and the mandatory trailing RETURN) must consist only of MATCH
+// clauses, and the RETURN must not aggregate — see the two body-clause and
+// RETURN-item checks below. Both restrictions exist because correlating an
+// aggregating subquery correctly requires coordinating an outer GROUP BY
+// with the subquery's own collapse-per-outer-row semantics, a materially
+// harder problem deferred to a future task.
+//
+// Returns exactly one of (correlated, matchPlans, where) or (uncorrelated
+// *CallSubqueryPlan) depending on whether an importing WITH was found.
+func planCallSubqueryClause(csc *CallSubqueryClause, outerScope *BindingScope, ac *aliasCounter) (correlated bool, matchPlans []LogicalPlan, where Expr, uncorrelatedPlan *CallSubqueryPlan, err error) {
+	clauses := csc.Inner.Clauses
+	importedVars, hasImport, err := extractImportedVars(clauses, outerScope)
+	if err != nil {
+		return false, nil, nil, nil, err
+	}
+	if hasImport {
+		clauses = clauses[1:]
+	}
+
+	if len(clauses) == 0 {
+		return false, nil, nil, nil, fmt.Errorf("cypher: CALL {} subquery must contain at least one clause")
+	}
+	retClause, ok := clauses[len(clauses)-1].(*ReturnClause)
+	if !ok {
+		return false, nil, nil, nil, fmt.Errorf("cypher: CALL {} subquery must end in a RETURN clause")
+	}
+	bodyClauses := clauses[:len(clauses)-1]
+	for _, bc := range bodyClauses {
+		if _, ok := bc.(*MatchClause); !ok {
+			return false, nil, nil, nil, fmt.Errorf("cypher: CALL {} subqueries support only MATCH clauses before RETURN (got %T)", bc)
+		}
+	}
+	for _, item := range retClause.Items {
+		if _, isAgg := item.Expr.(*AggCallExpr); isAgg {
+			return false, nil, nil, nil, fmt.Errorf("cypher: aggregation in a CALL {} subquery's RETURN is not yet supported")
+		}
+	}
+	// Every RETURN item needs a name to expose to the outer scope: either an
+	// explicit alias or (for a bare variable) its own name.
+	itemNames := make([]string, len(retClause.Items))
+	for i, item := range retClause.Items {
+		name := item.Alias
+		if name == "" {
+			ve, ok := item.Expr.(*VarExpr)
+			if !ok {
+				return false, nil, nil, nil, fmt.Errorf("cypher: CALL {} subquery RETURN item %d must have an alias unless it is a bare variable", i)
+			}
+			name = ve.Name
+		}
+		itemNames[i] = name
+	}
+
+	if hasImport {
+		innerScope := NewScope()
+		for _, name := range importedVars {
+			b, _ := outerScope.Resolve(name) // presence already validated by extractImportedVars
+			innerScope.Bind(name, b)
+		}
+
+		var plans []LogicalPlan
+		var pred Expr
+		for _, bc := range bodyClauses {
+			mc := bc.(*MatchClause)
+			ps, w, err := planMatchClause(mc, innerScope, ac)
+			if err != nil {
+				return false, nil, nil, nil, err
+			}
+			plans = append(plans, ps...)
+			if w != nil {
+				if pred == nil {
+					pred = w
+				} else {
+					pred = &BoolExpr{Left: pred, Op: "AND", Right: w}
+				}
+			}
+		}
+
+		// Expose every binding the subquery introduced (not just the RETURN'd
+		// ones) to the outer scope. Real openCypher hides everything except
+		// the RETURN'd names; doing that precisely here would require
+		// re-resolving each RETURN expression against a scope the outer
+		// translator has no access to. Exposing all inner bindings is a
+		// strictly more permissive superset — it never changes a computed
+		// VALUE, only (harmlessly) widens what the outer query can *reference*
+		// by name afterward.
+		for _, name := range innerScope.Local() {
+			outerScope.Bind(name, innerScope.MustResolve(name))
+		}
+		for i, item := range retClause.Items {
+			if ve, ok := item.Expr.(*VarExpr); ok {
+				b, _ := innerScope.Resolve(ve.Name)
+				outerScope.Bind(itemNames[i], b)
+			} else {
+				outerScope.Bind(itemNames[i], Binding{Column: itemNames[i], AggExpr: item.Expr})
+			}
+		}
+
+		return true, plans, pred, nil, nil
+	}
+
+	// Uncorrelated: plan fully independently, with a fresh scope AND a fresh
+	// alias space (this subquery becomes its own nested SELECT, so its
+	// aliases never need to avoid colliding with the outer query's).
+	innerScope := NewScope()
+	innerAC := &aliasCounter{}
+	var innerBase LogicalPlan
+	var innerMatchPlans []LogicalPlan
+	var innerFilter Expr
+	for _, bc := range bodyClauses {
+		mc := bc.(*MatchClause)
+		ps, w, err := planMatchClause(mc, innerScope, innerAC)
+		if err != nil {
+			return false, nil, nil, nil, err
+		}
+		innerMatchPlans = append(innerMatchPlans, ps...)
+		if w != nil {
+			if innerFilter == nil {
+				innerFilter = w
+			} else {
+				innerFilter = &BoolExpr{Left: innerFilter, Op: "AND", Right: w}
+			}
+		}
+	}
+	innerBase, _, _, err = flushMatchesIntoBase(innerBase, innerMatchPlans, innerFilter)
+	if err != nil {
+		return false, nil, nil, nil, err
+	}
+
+	innerReturn, err := planReturnClause(retClause, innerScope)
+	if err != nil {
+		return false, nil, nil, nil, err
+	}
+	innerReturn.Source = innerBase
+
+	subAlias := ac.nextSubquery()
+	for _, name := range itemNames {
+		outerScope.Bind(name, Binding{Alias: subAlias, Column: subAlias + "." + name})
+	}
+
+	return false, nil, nil, &CallSubqueryPlan{
+		Inner:      innerReturn,
+		InnerScope: innerScope,
+		SQLAlias:   subAlias,
+	}, nil
+}
+
+// isPureImportWith reports whether wc is an openCypher "importing WITH": a
+// bare list of outer variable names with no alias, expression, aggregation,
+// filtering, or ordering — e.g. "WITH n, m" but not "WITH n AS x",
+// "WITH count(n)", or "WITH n.prop".
+func isPureImportWith(wc *WithClause) bool {
+	if wc.Distinct || wc.Where != nil || len(wc.OrderBy) > 0 || wc.Skip != nil || wc.Limit != nil {
+		return false
+	}
+	if len(wc.Items) == 0 {
+		return false
+	}
+	for _, item := range wc.Items {
+		if item.Alias != "" {
+			return false
+		}
+		if _, ok := item.Expr.(*VarExpr); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// extractImportedVars checks whether clauses begins with an importing WITH
+// (per isPureImportWith) and, if so, validates that every imported name is
+// actually bound in outerScope and returns them in order. Returns
+// (nil, false, nil) when there is no importing WITH — an ordinary,
+// uncorrelated subquery, not an error.
+func extractImportedVars(clauses []Clause, outerScope *BindingScope) ([]string, bool, error) {
+	if len(clauses) == 0 {
+		return nil, false, nil
+	}
+	wc, ok := clauses[0].(*WithClause)
+	if !ok || !isPureImportWith(wc) {
+		return nil, false, nil
+	}
+	names := make([]string, 0, len(wc.Items))
+	for _, item := range wc.Items {
+		ve := item.Expr.(*VarExpr) // guaranteed by isPureImportWith
+		if _, found := outerScope.Resolve(ve.Name); !found {
+			return nil, false, fmt.Errorf("cypher: CALL {} imports undefined variable %q", ve.Name)
+		}
+		names = append(names, ve.Name)
+	}
+	return names, true, nil
 }
 
 // ─── CREATE clause planning ───────────────────────────────────────────────────

@@ -675,9 +675,49 @@ func (t *Translator) buildFromClause(source cypher.LogicalPlan, scope *cypher.Bi
 	case *cypher.UnwindPlan:
 		return t.buildFromClauseForUnwind(s, scope)
 
+	case *cypher.CallSubqueryPlan:
+		return t.buildFromClauseForCallSubquery(s, scope)
+
 	default:
 		return fromClause{}, fmt.Errorf("sql: unsupported source plan %T in FROM clause", source)
 	}
+}
+
+// buildFromClauseForCallSubquery handles an uncorrelated CallSubqueryPlan by
+// translating its Inner plan (against its own InnerScope) as a fully
+// independent nested SELECT, then CROSS JOINing it onto Source — the same
+// "primary FROM table when there's no Source, else CROSS JOIN" pattern
+// buildFromClauseForUnwind uses for json_each().
+//
+// A separate sub-Translator isolates the nested SELECT's own bind args
+// (appended to fc.joinArgs, matching the FROM/JOIN position it occupies in
+// the outer SQL text) from t.args, exactly like the FilterPlan/UNWIND
+// pattern elsewhere in this file.
+func (t *Translator) buildFromClauseForCallSubquery(csp *cypher.CallSubqueryPlan, scope *cypher.BindingScope) (fromClause, error) {
+	fc, err := t.buildFromClause(csp.Source, scope)
+	if err != nil {
+		return fromClause{}, err
+	}
+
+	sub := &Translator{dialect: t.dialect, maxPathHops: t.maxPathHops}
+	innerSQL, err := sub.translatePlan(csp.Inner, csp.InnerScope)
+	if err != nil {
+		return fromClause{}, fmt.Errorf("sql: CALL {} subquery: %w", err)
+	}
+
+	subTable := fmt.Sprintf("(%s) AS %s", innerSQL, csp.SQLAlias)
+	if fc.from == "" {
+		fc.from = subTable
+	} else {
+		crossJoin := "CROSS JOIN " + subTable
+		if fc.joins != "" {
+			fc.joins += " " + crossJoin
+		} else {
+			fc.joins = crossJoin
+		}
+	}
+	fc.joinArgs = append(fc.joinArgs, sub.args...)
+	return fc, nil
 }
 
 // buildFromClauseForUnwind handles an UnwindPlan by adding a json_each() row

@@ -917,3 +917,139 @@ func TestRunQuery_ScalarFunction_SizeDoesNotDuplicateParamBinding(t *testing.T) 
 		t.Errorf("n = %v, want 5", n)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALL {} subqueries
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestRunQuery_CallSubquery_Uncorrelated(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+	_, err := db.RunQuery(ctx,
+		`CREATE (:Person {name: "Alice"}), (:Person {name: "Bob"}), (:Person {name: "Carol"})`,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("CREATE: %v", err)
+	}
+
+	qr, err := db.RunQuery(ctx, `CALL { MATCH (x:Person) RETURN x.name AS n } RETURN n ORDER BY n`, nil)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
+	recs, err := qr.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(recs) != 3 {
+		t.Fatalf("expected 3 records, got %d", len(recs))
+	}
+	want := []string{"Alice", "Bob", "Carol"}
+	for i, w := range want {
+		n, _ := recs[i].Get("n")
+		if n != w {
+			t.Errorf("record[%d].n = %v, want %v", i, n, w)
+		}
+	}
+}
+
+func TestRunQuery_CallSubquery_CorrelatedWithImport(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+	_, err := db.RunQuery(ctx,
+		`CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"}), (c:Person {name: "Carol"})`,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("CREATE: %v", err)
+	}
+
+	// Carol has no KNOWS relationship, so only Alice produces a row — the
+	// correlated subquery's MATCH inside CALL {} reuses n's own binding
+	// (same table row) rather than an independent fresh scan.
+	qr, err := db.RunQuery(ctx,
+		`MATCH (n:Person) CALL { WITH n MATCH (n)-[:KNOWS]->(m) RETURN m } RETURN n.name AS n, m.name AS m`,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
+	recs, err := qr.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+	n, _ := recs[0].Get("n")
+	m, _ := recs[0].Get("m")
+	if n != "Alice" || m != "Bob" {
+		t.Errorf("got n=%v m=%v, want n=Alice m=Bob", n, m)
+	}
+}
+
+func TestRunQuery_CallSubquery_StrictScoping_UnimportedVariableErrors(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+	_, err := db.RunQuery(ctx, `CREATE (:Person {name: "Alice"})`, nil)
+	if err != nil {
+		t.Fatalf("CREATE: %v", err)
+	}
+
+	// n.name inside the subquery, with no leading "WITH n" import and no
+	// local MATCH (n) inside the subquery re-introducing it: n must not be
+	// visible — this is the core strict-scoping requirement.
+	_, err = db.RunQuery(ctx, `MATCH (n:Person) CALL { RETURN n.name AS x } RETURN x`, nil)
+	if err == nil {
+		t.Error("expected an error for referencing an unimported outer variable inside CALL {}, got nil")
+	}
+}
+
+func TestRunQuery_CallSubquery_ShadowingIsIndependent(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+	_, err := db.RunQuery(ctx, `CREATE (:Person {name: "Alice"}), (:Dog {name: "Rex"})`, nil)
+	if err != nil {
+		t.Fatalf("CREATE: %v", err)
+	}
+
+	// An uncorrelated subquery re-using the name "n" for its own MATCH binds
+	// a completely independent "n" — not an error, and not the outer one.
+	qr, err := db.RunQuery(ctx,
+		`MATCH (n:Person {name: "Alice"}) CALL { MATCH (n:Dog) RETURN n.name AS dogname } RETURN n.name AS outerN, dogname`,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
+	recs, err := qr.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+	outerN, _ := recs[0].Get("outerN")
+	dogname, _ := recs[0].Get("dogname")
+	if outerN != "Alice" || dogname != "Rex" {
+		t.Errorf("got outerN=%v dogname=%v, want Alice/Rex", outerN, dogname)
+	}
+}
+
+func TestRunQuery_CallSubquery_AggregationRejected(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+	_, err := db.RunQuery(ctx, `MATCH (n) CALL { WITH n MATCH (n)--(m) RETURN count(m) AS c } RETURN c`, nil)
+	if err == nil {
+		t.Error("expected an error for aggregation inside a CALL {} subquery's RETURN, got nil")
+	}
+}
+
+func TestRunQuery_CallSubquery_ImportUndefinedVariableErrors(t *testing.T) {
+	ctx := context.Background()
+	db := openMemDB(t)
+	_, err := db.RunQuery(ctx, `CALL { WITH doesNotExist RETURN doesNotExist } RETURN doesNotExist`, nil)
+	if err == nil {
+		t.Error("expected an error for importing an undefined variable, got nil")
+	}
+}
