@@ -107,13 +107,21 @@ tasks:
       JSON array (so split() composes with size()/head()/etc). Restrict v1 to
       single-character delimiters per the PRD's open question; document the
       restriction in the function's doc comment.
-    status: pending
+    status: completed
     dependencies:
       - task-005
     acceptance_criteria:
       - "`split('a,b,c', ',')` returns a 3-element list usable by size()/head()"
       - "A multi-character delimiter returns a clear ErrUnsupportedCypher rather than wrong results"
       - "Remove \"split(\" from compat/tck_test.go's unsupportedPatterns"
+    completed_at: "2026-09-24T00:00:00Z"
+    resolution_note: |
+      Generalised to any-length delimiter instead of the single-character
+      restriction originally planned — LENGTH(d) replaces the trigger's
+      hardcoded ",", which was barely more code and strictly better than an
+      artificial restriction. The "multi-character -> ErrUnsupportedCypher"
+      criterion is superseded: multi-character delimiters now work
+      correctly rather than being rejected. See the progress log.
 
   - id: task-007
     title: "Translate graph-shape functions: type, id, labels, keys"

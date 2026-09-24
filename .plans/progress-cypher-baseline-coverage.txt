@@ -306,3 +306,83 @@ Verification:
 - CGO_ENABLED=0 go test -tags=tck ./compat/...: pass, 236/262 (90.1%)
 
 Next Task: task-006 (Implement split() via recursive-CTE string splitting)
+
+================================================================================
+TASK-006: Implement split() via recursive-CTE string splitting
+Date: 2026-09-24T00:00:00Z
+================================================================================
+
+Summary:
+Added a "split" case to sql/translator.go's scalarCallToSQL, generalising
+store/schema.go's node_labels-trigger recursive-CTE splitting pattern
+(INSTR/SUBSTR walking the string, base case + recursive step) from its
+hardcoded single-character "," to any-length delimiter via LENGTH(d).
+Empirically confirmed via a standalone script that this correctly handles
+both single-char (",") and multi-char ("::") delimiters before wiring it
+into the translator.
+
+Decision change from the PRD/task plan: the plan called for restricting v1
+to single-character delimiters with a clear ErrUnsupportedCypher for
+anything longer, anticipating that would be simpler. In practice,
+generalising was barely more code (one LENGTH(d) call site) and strictly
+better than an artificial restriction, so I generalised instead of
+restricting. Recorded as a resolution_note on task-006 rather than silently
+deviating from the written plan.
+
+Found and fixed one real hazard before it could ship: an empty delimiter
+would hang. INSTR(x, '') always returns 1 (an empty needle "matches" at
+the start), so the base algorithm would split off an empty piece every
+recursive step without ever shrinking the remainder — unbounded recursion,
+confirmed empirically. Guarded with "CASE WHEN d = '' THEN json_array(s)
+ELSE (<recursive CTE>) END", returning the whole string as a single-element
+array for an empty delimiter rather than hanging.
+
+Applied the same "evaluate the argument exactly once via a derived table"
+technique from task-005 (size()/toBoolean()) here too: split()'s string and
+delimiter arguments are each referenced many times inside the recursive
+CTE, so both are bound once via "FROM (SELECT %s AS s, %s AS d)" rather than
+having their compiled SQL (which may contain "?" placeholders) repeated
+verbatim, which would otherwise silently require the bind arg twice.
+
+Discovered while writing tests that a bare list-shaped RETURN value (e.g.
+split()'s JSON array result, or even a plain list literal like "RETURN
+[1,2,3]") comes back as its raw JSON-array TEXT in Go, not a decoded
+[]any — confirmed this is pre-existing behaviour (result.go's
+mapColumnValue only auto-decodes '{'-prefixed JSON, for Node/Relationship;
+'['-prefixed JSON arrays are left as-is), not something this task's split()
+work introduced or needs to fix. Adjusted test expectations to match this
+established contract and added a separate composability test
+(size(split(...))) to verify split()'s actual required behaviour — usable
+by other scalar functions within SQL — since that's what the PRD's
+acceptance criterion actually meant.
+
+Removed "split(" from compat/tck_test.go's unsupportedPatterns. No TCK
+scenario in the current suite exercises split(), so executed/pass counts
+are unchanged (262 executed, 236 passed, 90.1%) — the removal is still
+correct, just has no visible effect yet.
+
+Files Changed:
+- sql/translator.go (added "split" case to scalarCallToSQL)
+- driver_test.go (4 new tests: single-char delimiter, multi-char delimiter,
+  empty delimiter, composability with size())
+- compat/tck_test.go (removed "split(" from unsupportedPatterns)
+- .plans/tasks-cypher-baseline-coverage.yml (task-006 resolution_note
+  documenting the single-char -> any-length generalisation)
+
+Key Decisions:
+- Generalised to any-length delimiter rather than restricting to
+  single-character, per the resolution_note above.
+- Did not add JSON-array auto-decoding to mapColumnValue/Record — that's a
+  separate, bigger, pre-existing-scope feature (symmetric to '{' Node/Rel
+  decoding) with its own ambiguity questions (a legitimate string value
+  starting with '[' would need disambiguating), not part of this task.
+
+Verification:
+- CGO_ENABLED=0 go build ./...: clean
+- go vet ./...: clean
+- CGO_ENABLED=0 go test -tags=unit -count=1 ./... (timeout 60s, given the
+  recursion-hang risk that was under active investigation): all pass
+- CGO_ENABLED=0 go test -tags=tck ./compat/...: pass, 236/262 (90.1%,
+  unchanged — no scenario in this suite exercises split())
+
+Next Task: task-007 (Translate graph-shape functions: type, id, labels, keys)

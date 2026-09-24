@@ -755,6 +755,53 @@ func TestRunQuery_ScalarFunctions_StringAndMath(t *testing.T) {
 	}
 }
 
+func TestRunQuery_ScalarFunction_Split(t *testing.T) {
+	// A bare list-shaped RETURN value comes back as its raw JSON-array text
+	// today (this is pre-existing behaviour, not introduced by split() —
+	// "RETURN [1,2,3]" has the same shape). Decoding '['-prefixed strings
+	// into a Go []any at the Record boundary, symmetric to how mapColumnValue
+	// already decodes '{'-prefixed Node/Relationship JSON, is a separate,
+	// out-of-scope feature. split()'s own required composability (usable by
+	// size()/head()/etc *within* SQL) is exercised in the Composes test below.
+	db := openMemDB(t)
+
+	cases := []struct {
+		query string
+		want  string
+	}{
+		{`RETURN split('a,b,c', ',')`, `["a","b","c"]`},
+		{`RETURN split('a::b::c', '::')`, `["a","b","c"]`},
+		{`RETURN split('onlyonepiece', ',')`, `["onlyonepiece"]`},
+	}
+	for _, c := range cases {
+		t.Run(c.query, func(t *testing.T) {
+			got := mustSingleValue(t, db, c.query)
+			if got != c.want {
+				t.Errorf("got %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestRunQuery_ScalarFunction_SplitEmptyDelimiter(t *testing.T) {
+	// An empty delimiter must not hang (INSTR(x, '') always matches at
+	// position 1, which would otherwise recurse forever) — it returns the
+	// whole string as a single-element list.
+	db := openMemDB(t)
+	got := mustSingleValue(t, db, `RETURN split('abc', '')`)
+	if got != `["abc"]` {
+		t.Errorf("got %v, want %v", got, `["abc"]`)
+	}
+}
+
+func TestRunQuery_ScalarFunction_SplitComposesWithSize(t *testing.T) {
+	db := openMemDB(t)
+	got := mustSingleValue(t, db, `RETURN size(split('a,b,c', ','))`)
+	if got != int64(3) {
+		t.Errorf("got %v, want 3", got)
+	}
+}
+
 func TestRunQuery_ScalarFunction_SizeDoesNotDuplicateParamBinding(t *testing.T) {
 	// Regression test: size() references its argument's compiled SQL twice
 	// (json_type(v) and json_array_length(v)/LENGTH(v)) inside a derived

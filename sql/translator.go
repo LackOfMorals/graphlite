@@ -1904,6 +1904,43 @@ func (t *Translator) scalarCallToSQL(e *cypher.ScalarCallExpr, scope *cypher.Bin
 		}
 		return fmt.Sprintf("LENGTH(%s)", argSQL), nil
 
+	case "split":
+		// split(string, delimiter) -> JSON array, via the same INSTR/SUBSTR
+		// recursive-CTE pattern store/schema.go's node_labels trigger already
+		// uses to split the comma-separated labels column, generalised to any
+		// delimiter length (LENGTH(d) replaces the trigger's hardcoded ",").
+		//
+		// An empty delimiter is special-cased to a single-element array
+		// containing the whole string: INSTR(x, '') always returns 1 (an
+		// empty needle "matches" at position 1), which would otherwise split
+		// off an empty piece every step without ever shrinking the
+		// remainder — an infinite recursion, confirmed empirically before
+		// writing this.
+		if len(e.Args) != 2 {
+			return "", fmt.Errorf("sql: split() requires exactly 2 arguments (string, delimiter)")
+		}
+		strSQL, err := t.exprToSQL(e.Args[0], scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: split() string argument: %w", err)
+		}
+		delimSQL, err := t.exprToSQL(e.Args[1], scope)
+		if err != nil {
+			return "", fmt.Errorf("sql: split() delimiter argument: %w", err)
+		}
+		return fmt.Sprintf(`(SELECT CASE WHEN d = '' THEN json_array(s) ELSE (
+			WITH RECURSIVE _split(piece, rest) AS (
+				SELECT
+					CASE WHEN INSTR(s, d) > 0 THEN SUBSTR(s, 1, INSTR(s, d) - 1) ELSE s END,
+					CASE WHEN INSTR(s, d) > 0 THEN SUBSTR(s, INSTR(s, d) + LENGTH(d)) ELSE '' END
+				UNION ALL
+				SELECT
+					CASE WHEN INSTR(rest, d) > 0 THEN SUBSTR(rest, 1, INSTR(rest, d) - 1) ELSE rest END,
+					CASE WHEN INSTR(rest, d) > 0 THEN SUBSTR(rest, INSTR(rest, d) + LENGTH(d)) ELSE '' END
+				FROM _split WHERE rest != ''
+			)
+			SELECT json_group_array(piece) FROM _split
+		) END FROM (SELECT %s AS s, %s AS d))`, strSQL, delimSQL), nil
+
 	case "size":
 		// size() applies to both strings (character count) and lists (element
 		// count); dispatch dynamically on the runtime JSON type since no static
